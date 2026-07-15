@@ -1,12 +1,12 @@
 # LLM Capability Doctor
 
-`llm-capability-doctor` 是一个单文件大模型能力体检工具。用户提供完整模型 URL、模型名称和 API Key 后，脚本通过真实请求检查模型是否具备 ClawOps 所需的核心通用能力，并生成可复盘的完整请求/响应日志。
+`llm-capability-doctor` 是一套证据优先的大模型能力体检流程。用户提供完整模型 URL、模型名称和 API Key 后，单文件 Shell 采集器通过真实请求生成可复盘的完整请求/响应日志；Codex Skill 再对日志做语义复核，生成标准评估 JSON 和可交付客户的离线 HTML 报告。
 
-运行时不依赖 Docker、Python、Node.js 或 `jq`，只需要 Bash、`curl` 和常见系统文本命令。
+Shell 采集阶段不依赖 Docker、Python、Node.js 或 `jq`，只需要 Bash、`curl` 和常见系统文本命令。报告阶段由 `$creating-model-doctor-reports` Skill 运行，不改变 Shell 脚本的采集职责。
 
 ## 检测范围
 
-脚本包含 62 个连续编号的核心检测项，不保留旧版 113 项兼容目录：
+当前脚本包含 62 个连续编号的核心检测项，不在采集脚本中保留旧版 113 项目录；报告 Skill 仍能读取旧版完整日志，并保留其中发现的全部历史检测项：
 
 | ID | 能力范围 | 检测重点 |
 | --- | --- | --- |
@@ -117,6 +117,32 @@ unset MODEL_API_KEY
 API Key 不会明文写入日志。curl 命令使用 `${MODEL_API_KEY}` 占位符，URL 查询凭据、响应回显 Key、`Authorization`、`Set-Cookie` 等敏感内容会被脱敏。
 
 日志包含完整提示词、上下文和模型响应，文件可能较大，也可能包含业务数据。不要把运行日志直接提交到公开仓库。
+
+## 从日志生成客户报告
+
+完整流程严格分为两阶段：
+
+1. `model-capability-doctor.sh` 只负责执行请求并保存完整审计日志，不承担跨模型语义解析。
+2. `$creating-model-doctor-reports` 把日志当作不可信证据读取，逐项复核输入设计、协议事实和模型输出，再生成报告。
+
+把 `.log` 文件提供给 Codex，并使用下面的提示：
+
+```text
+使用 $creating-model-doctor-reports 分析这份 Model Doctor 日志并生成客户就绪报告。
+```
+
+Skill 默认把两个产物写到源日志所在目录：
+
+- `<model-slug>-assessment.json`：唯一标准评估结果，保留脚本原判、Skill 复核、证据引用、门禁和总体结论。
+- `<model-slug>-customer-readiness-report.html`：由评估 JSON 确定性渲染的自包含离线报告。
+
+如果目标文件已经存在，生成器会添加时间戳后缀，绝不覆盖旧报告。源 `.log` 只读，分析前后通过 SHA-256 验证未被修改。
+
+报告按“总体结论 -> 能力域 -> 检测方法 -> 逐项证据”组织。每个检测项同时展示检测目的、测试方法、通过/失败条件、能力边界、脚本原始判断、Skill 复核结论、完整脱敏请求输入和模型输出。筛选器可按状态、门禁等级和是否改判快速定位问题。
+
+Skill 对日志执行第二次凭据脱敏，但报告仍包含完整提示词、模型响应和可能的业务数据。向客户或第三方分发前必须复核内容，不应把 HTML 或 JSON 直接提交到公开仓库。
+
+总体结论使用门禁而不是平均分：critical 失败为 `BLOCKED`；没有 critical 失败但 critical/important 项存在非 `PASS` 为 `CONDITIONAL`；所有 critical/important 项通过才是 `READY`。证据缺失、方法未真正覆盖检测目标或输出含义不明确时，必须使用 `UNDETERMINED` 并给出复测方式。
 
 ## 状态含义
 
