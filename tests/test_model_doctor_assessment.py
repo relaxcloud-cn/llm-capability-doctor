@@ -1,4 +1,7 @@
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -6,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "skills" / "creating-model-doctor-reports" / "scripts"
+CLI = SCRIPT_DIR / "model_doctor_report.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "model-doctor"
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -134,6 +138,37 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         errors = validate_assessment(tampered)
 
         self.assertTrue(any("counts" in error for error in errors))
+
+
+class ModelDoctorCliAssessmentTests(unittest.TestCase):
+    def test_validate_command_distinguishes_valid_and_invalid_reviews(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            parsed_path = directory / "parsed.json"
+            reviews_path = directory / "reviews.json"
+            parsed_path.write_text(json.dumps(parse_log(FIXTURES / "minimal.log")), encoding="utf-8")
+            reviews_path.write_text(json.dumps({"001": valid_review()}), encoding="utf-8")
+
+            valid = subprocess.run(
+                [sys.executable, str(CLI), "validate", str(parsed_path), str(reviews_path)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            self.assertIn("valid", valid.stdout.lower())
+
+            reviews_path.write_text("{}", encoding="utf-8")
+            invalid = subprocess.run(
+                [sys.executable, str(CLI), "validate", str(parsed_path), str(reviews_path)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(invalid.returncode, 2)
+            self.assertIn("001", invalid.stderr)
 
 
 if __name__ == "__main__":

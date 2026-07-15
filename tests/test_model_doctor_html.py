@@ -1,5 +1,8 @@
+import json
 import re
+import subprocess
 import sys
+import tempfile
 import unittest
 from copy import deepcopy
 from pathlib import Path
@@ -9,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / "skills" / "creating-model-doctor-reports"
 SCRIPT_DIR = SKILL_ROOT / "scripts"
 ASSET_DIR = SKILL_ROOT / "assets"
+CLI = SCRIPT_DIR / "model_doctor_report.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "model-doctor"
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -121,6 +125,49 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         render_report(value, ASSET_DIR)
 
         self.assertEqual(value, before)
+
+
+class ModelDoctorCliHtmlTests(unittest.TestCase):
+    def test_render_command_writes_assessment_and_html_without_overwriting(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            parsed_path = directory / "parsed.json"
+            reviews_path = directory / "reviews.json"
+            assessment_path = directory / "assessment.json"
+            html_path = directory / "customer-readiness-report.html"
+            parsed_path.write_text(json.dumps(parse_log(FIXTURES / "minimal.log")), encoding="utf-8")
+            reviews_path.write_text(json.dumps({"001": review()}), encoding="utf-8")
+            assessment_path.write_text("old assessment", encoding="utf-8")
+            html_path.write_text("old report", encoding="utf-8")
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "render",
+                    str(parsed_path),
+                    str(reviews_path),
+                    "--assessment",
+                    str(assessment_path),
+                    "--html",
+                    str(html_path),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(assessment_path.read_text(encoding="utf-8"), "old assessment")
+            self.assertEqual(html_path.read_text(encoding="utf-8"), "old report")
+            generated_paths = [Path(line) for line in result.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(generated_paths), 2)
+            self.assertTrue(all(path.is_absolute() and path.exists() for path in generated_paths))
+            generated_assessment = next(path for path in generated_paths if path.suffix == ".json")
+            generated_html = next(path for path in generated_paths if path.suffix == ".html")
+            self.assertEqual(json.loads(generated_assessment.read_text(encoding="utf-8"))["overall"]["verdict"], "READY")
+            self.assertIn("完整输入输出", generated_html.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

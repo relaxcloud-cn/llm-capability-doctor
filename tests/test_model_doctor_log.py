@@ -1,11 +1,15 @@
 import hashlib
+import json
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_DIR = ROOT / "skills" / "creating-model-doctor-reports" / "scripts"
+CLI = SCRIPT_DIR / "model_doctor_report.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "model-doctor"
 sys.path.insert(0, str(SCRIPT_DIR))
 
@@ -73,6 +77,54 @@ class ModelDoctorLogTests(unittest.TestCase):
 
         for secret in ("query-secret", "header-secret", "cookie-secret", "json-secret"):
             self.assertNotIn(secret, serialized)
+
+
+class ModelDoctorCliLogTests(unittest.TestCase):
+    def run_cli(self, *arguments):
+        return subprocess.run(
+            [sys.executable, str(CLI), *map(str, arguments)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def test_parse_summary_and_packet_commands(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parsed_path = Path(temporary_directory) / "parsed.json"
+            result = self.run_cli("parse", FIXTURES / "mixed.log", "--output", parsed_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(str(parsed_path.resolve()), result.stdout)
+            parsed = json.loads(parsed_path.read_text(encoding="utf-8"))
+            self.assertEqual(set(parsed["tests"]), {"047", "999"})
+
+            summary = self.run_cli("summary", parsed_path)
+            self.assertEqual(summary.returncode, 0, summary.stderr)
+            summary_value = json.loads(summary.stdout)
+            self.assertEqual(summary_value["testCount"], 2)
+            self.assertEqual(summary_value["requestCount"], 3)
+            self.assertNotIn("REQUEST BODY", summary.stdout)
+
+            packet = self.run_cli("packet", parsed_path, "--ids", "047,999")
+            self.assertEqual(packet.returncode, 0, packet.stderr)
+            packet_value = json.loads(packet.stdout)
+            self.assertEqual(set(packet_value["packets"]), {"047", "999"})
+            self.assertEqual(len(packet_value["packets"]["047"]["requests"]), 2)
+
+    def test_parse_does_not_overwrite_existing_output(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parsed_path = Path(temporary_directory) / "parsed.json"
+            parsed_path.write_text("keep me", encoding="utf-8")
+
+            result = self.run_cli("parse", FIXTURES / "minimal.log", "--output", parsed_path)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(parsed_path.read_text(encoding="utf-8"), "keep me")
+            generated_path = Path(result.stdout.strip())
+            self.assertNotEqual(generated_path, parsed_path)
+            self.assertRegex(generated_path.name, r"^parsed-\d{8}-\d{6}(?:-\d+)?\.json$")
+            self.assertTrue(generated_path.exists())
 
 
 if __name__ == "__main__":
