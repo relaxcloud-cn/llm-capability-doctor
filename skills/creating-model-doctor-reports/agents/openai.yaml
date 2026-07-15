@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Doctor Report"
+  short_description: "分析模型体检审计日志并生成可复核的客户模型就绪度报告"
+  default_prompt: "使用 $creating-model-doctor-reports 分析这份 Model Doctor 日志并生成客户就绪报告。"
