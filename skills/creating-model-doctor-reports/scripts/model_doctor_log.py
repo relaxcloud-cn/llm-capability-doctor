@@ -200,6 +200,19 @@ def _link_exact_response_requests(
     return linked
 
 
+def _warn_on_count_mismatch(
+    warnings: List[str], label: str, declared: object, discovered: int
+) -> None:
+    try:
+        declared_count = int(str(declared))
+    except (TypeError, ValueError):
+        return
+    if declared_count != discovered:
+        warnings.append(
+            f"Log declared {label}={declared_count} but parser discovered {discovered}"
+        )
+
+
 def parse_log(path: Path) -> Dict[str, object]:
     """Parse one audit log without changing it or retaining its absolute path."""
 
@@ -242,9 +255,10 @@ def parse_log(path: Path) -> Dict[str, object]:
         ]
         tests[identifier] = metadata
 
-    compatibility_links = _link_exact_response_requests(tests, requests)
     script_version = run.get("script_version", "")
+    compatibility_links = 0
     if script_version.startswith("0.1"):
+        compatibility_links = _link_exact_response_requests(tests, requests)
         declared_count = run.get("test_count", "unknown")
         warnings.append(
             "Legacy Model Doctor "
@@ -255,6 +269,10 @@ def parse_log(path: Path) -> Dict[str, object]:
     summary = _run_summary(text)
     if not summary:
         warnings.append("Missing RUN SUMMARY; counts must be reconstructed")
+    _warn_on_count_mismatch(warnings, "test_count", run.get("test_count"), len(tests))
+    _warn_on_count_mismatch(
+        warnings, "request_count", summary.get("request_count"), len(requests)
+    )
 
     return {
         "schemaVersion": PARSED_SCHEMA_VERSION,
