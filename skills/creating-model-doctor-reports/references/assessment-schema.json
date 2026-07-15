@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "llm-capability-doctor.assessment.v1",
+  "title": "LLM Capability Doctor Assessment",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "source",
+    "run",
+    "overall",
+    "categories",
+    "tests"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": "llm-capability-doctor.assessment.v1"
+    },
+    "generatedAt": {
+      "type": "string"
+    },
+    "source": {
+      "type": "object",
+      "required": ["fileName", "size", "sha256"]
+    },
+    "run": {
+      "type": "object"
+    },
+    "overall": {
+      "type": "object",
+      "required": ["verdict", "counts", "blockers", "conditions"],
+      "properties": {
+        "verdict": {
+          "enum": ["READY", "CONDITIONAL", "BLOCKED"]
+        }
+      }
+    },
+    "categories": {
+      "type": "array"
+    },
+    "tests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "testId",
+          "category",
+          "name",
+          "gateLevel",
+          "originalStatus",
+          "reviewedStatus",
+          "confidence",
+          "conclusion",
+          "logic",
+          "evidenceRefs",
+          "limitations",
+          "retestInstructions",
+          "requests"
+        ],
+        "properties": {
+          "gateLevel": {
+            "enum": ["critical", "important", "observation"]
+          },
+          "reviewedStatus": {
+            "enum": ["PASS", "FAIL", "UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"]
+          },
+          "confidence": {
+            "enum": ["high", "medium", "low"]
+          }
+        }
+      }
+    }
+  }
+}
