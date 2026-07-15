@@ -1,0 +1,88 @@
+========== MODEL DOCTOR RUN ==========
+run_id: MD-20260715-LEGACY-001
+script_version: 0.1.0
+started_at: 2026-07-15T10:00:00+0800
+url: https://legacy.example/v1/chat/completions
+model: legacy-model
+api_key: [REDACTED]
+test_count: 113
+
+========== REQUEST protocol-1 BEGIN ==========
+request_id: protocol-1
+started_at: 2026-07-15T10:00:00+0800
+completed_at: 2026-07-15T10:00:01+0800
+protocol: openai_chat
+auth_mode: bearer
+stream: 0
+
+----- REQUEST BODY BEGIN -----
+{"model":"legacy-model","messages":[{"role":"user","content":"Reply only MODEL_DOCTOR_PROTOCOL_OK"}]}
+----- REQUEST BODY END -----
+
+----- RESPONSE METRICS BEGIN -----
+curl_exit_code: 0
+http_status: 200
+time_total: 1.000000
+time_starttransfer: 0.900000
+size_download: 128
+----- RESPONSE METRICS END -----
+
+----- RESPONSE HEADERS BEGIN -----
+HTTP/2 200
+content-type: application/json
+----- RESPONSE HEADERS END -----
+
+----- CURL STDERR BEGIN -----
+----- CURL STDERR END -----
+
+----- RESPONSE BODY BEGIN -----
+{"model":"legacy-model","choices":[{"message":{"content":"MODEL_DOCTOR_PROTOCOL_OK"},"finish_reason":"stop"}]}
+----- RESPONSE BODY END -----
+========== REQUEST protocol-1 END ==========
+
+========== TEST-002 BEGIN ==========
+name: HTTP 成功状态
+category: 接口与协议
+completed_at: 2026-07-15T10:00:01+0800
+duration_ms: 1000
+protocol: openai_chat
+http_status: 200
+curl_exit_code: 0
+result: PASS
+expected: HTTP 2xx
+detected: HTTP 200
+conclusion: 基础请求成功状态正常
+
+----- RAW RESPONSE BEGIN -----
+{"model":"legacy-model","choices":[{"message":{"content":"MODEL_DOCTOR_PROTOCOL_OK"},"finish_reason":"stop"}]}
+----- RAW RESPONSE END -----
+========== TEST-002 END ==========
+
+========== TEST-113 BEGIN ==========
+name: 调查阶段与证据引用完整性
+category: 长输出结果
+completed_at: 2026-07-15T10:00:31+0800
+duration_ms: 30000
+protocol: openai_chat
+http_status: 000
+curl_exit_code: 28
+result: ERROR
+expected: complete result JSON
+detected: no response
+conclusion: 请求超时
+
+----- RAW RESPONSE BEGIN -----
+----- RAW RESPONSE END -----
+========== TEST-113 END ==========
+
+========== RUN SUMMARY ==========
+completed_at: 2026-07-15T10:00:31+0800
+duration_seconds: 31
+request_count: 1
+pass: 1
+fail: 0
+unsupported: 0
+undetermined: 0
+skipped: 0
+error: 1
+========== END ==========

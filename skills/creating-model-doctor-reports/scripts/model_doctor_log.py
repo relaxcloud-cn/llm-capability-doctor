@@ -176,6 +176,30 @@ def _sum_usage(response_bodies: Iterable[str]) -> Dict[str, int]:
     return totals
 
 
+def _link_exact_response_requests(
+    tests: Dict[str, Dict[str, object]],
+    requests: Dict[str, Dict[str, object]],
+) -> int:
+    """Link legacy shared requests only when non-empty response evidence is unique."""
+
+    response_index: Dict[str, List[str]] = {}
+    for request_id, request in requests.items():
+        response_body = str(request.get("responseBody", "")).strip()
+        if response_body:
+            response_index.setdefault(response_body, []).append(request_id)
+
+    linked = 0
+    for test in tests.values():
+        if test.get("requestRefs"):
+            continue
+        raw_response = str(test.get("rawResponse", "")).strip()
+        candidates = response_index.get(raw_response, []) if raw_response else []
+        if len(candidates) == 1:
+            test["requestRefs"] = candidates.copy()
+            linked += 1
+    return linked
+
+
 def parse_log(path: Path) -> Dict[str, object]:
     """Parse one audit log without changing it or retaining its absolute path."""
 
@@ -217,6 +241,16 @@ def parse_log(path: Path) -> Dict[str, object]:
             if _request_test_id(request_id) == identifier
         ]
         tests[identifier] = metadata
+
+    compatibility_links = _link_exact_response_requests(tests, requests)
+    script_version = run.get("script_version", "")
+    if script_version.startswith("0.1"):
+        declared_count = run.get("test_count", "unknown")
+        warnings.append(
+            "Legacy Model Doctor "
+            f"v{script_version} log detected (declared {declared_count} tests); "
+            f"preserved all discovered tests and added {compatibility_links} exact-response evidence links"
+        )
 
     summary = _run_summary(text)
     if not summary:
