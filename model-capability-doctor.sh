@@ -16,7 +16,7 @@ Required:
 Options:
   --api-key KEY       API key. Prefer MODEL_API_KEY to avoid shell history.
   --log-file PATH     Audit log path. Defaults to a timestamped file in the current directory.
-  --timeout SECONDS   Per-request timeout. Defaults to 30.
+  --timeout SECONDS   Per-request timeout. Defaults to 90.
   --only IDS          Run comma-separated test IDs, for example 001,067.
   --list-tests        Print the 62-item core catalog and exit.
   -h, --help          Show this help.
@@ -1528,7 +1528,7 @@ URL=""
 MODEL=""
 API_KEY="${MODEL_API_KEY:-}"
 LOG_FILE=""
-TIMEOUT_SECONDS="30"
+TIMEOUT_SECONDS="90"
 ONLY_IDS=""
 LIST_TESTS=0
 
