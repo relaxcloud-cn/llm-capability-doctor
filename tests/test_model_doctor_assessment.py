@@ -138,16 +138,29 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
     def test_current_and_historical_62_item_versions_share_the_gate_mapping(self):
         mappings = getattr(assessment_module, "CATALOG_GATE_LEVELS", {})
 
+        self.assertEqual(mappings["0.6.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
         self.assertEqual(mappings["0.5.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
         self.assertEqual(mappings["0.4.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
 
     def test_validate_reviews_rejects_wrong_gate_for_current_catalog(self):
-        self.parsed["run"]["script_version"] = "0.4.0"
+        self.parsed["run"]["script_version"] = "0.6.0"
         review = valid_review(gate="observation")
 
         errors = validate_reviews(self.parsed, {"001": review})
 
         self.assertTrue(any("001" in error and "critical" in error for error in errors))
+
+    def test_validate_reviews_rejects_wrong_gate_for_historical_62_item_catalogs(self):
+        for version in ("0.5.0", "0.4.0"):
+            with self.subTest(version=version):
+                self.parsed["run"]["script_version"] = version
+                review = valid_review(gate="observation")
+
+                errors = validate_reviews(self.parsed, {"001": review})
+
+                self.assertTrue(
+                    any("001" in error and "critical" in error for error in errors)
+                )
 
     def test_validate_reviews_rejects_wrong_gate_for_historical_v0_3_catalog(self):
         self.parsed["run"]["script_version"] = "0.3.0"
@@ -156,6 +169,35 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         errors = validate_reviews(self.parsed, {"001": review})
 
         self.assertTrue(any("001" in error and "critical" in error for error in errors))
+
+    def test_concurrency_ladder_uses_detected_summary_as_raw_observation(self):
+        summary = (
+            "c4:success=4/4,p50_ms=100,p95_ms=140,max_ms=140,rate_limited=0;"
+            "c8:success=8/8,p50_ms=120,p95_ms=190,max_ms=190,rate_limited=0;"
+            "c16:success=16/16,p50_ms=150,p95_ms=240,max_ms=250,rate_limited=0;"
+            "c32:success=32/32,p50_ms=210,p95_ms=390,max_ms=420,rate_limited=0"
+        )
+        self.parsed["run"]["script_version"] = "0.6.0"
+        test = self.parsed["tests"].pop("001")
+        request = self.parsed["requests"].pop("test-001")
+        test.update(
+            {
+                "id": "057",
+                "name": "4-32 并发响应时间",
+                "category": "性能与稳定性",
+                "detected": summary,
+                "requestRefs": ["test-057-c4-1"],
+            }
+        )
+        request["request_id"] = "test-057-c4-1"
+        self.parsed["tests"]["057"] = test
+        self.parsed["requests"]["test-057-c4-1"] = request
+        review = valid_review(test_id="057", gate="important")
+        review["evidenceRefs"] = ["request:test-057-c4-1"]
+
+        assessment = assemble_assessment(self.parsed, {"057": review})
+
+        self.assertEqual(assessment["tests"][0]["rawObservation"], summary)
 
     def test_assemble_assessment_uses_reviewed_status_as_only_formal_verdict(self):
         review = valid_review(status="FAIL")

@@ -44,7 +44,7 @@ Use confidence independently from status:
 - `observation`: useful secondary capability or measurement that does not
   independently block use.
 
-当前 v0.5.0 的 62 项目录使用固定优先级，不得根据单次结果升降级：
+当前 v0.6.0 的 62 项目录使用固定优先级，不得根据单次结果升降级：
 
 - `critical`：`001-006`、`040-050`。
 - `important`：`014-018`、`032-036`、`057`。
@@ -53,7 +53,9 @@ Use confidence independently from status:
 HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”，
 重要检测项共 28 项；将 `observation` 显示为“次要检测项”，次要检测项共 34 项。
 
-历史 v0.4.0 的 62 项目录使用与 v0.5.0 相同的固定优先级。
+历史 v0.5.0 的 62 项目录使用与 v0.6.0 相同的固定优先级。
+
+历史 v0.4.0 的 62 项目录使用与 v0.6.0 相同的固定优先级。
 
 历史 v0.3.0 的 65 项目录继续使用其原始固定优先级：
 
@@ -63,7 +65,7 @@ HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”�
 
 历史 v0.3.0 报告包含 26 项重要检测项和 39 项次要检测项。
 对于旧版或未知编号日志，按相同产品原则确定 gate level，不得套用不匹配的
-v0.3.0、v0.4.0 或 v0.5.0 编号含义。
+v0.3.0、v0.4.0、v0.5.0 或 v0.6.0 编号含义。
 
 Overall verdict:
 
@@ -121,7 +123,7 @@ Separate timeout, unsupported limit, truncation, malformed output, and semantic
 incompleteness. Confirm visible content length, reported output tokens when
 present, finish reason, completion marker, and required structure. A timeout
 before first byte is `ERROR` or `UNDETERMINED`, not proof of unsupported output.
-The current v0.5.0 catalog has no long-output tests; apply these rules only to
+The current v0.6.0 catalog has no long-output tests; apply these rules only to
 historical logs that contain them.
 
 ### Instruction and Text
@@ -159,6 +161,13 @@ Validate semantic success for every performance sample, not only HTTP 2xx.
 Report sample count and raw distribution. Five samples are a snapshot, not an
 SLA. P95 from five values is effectively the maximum and must be described as
 such. A recovery claim requires a distinct request after the load phase.
+
+For test `057` in v0.6.0, review all 4、8、16、32 concurrent waves. Treat
+`time_total` as 完整响应延迟, not TTFB, TTFT, throughput, or token generation
+speed. Report semantic-success count, rate-limit count, P50, nearest-rank P95,
+and maximum for every wave. The four short waves are a capacity and latency
+snapshot；本次短时样本不构成 SLA，也不证明持续负载能力。A 2xx response with
+the wrong exact marker is a failed sample.
 
 ### Guardrails and Security Language
 

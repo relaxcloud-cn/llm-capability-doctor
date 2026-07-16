@@ -41,6 +41,7 @@ CATALOG_GATE_LEVELS = {
     "0.3.0": V0_3_CATALOG_GATE_LEVELS,
     "0.4.0": CURRENT_CATALOG_GATE_LEVELS,
     "0.5.0": CURRENT_CATALOG_GATE_LEVELS,
+    "0.6.0": CURRENT_CATALOG_GATE_LEVELS,
 }
 
 
@@ -146,6 +147,8 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
 
 
 def _raw_observation(test: dict, requests: List[dict]) -> str:
+    if str(test.get("id")) == "057" and test.get("detected"):
+        return str(test["detected"])
     if requests:
         metrics = requests[-1].get("metrics", {})
         parts = []

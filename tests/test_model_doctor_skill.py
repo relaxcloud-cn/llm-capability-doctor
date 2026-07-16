@@ -43,15 +43,20 @@ class SkillContractTests(unittest.TestCase):
     def test_evaluation_rules_fix_current_and_historical_catalog_priority_groups(self):
         text = RULES_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("当前 v0.5.0 的 62 项目录使用固定优先级", text)
+        self.assertIn("当前 v0.6.0 的 62 项目录使用固定优先级", text)
         self.assertIn("`critical`：`001-006`、`040-050`", text)
         self.assertIn("`important`：`014-018`、`032-036`、`057`", text)
         self.assertIn("重要检测项共 28 项", text)
         self.assertIn("次要检测项共 34 项", text)
+        self.assertIn("历史 v0.5.0", text)
         self.assertIn("历史 v0.4.0", text)
         self.assertIn("历史 v0.3.0", text)
         self.assertIn("`critical`：`001-006`、`043-053`", text)
         self.assertIn("`important`：`026-028`、`035-039`、`060`", text)
+        self.assertIn("4、8、16、32", text)
+        self.assertIn("nearest-rank P95", text)
+        self.assertIn("完整响应延迟", text)
+        self.assertIn("不构成 SLA", text)
 
     def test_evaluation_rules_require_evidence_consistency_before_status(self):
         text = RULES_PATH.read_text(encoding="utf-8")
