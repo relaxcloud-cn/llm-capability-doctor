@@ -105,6 +105,7 @@ class ModelDoctorCliLogTests(unittest.TestCase):
             self.assertEqual(summary_value["testCount"], 2)
             self.assertEqual(summary_value["requestCount"], 3)
             self.assertNotIn("originalStatusCounts", summary_value)
+            self.assertNotIn("logSummary", summary_value)
             self.assertNotIn("REQUEST BODY", summary.stdout)
 
             packet = self.run_cli("packet", parsed_path, "--ids", "047,999")

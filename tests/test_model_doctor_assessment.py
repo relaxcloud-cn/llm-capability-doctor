@@ -106,6 +106,7 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         self.assertEqual(item["reviewedStatus"], "FAIL")
         for removed in ("originalStatus", "discrepancy", "originalTest"):
             self.assertNotIn(removed, item)
+        self.assertNotIn("summary", assessment)
         self.assertEqual(assessment["overall"]["counts"]["FAIL"], 1)
 
     def test_assessment_schema_declares_skill_only_v2_contract(self):

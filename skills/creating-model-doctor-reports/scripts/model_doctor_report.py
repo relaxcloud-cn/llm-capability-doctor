@@ -70,7 +70,6 @@ def _summary(parsed: dict) -> dict:
             sorted(Counter(test.get("category", "Unclassified") for test in tests.values()).items())
         ),
         "tokenTotals": parsed.get("tokenTotals", {}),
-        "logSummary": parsed.get("summary", {}),
         "warnings": parsed.get("warnings", []),
     }
 

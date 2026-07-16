@@ -223,7 +223,6 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "generatedAt": datetime.now(timezone.utc).isoformat(),
         "source": parsed.get("source", {}),
         "run": parsed.get("run", {}),
-        "summary": parsed.get("summary", {}),
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "overall": _overall(items),
