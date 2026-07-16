@@ -1,4 +1,6 @@
 import os
+import re
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -7,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model-capability-doctor.sh"
+FAKE_CURL = ROOT / "tests" / "helpers" / "fake_model_curl.py"
 
 
 class ModelCapabilityDoctorScriptTests(unittest.TestCase):
@@ -18,6 +21,47 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             text=True,
             check=False,
         )
+
+    def run_fixture(self, scenario, only):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            fake_curl = directory / "curl"
+            log_path = directory / "doctor.log"
+            shutil.copy2(FAKE_CURL, fake_curl)
+            fake_curl.chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{directory}:{environment['PATH']}"
+            environment["MODEL_DOCTOR_FAKE_SCENARIO"] = scenario
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPT),
+                    "--url",
+                    "https://model.example/v1/chat/completions",
+                    "--model",
+                    "fixture-model",
+                    "--api-key",
+                    "fixture-key",
+                    "--only",
+                    only,
+                    "--log-file",
+                    str(log_path),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            return result, log_path.read_text(encoding="utf-8")
+
+    def test_fake_curl_fixture_produces_protocol_compatible_audit(self):
+        result, log = self.run_fixture("basic", "004")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result: PASS", log)
+        self.assertIn("REQUEST test-004 BEGIN", log)
+        self.assertIn("MODEL_DOCTOR_CASE_004_OK", log)
 
     def test_help_declares_version_catalog_size_and_default_timeout(self):
         source = SCRIPT.read_text(encoding="utf-8")
