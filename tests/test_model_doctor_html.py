@@ -1,5 +1,4 @@
 import json
-import re
 import subprocess
 import sys
 import tempfile
@@ -75,22 +74,31 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn('id="test-detail-001" class="evidence-row" hidden', html)
         self.assertIn('<td colspan="4">', html)
 
-    def test_render_report_shows_logic_input_output_and_evidence(self):
+    def test_expanded_row_contains_only_approved_logic_and_io_sections(self):
         html = render_report(assessment(), ASSET_DIR)
 
-        for text in (
-            "检测目的",
-            "测试方法",
-            "通过条件",
-            "失败条件",
-            "能力边界",
-            "请求输入",
-            "模型输出",
-            "判定证据",
-            "Reply only OK",
-            'content&quot;:&quot;OK',
-        ):
-            self.assertIn(text, html)
+        for expected in ("检测目的", "检测方法", "通过条件", "请求输入", "请求输出"):
+            self.assertIn(expected, html)
+        for removed in ("失败条件", "能力边界", "判定证据", "证据引用", "复测建议"):
+            self.assertNotIn(removed, html)
+        self.assertIn("Reply only OK", html)
+        self.assertIn('content&quot;:&quot;OK', html)
+
+    def test_expanded_row_pairs_every_turn_input_and_output_in_order(self):
+        value = assessment()
+        second = deepcopy(value["tests"][0]["requests"][0])
+        second["request_id"] = "test-001-follow"
+        second["requestBody"] = '{"turn":2,"input":"follow-up"}'
+        second["responseBody"] = '{"turn":2,"output":"done"}'
+        value["tests"][0]["requests"].append(second)
+
+        html = render_report(value, ASSET_DIR)
+
+        self.assertEqual(html.count("请求输入"), 2)
+        self.assertEqual(html.count("请求输出"), 2)
+        self.assertLess(html.index("Turn 1"), html.index("Turn 2"))
+        self.assertLess(html.index("Reply only OK"), html.index("follow-up"))
+        self.assertLess(html.index('content&quot;:&quot;OK'), html.index("done"))
 
     def test_render_report_is_offline_and_renders_hostile_output_as_text(self):
         value = assessment()
@@ -104,14 +112,15 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertNotIn('<script>alert("x")</script>', html)
         self.assertNotIn("innerHTML", html)
 
-    def test_render_report_shows_raw_and_reviewed_discrepancy(self):
+    def test_summary_row_uses_reviewed_status_and_flags_discrepancy(self):
         value = assessment("FAIL")
         html = render_report(value, ASSET_DIR)
 
-        self.assertIn("原始判断", html)
-        self.assertIn("Skill 复核", html)
+        self.assertIn('class="result-group" data-status="FAIL"', html)
+        self.assertIn('<span class="status status-FAIL">失败</span>', html)
         self.assertIn("判定发生变化", html)
-        self.assertIn("BLOCKED", html)
+        self.assertNotIn("原始判断", html)
+        self.assertNotIn("Skill 复核", html)
 
     def test_report_has_plain_category_summary_and_independent_result_groups(self):
         html = render_report(assessment(), ASSET_DIR)
@@ -180,7 +189,9 @@ class ModelDoctorCliHtmlTests(unittest.TestCase):
             generated_assessment = next(path for path in generated_paths if path.suffix == ".json")
             generated_html = next(path for path in generated_paths if path.suffix == ".html")
             self.assertEqual(json.loads(generated_assessment.read_text(encoding="utf-8"))["overall"]["verdict"], "READY")
-            self.assertIn("完整输入输出", generated_html.read_text(encoding="utf-8"))
+            generated_html_text = generated_html.read_text(encoding="utf-8")
+            self.assertIn("请求输入", generated_html_text)
+            self.assertIn("请求输出", generated_html_text)
 
 
 if __name__ == "__main__":

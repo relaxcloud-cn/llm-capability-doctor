@@ -24,7 +24,6 @@ CATEGORY_STATUS_LABELS = {
     "FAIL": "未通过",
     "CONDITIONAL": "需复测",
 }
-CONFIDENCE_LABELS = {"high": "高置信", "medium": "中置信", "low": "低置信"}
 
 
 def _e(value: object) -> str:
@@ -79,47 +78,42 @@ def _category_rows(categories: List[dict]) -> str:
     return "".join(rows)
 
 
-def _request_timeline(requests: List[dict]) -> str:
+def _request_evidence(requests: List[dict]) -> str:
     if not requests:
-        return '<p class="muted">日志未包含可关联的完整请求块。</p>'
-    blocks = []
+        return '<p class="empty-evidence">日志未包含可关联的完整请求块。</p>'
+    turns = []
     for index, request in enumerate(requests, start=1):
         metrics = request.get("metrics", {})
-        metric_text = " · ".join(
-            part
-            for part in (
+        meta = " · ".join(
+            value
+            for value in (
+                str(request.get("request_id") or f"Turn {index}"),
                 f"HTTP {metrics.get('http_status')}" if metrics.get("http_status") else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",
                 f"{metrics.get('size_download')} bytes" if metrics.get("size_download") else "",
             )
-            if part
+            if value
         )
-        blocks.append(
-            '<section class="request-block">'
-            '<div class="request-heading">'
-            f"<h4>Turn {index} · {_e(request.get('request_id'))}</h4>"
-            f'<span class="muted">{_e(metric_text)}</span>'
-            "</div>"
-            "<h4>请求输入</h4>"
+        output_parts = [str(request.get("responseBody") or "")]
+        if request.get("stderr"):
+            output_parts.append("curl stderr:\n" + str(request["stderr"]))
+        output = "\n\n".join(part for part in output_parts if part)
+        turns.append(
+            '<section class="turn-evidence">'
+            f'<h4>Turn {index}<span>{_e(meta)}</span></h4>'
+            "<h5>请求输入</h5>"
             f"<pre><code>{_e(request.get('requestBody'))}</code></pre>"
-            "<h4>模型输出</h4>"
-            f"<pre><code>{_e(request.get('responseBody'))}</code></pre>"
-            + (
-                "<h4>curl stderr</h4>"
-                f"<pre><code>{_e(request.get('stderr'))}</code></pre>"
-                if request.get("stderr")
-                else ""
-            )
-            + "</section>"
+            "<h5>请求输出</h5>"
+            f"<pre><code>{_e(output)}</code></pre>"
+            "</section>"
         )
-    return "".join(blocks)
+    return "".join(turns)
 
 
 def _test_row_group(item: dict) -> str:
     logic = item.get("logic", {})
     test_id = str(item.get("testId", "unknown"))
     detail_id = f"test-detail-{test_id}"
-    original = item.get("originalStatus", "UNDETERMINED")
     reviewed = item.get("reviewedStatus", "UNDETERMINED")
     discrepancy = bool(item.get("discrepancy", False))
     discrepancy_note = (
@@ -144,28 +138,11 @@ def _test_row_group(item: dict) -> str:
         '<div class="evidence-content">'
         '<section class="logic-item"><h4>检测目的</h4>'
         f'<p>{_e(logic.get("purpose"))}</p></section>'
-        '<section class="logic-item"><h4>测试方法</h4>'
+        '<section class="logic-item"><h4>检测方法</h4>'
         f'<p>{_e(logic.get("method"))}</p></section>'
-        '<section class="logic-item"><h4>通过条件</h4>'
+        '<section class="logic-item pass-criteria"><h4>通过条件</h4>'
         f'{_list(logic.get("passCriteria", []))}</section>'
-        '<section class="logic-item"><h4>失败条件</h4>'
-        f'{_list(logic.get("failCriteria", []))}</section>'
-        '<section class="logic-item"><h4>能力边界</h4>'
-        f'<p>{_e(logic.get("capabilityBoundary"))}</p></section>'
-        '<section class="logic-item"><h4>原始判断</h4>'
-        f'<p>{_status_text(original)}</p></section>'
-        '<section class="logic-item"><h4>Skill 复核</h4>'
-        f'<p>{_status_text(reviewed)} · {_e(CONFIDENCE_LABELS.get(item.get("confidence"), item.get("confidence")))}</p></section>'
-        '<section class="logic-item"><h4>判定证据</h4>'
-        f'{_list(item.get("evidenceExcerpts", []))}</section>'
-        '<section class="logic-item"><h4>证据引用</h4>'
-        f'{_list(item.get("evidenceRefs", []))}</section>'
-        '<section class="logic-item"><h4>限制</h4>'
-        f'{_list(item.get("limitations", []))}</section>'
-        '<section class="logic-item"><h4>复测建议</h4>'
-        f'{_list(item.get("retestInstructions", []))}</section>'
-        '<section class="io-evidence"><h4>完整输入输出</h4>'
-        f'{_request_timeline(item.get("requests", []))}</section>'
+        f'{_request_evidence(item.get("requests", []))}'
         "</div></td></tr></tbody>"
     )
 
