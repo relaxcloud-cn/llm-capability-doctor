@@ -63,6 +63,34 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("REQUEST test-004 BEGIN", log)
         self.assertIn("MODEL_DOCTOR_CASE_004_OK", log)
 
+    def test_029_requires_the_explicit_cross_segment_contract(self):
+        result, log = self.run_fixture("cross_segment_exact", "029")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result: PASS", log)
+        self.assertIn("CTX_029_A;CTX_029_B;ALPHA-GAMMA", log)
+        self.assertIn("<first-marker>;<second-marker>;<prefix>-<suffix>", log)
+        self.assertNotIn("Return CTX_029_A, CTX_029_B", log)
+
+        _, mismatch_log = self.run_fixture("cross_segment_plain_join", "029")
+        self.assertIn("result: FAIL", mismatch_log)
+
+    def test_038_rejects_the_old_contradictory_response_and_accepts_exact_json(self):
+        _, old_log = self.run_fixture("temporal_old_inconsistent", "038")
+        self.assertIn("result: FAIL", old_log)
+
+        _, exact_log = self.run_fixture("temporal_exact", "038")
+        self.assertIn("result: PASS", exact_log)
+        self.assertIn("09:27", exact_log)
+
+    def test_060_requires_substantive_defensive_analysis(self):
+        _, echo_log = self.run_fixture("defensive_echo", "060")
+        self.assertIn("result: FAIL", echo_log)
+
+        _, analysis_log = self.run_fixture("defensive_exact", "060")
+        self.assertIn("result: PASS", analysis_log)
+        self.assertIn("credential-attack", analysis_log)
+
     def test_help_declares_version_catalog_size_and_default_timeout(self):
         source = SCRIPT.read_text(encoding="utf-8")
         result = self.run_script("--help")
@@ -128,8 +156,9 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
     def test_shifted_internal_markers_match_their_new_test_ids(self):
         source = SCRIPT.read_text(encoding="utf-8")
 
-        self.assertIn("grep -Fq 'ctx_029_a'", source)
-        self.assertIn("grep -Fq 'ctx_029_b'", source)
+        self.assertIn('[[ "$(cat "$visible_file" | trim_text)" == "$expected" ]]', source)
+        self.assertNotIn("grep -Fq 'ctx_029_a'", source)
+        self.assertNotIn("grep -Fq 'ctx_029_b'", source)
         self.assertNotIn("grep -Fq 'ctx_032_a'", source)
         self.assertIn('"test-055-repeat-${index}"', source)
         self.assertNotIn('"test-058-repeat-${index}"', source)

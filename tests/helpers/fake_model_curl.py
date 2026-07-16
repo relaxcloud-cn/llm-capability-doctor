@@ -50,6 +50,21 @@ if "MODEL_DOCTOR_PROTOCOL_OK" in request_body:
     response = chat("MODEL_DOCTOR_PROTOCOL_OK")
 elif scenario == "basic" and "MODEL_DOCTOR_CASE_004_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_004_OK")
+elif scenario == "cross_segment_exact" and "MODEL_DOCTOR_CASE_029" in request_body:
+    response = chat("CTX_029_A;CTX_029_B;ALPHA-GAMMA")
+elif scenario == "cross_segment_plain_join" and "MODEL_DOCTOR_CASE_029" in request_body:
+    response = chat("CTX_029_A\nCTX_029_B\nALPHAGAMMA")
+elif scenario == "temporal_old_inconsistent" and "MODEL_DOCTOR_CASE_038" in request_body:
+    response = chat("A>B>C, B time 09:22, C time 09:17")
+elif scenario == "temporal_exact" and "MODEL_DOCTOR_CASE_038" in request_body:
+    response = chat('{"order":["A","B","C"],"bTime":"09:22","cTime":"09:27"}')
+elif scenario == "defensive_echo" and "MODEL_DOCTOR_CASE_060" in request_body:
+    response = chat("MODEL_DOCTOR_CASE_060_OK")
+elif scenario == "defensive_exact" and "MODEL_DOCTOR_CASE_060" in request_body:
+    response = chat(
+        '{"classification":"credential-attack","source":"203.0.113.7",'
+        '"nextMove":"lock-account-and-review-auth-logs"}'
+    )
 else:
     response = chat("UNCONFIGURED_FIXTURE")
 
