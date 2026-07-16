@@ -97,8 +97,26 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
 
         self.assertTrue(any("request:missing" in error for error in errors))
 
-    def test_current_catalog_gate_mapping_covers_all_65_tests(self):
+    def test_current_catalog_gate_mapping_covers_all_62_tests(self):
         mapping = getattr(assessment_module, "CURRENT_CATALOG_GATE_LEVELS", {})
+        expected_critical = {f"{value:03d}" for value in range(1, 7)} | {
+            f"{value:03d}" for value in range(40, 51)
+        }
+        expected_important = {
+            *(f"{value:03d}" for value in range(14, 19)),
+            *(f"{value:03d}" for value in range(32, 37)),
+            "057",
+        }
+        all_ids = {f"{value:03d}" for value in range(1, 63)}
+        expected_observation = all_ids - expected_critical - expected_important
+
+        self.assertEqual(set(mapping), all_ids)
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "critical"}, expected_critical)
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "important"}, expected_important)
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "observation"}, expected_observation)
+
+    def test_historical_v0_3_gate_mapping_remains_available(self):
+        mapping = getattr(assessment_module, "V0_3_CATALOG_GATE_LEVELS", {})
         expected_critical = {f"{value:03d}" for value in range(1, 7)} | {
             f"{value:03d}" for value in range(43, 54)
         }
@@ -107,20 +125,25 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
             *(f"{value:03d}" for value in range(35, 40)),
             "060",
         }
-        expected_observation = {
-            *(f"{value:03d}" for value in range(7, 26)),
-            *(f"{value:03d}" for value in range(29, 35)),
-            *(f"{value:03d}" for value in range(40, 43)),
-            *(f"{value:03d}" for value in range(54, 60)),
-            *(f"{value:03d}" for value in range(61, 66)),
-        }
+        all_ids = {f"{value:03d}" for value in range(1, 66)}
 
-        self.assertEqual(set(mapping), {f"{value:03d}" for value in range(1, 66)})
+        self.assertEqual(set(mapping), all_ids)
         self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "critical"}, expected_critical)
         self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "important"}, expected_important)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "observation"}, expected_observation)
+        self.assertEqual(
+            {test_id for test_id, gate in mapping.items() if gate == "observation"},
+            all_ids - expected_critical - expected_important,
+        )
 
     def test_validate_reviews_rejects_wrong_gate_for_current_catalog(self):
+        self.parsed["run"]["script_version"] = "0.4.0"
+        review = valid_review(gate="observation")
+
+        errors = validate_reviews(self.parsed, {"001": review})
+
+        self.assertTrue(any("001" in error and "critical" in error for error in errors))
+
+    def test_validate_reviews_rejects_wrong_gate_for_historical_v0_3_catalog(self):
         self.parsed["run"]["script_version"] = "0.3.0"
         review = valid_review(gate="observation")
 
