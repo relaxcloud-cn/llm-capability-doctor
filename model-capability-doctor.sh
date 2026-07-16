@@ -696,7 +696,9 @@ run_parallel_batch() {
     if [[ "$time_total" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
       latency_ms="$(millis_from_seconds "$time_total")"
     fi
-    if [[ "$curl_exit" == "0" && "$http" =~ ^2[0-9][0-9]$ && "$visible" == "$marker" && "$latency_ms" != "not_available" ]]; then
+    if [[ "$curl_exit" == "0" && "$http" =~ ^2[0-9][0-9]$ && "$latency_ms" != "not_available" ]] \
+      && visible_answer_extractable "${prefix}.body" \
+      && [[ "$visible" == "$marker" ]]; then
       semantic_success=1
       successes=$((successes + 1))
       printf '%s\n' "$latency_ms" >>"$times_file"
@@ -1597,6 +1599,8 @@ run_core_performance_test() {
   local id="$1" category="$2" name="$3"
   local body="" status="PASS" conclusion="" detected="" evidence_file="" index=0 successes=0 marker="" visible_file="$RUN_TMP_DIR/test-${id}.visible" visible="" transport_errors=0 recovery_marker="" recovery_body="" recovery_ok=0 recovery_label="FAIL" recovery_evidence_present=0
   local concurrency=0 separator="" segment="" combined_evidence=""
+  local p50_display="" p95_display="" max_display=""
+  local result_duration_ms="" result_http_status="" result_curl_exit=""
   case "$id" in
     051|052|054)
       marker="MODEL_DOCTOR_CASE_${id}_OK"
@@ -1637,7 +1641,12 @@ run_core_performance_test() {
       else status="UNDETERMINED"; conclusion="成功样本不足，无法计算 P50/P95"; fi
       ;;
     057)
-      if [[ "$DETECTED_PROTOCOL" == "unknown" ]]; then
+      if [[ "$PROTOCOL_PROBE_CURL_EXIT" != "0" ]]; then
+        status="ERROR"
+        conclusion="协议探测失败，curl ${PROTOCOL_PROBE_CURL_EXIT}"
+        detected="c4:not_available;c8:not_available;c16:not_available;c32:not_available"
+        evidence_file="$PROTOCOL_PROBE_RESPONSE_FILE"
+      elif [[ "$DETECTED_PROTOCOL" == "unknown" ]]; then
         status="UNDETERMINED"
         conclusion="未知协议，无法执行并发响应时间检测"
         detected="c4:not_available;c8:not_available;c16:not_available;c32:not_available"
@@ -1653,12 +1662,23 @@ run_core_performance_test() {
           cat "$BATCH_EVIDENCE_FILE" >>"$combined_evidence"
           segment="c${concurrency}:success=${BATCH_SUCCESS_COUNT}/${concurrency},p50_ms=${BATCH_P50_MS:-not_available},p95_ms=${BATCH_P95_MS:-not_available},max_ms=${BATCH_MAX_MS:-not_available},rate_limited=${BATCH_RATE_LIMITED}"
           detected="${detected}${separator}${segment}"
-          conclusion="${conclusion}${separator}${concurrency} 并发成功 ${BATCH_SUCCESS_COUNT}/${concurrency}，P50 ${BATCH_P50_MS:-不可用}ms，P95 ${BATCH_P95_MS:-不可用}ms，最大 ${BATCH_MAX_MS:-不可用}ms，限流 ${BATCH_RATE_LIMITED}"
+          if [[ -n "$BATCH_P50_MS" ]]; then p50_display="${BATCH_P50_MS}ms"; else p50_display="不可用"; fi
+          if [[ -n "$BATCH_P95_MS" ]]; then p95_display="${BATCH_P95_MS}ms"; else p95_display="不可用"; fi
+          if [[ -n "$BATCH_MAX_MS" ]]; then max_display="${BATCH_MAX_MS}ms"; else max_display="不可用"; fi
+          conclusion="${conclusion}${separator}${concurrency} 并发成功 ${BATCH_SUCCESS_COUNT}/${concurrency}，P50 ${p50_display}，P95 ${p95_display}，最大 ${max_display}，限流 ${BATCH_RATE_LIMITED}"
           separator=";"
           if [[ "$BATCH_SUCCESS_COUNT" != "$concurrency" ]]; then
             status="FAIL"
           fi
         done
+        if [[ "$status" == "PASS" ]]; then
+          conclusion="${conclusion};全部 60 个请求语义成功"
+        else
+          conclusion="${conclusion};未达到 60/60 语义成功"
+        fi
+        result_duration_ms="not_available"
+        result_http_status="multiple"
+        result_curl_exit="multiple"
         evidence_file="$combined_evidence"
       fi
       ;;
@@ -1691,7 +1711,7 @@ run_core_performance_test() {
       else conclusion="10 次持续请求全部成功，且独立恢复探针通过"; fi
       ;;
   esac
-  record_test "$id" "$category" "$name" "$status" "$conclusion" "performance observation" "$detected" "$(millis_from_seconds "${LAST_TIME_TOTAL:-0}")" "$evidence_file" "${LAST_HTTP_STATUS:-not_available}" "${LAST_CURL_EXIT:-not_available}"
+  record_test "$id" "$category" "$name" "$status" "$conclusion" "performance observation" "$detected" "${result_duration_ms:-$(millis_from_seconds "${LAST_TIME_TOTAL:-0}")}" "$evidence_file" "${result_http_status:-${LAST_HTTP_STATUS:-not_available}}" "${result_curl_exit:-${LAST_CURL_EXIT:-not_available}}"
 }
 
 is_explicit_guardrail_response() {

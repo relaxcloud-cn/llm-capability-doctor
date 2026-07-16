@@ -199,6 +199,32 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
 
         self.assertEqual(assessment["tests"][0]["rawObservation"], summary)
 
+    def test_historical_057_keeps_its_request_metrics_as_raw_observation(self):
+        self.parsed["run"]["script_version"] = "0.5.0"
+        test = self.parsed["tests"].pop("001")
+        request = self.parsed["requests"].pop("test-001")
+        test.update(
+            {
+                "id": "057",
+                "name": "8 并发性能",
+                "category": "性能与稳定性",
+                "detected": "8/8",
+                "requestRefs": ["test-057-c8-1"],
+            }
+        )
+        request["request_id"] = "test-057-c8-1"
+        self.parsed["tests"]["057"] = test
+        self.parsed["requests"]["test-057-c8-1"] = request
+        review = valid_review(test_id="057", gate="important")
+        review["evidenceRefs"] = ["request:test-057-c8-1"]
+
+        assessment = assemble_assessment(self.parsed, {"057": review})
+
+        self.assertEqual(
+            assessment["tests"][0]["rawObservation"],
+            "HTTP 200 · 1.250000s · 128 bytes",
+        )
+
     def test_assemble_assessment_uses_reviewed_status_as_only_formal_verdict(self):
         review = valid_review(status="FAIL")
         assessment = assemble_assessment(self.parsed, {"001": review})

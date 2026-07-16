@@ -153,7 +153,11 @@ elif scenario in {
     "sustained_recovery_absent",
 } and "MODEL_DOCTOR_CASE_058_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_058_OK")
-elif scenario in {"concurrency_ladder_exact", "concurrency_ladder_partial"} and (
+elif scenario in {
+    "concurrency_ladder_exact",
+    "concurrency_ladder_malformed_envelope",
+    "concurrency_ladder_partial",
+} and (
     marker_match := re.search(r"MODEL_DOCTOR_057_C(4|8|16|32)_OK", request_body)
 ):
     request_match = re.search(r"test-057-c(4|8|16|32)-([0-9]+)$", output_path.stem)
@@ -161,7 +165,9 @@ elif scenario in {"concurrency_ladder_exact", "concurrency_ladder_partial"} and 
     sample = int(request_match.group(2)) if request_match else 0
     response = chat(marker_match.group(0))
     time_total = f"{sample / 1000:.3f}"
-    if scenario == "concurrency_ladder_partial" and level == 4:
+    if scenario == "concurrency_ladder_malformed_envelope":
+        response = invalid_balanced_chat(marker_match.group(0))
+    elif scenario == "concurrency_ladder_partial" and level == 4:
         response = chat("WRONG_OUTPUT")
     elif scenario == "concurrency_ladder_partial" and (level, sample) == (8, 3):
         response = chat("RATE_LIMITED")

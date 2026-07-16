@@ -174,6 +174,9 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         )
         self.assertEqual(len(request_starts), 60)
         self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
+        self.assertEqual(parsed["tests"]["057"]["duration_ms"], "not_available")
+        self.assertEqual(parsed["tests"]["057"]["http_status"], "multiple")
+        self.assertEqual(parsed["tests"]["057"]["curl_exit_code"], "multiple")
         self.assertIn("result: PASS", log)
         self.assertIn(
             "detected: "
@@ -183,6 +186,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             "c32:success=32/32,p50_ms=16,p95_ms=31,max_ms=32,rate_limited=0",
             log,
         )
+        self.assertIn("全部 60 个请求语义成功", log)
         self.assertIn("request_count: 61", log)
 
     def test_057_rejects_bad_samples_and_continues_through_c32(self):
@@ -209,7 +213,26 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         )
         self.assertIn("c32:success=32/32", log)
         self.assertIn("semantic_success=0", log)
+        self.assertIn("未达到 60/60 语义成功", log)
+        self.assertNotIn("不可用ms", log)
         self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
+
+    def test_057_rejects_markers_inside_malformed_response_envelopes(self):
+        _, log = self.run_fixture("concurrency_ladder_malformed_envelope", "057")
+
+        self.assertIn("result: FAIL", log)
+        self.assertIn(
+            "c4:success=0/4,p50_ms=not_available,p95_ms=not_available,"
+            "max_ms=not_available,rate_limited=0",
+            log,
+        )
+        self.assertIn("c32:success=0/32", log)
+
+    def test_057_prioritizes_protocol_probe_transport_errors(self):
+        _, log = self.run_fixture("transport_failure", "057")
+
+        self.assertIn("result: ERROR", log)
+        self.assertIn("curl", log)
 
     def test_058_runs_ten_load_requests_and_one_distinct_recovery_probe(self):
         _, exact_log = self.run_fixture("sustained_recovery_exact", "058")

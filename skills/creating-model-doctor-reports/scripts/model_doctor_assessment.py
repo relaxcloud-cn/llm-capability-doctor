@@ -146,8 +146,8 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
     return errors
 
 
-def _raw_observation(test: dict, requests: List[dict]) -> str:
-    if str(test.get("id")) == "057" and test.get("detected"):
+def _raw_observation(test: dict, requests: List[dict], script_version: str) -> str:
+    if script_version == "0.6.0" and str(test.get("id")) == "057" and test.get("detected"):
         return str(test["detected"])
     if requests:
         metrics = requests[-1].get("metrics", {})
@@ -224,7 +224,11 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
                 "confidence": review["confidence"],
                 "conclusion": review["conclusion"],
                 "logic": review["logic"],
-                "rawObservation": _raw_observation(test, requests),
+                "rawObservation": _raw_observation(
+                    test,
+                    requests,
+                    str(parsed.get("run", {}).get("script_version", "")),
+                ),
                 "metrics": [request.get("metrics", {}) for request in requests],
                 "evidenceRefs": review["evidenceRefs"],
                 "evidenceExcerpts": review["evidenceExcerpts"],
