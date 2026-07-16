@@ -96,15 +96,38 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
 
         self.assertTrue(any("request:missing" in error for error in errors))
 
-    def test_assemble_assessment_preserves_original_and_reviewed_status(self):
+    def test_assemble_assessment_uses_reviewed_status_as_only_formal_verdict(self):
         review = valid_review(status="FAIL")
         assessment = assemble_assessment(self.parsed, {"001": review})
         item = assessment["tests"][0]
 
-        self.assertEqual(assessment["schemaVersion"], ASSESSMENT_SCHEMA_VERSION)
-        self.assertEqual(item["originalStatus"], "PASS")
+        self.assertEqual(ASSESSMENT_SCHEMA_VERSION, "llm-capability-doctor.assessment.v2")
+        self.assertEqual(assessment["schemaVersion"], "llm-capability-doctor.assessment.v2")
         self.assertEqual(item["reviewedStatus"], "FAIL")
-        self.assertTrue(item["discrepancy"])
+        for removed in ("originalStatus", "discrepancy", "originalTest"):
+            self.assertNotIn(removed, item)
+        self.assertEqual(assessment["overall"]["counts"]["FAIL"], 1)
+
+    def test_assessment_schema_declares_skill_only_v2_contract(self):
+        schema_path = (
+            ROOT
+            / "skills"
+            / "creating-model-doctor-reports"
+            / "references"
+            / "assessment-schema.json"
+        )
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        test_schema = schema["properties"]["tests"]["items"]
+
+        self.assertEqual(schema["$id"], "llm-capability-doctor.assessment.v2")
+        self.assertEqual(
+            schema["properties"]["schemaVersion"]["const"],
+            "llm-capability-doctor.assessment.v2",
+        )
+        self.assertIn("reviewedStatus", test_schema["required"])
+        for removed in ("originalStatus", "discrepancy", "originalTest"):
+            self.assertNotIn(removed, test_schema["required"])
+            self.assertNotIn(removed, test_schema.get("properties", {}))
 
     def test_overall_verdict_blocks_on_critical_failure(self):
         assessment = assemble_assessment(

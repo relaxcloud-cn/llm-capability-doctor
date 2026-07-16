@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, List
 
 
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v1"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v2"
 STATUSES = {"PASS", "FAIL", "UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"}
 CONFIDENCES = {"high", "medium", "low"}
 GATE_LEVELS = {"critical", "important", "observation"}
@@ -176,17 +176,14 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         review = reviews[test_id]
         request_refs = test.get("requestRefs", [])
         requests = [parsed["requests"][request_id] for request_id in request_refs]
-        original_status = test.get("result", "UNDETERMINED")
         items.append(
             {
                 "testId": test_id,
                 "category": test.get("category", "Unclassified"),
                 "name": test.get("name", f"Test {test_id}"),
                 "gateLevel": review["gateLevel"],
-                "originalStatus": original_status,
                 "reviewedStatus": review["reviewedStatus"],
                 "confidence": review["confidence"],
-                "discrepancy": original_status != review["reviewedStatus"],
                 "conclusion": review["conclusion"],
                 "logic": review["logic"],
                 "rawObservation": _raw_observation(test, requests),
@@ -195,7 +192,6 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
                 "evidenceExcerpts": review["evidenceExcerpts"],
                 "limitations": review["limitations"],
                 "retestInstructions": review["retestInstructions"],
-                "originalTest": test,
                 "requests": requests,
             }
         )

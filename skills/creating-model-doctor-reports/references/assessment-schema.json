@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v1",
+  "$id": "llm-capability-doctor.assessment.v2",
   "title": "LLM Capability Doctor Assessment",
   "type": "object",
   "required": [
@@ -14,7 +14,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v1"
+      "const": "llm-capability-doctor.assessment.v2"
     },
     "generatedAt": {
       "type": "string"
@@ -47,7 +47,6 @@
           "category",
           "name",
           "gateLevel",
-          "originalStatus",
           "reviewedStatus",
           "confidence",
           "conclusion",
