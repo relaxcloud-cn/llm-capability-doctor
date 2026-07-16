@@ -56,14 +56,14 @@ Never replace these gates with an average score.
 
 ## 4. Cross-Cutting Review Rules
 
-1. Preserve the script result separately from the reviewed result.
+1. Treat `reviewedStatus` as the only formal assessment verdict.
 2. Cite at least one valid request or raw-test evidence reference.
 3. Do not infer semantic success from HTTP 2xx alone.
 4. Do not describe a single successful request as stable or reliable.
 5. Do not equate character count with exact token count.
 6. Do not equate TCP first byte with first visible model token.
 7. If an input, output, or follow-up turn is missing, use `UNDETERMINED`.
-8. If the script and evidence disagree, show the discrepancy and explain it.
+8. Judge observable evidence independently; never use a parsed script result as assessment ground truth or copy it into final artifacts.
 9. Use the requested model name and observed returned model as separate facts.
 10. Never claim that a model name proves upstream commercial model identity.
 

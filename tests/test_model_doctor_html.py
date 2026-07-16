@@ -124,15 +124,21 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertNotIn('<script>alert("x")</script>', html)
         self.assertNotIn("innerHTML", html)
 
-    def test_summary_row_uses_reviewed_status_and_flags_discrepancy(self):
+    def test_summary_row_uses_only_reviewed_status_and_conclusion(self):
         value = assessment("FAIL")
+        value["tests"][0]["discrepancy"] = True
         html = render_report(value, ASSET_DIR)
 
         self.assertIn('class="result-group" data-status="FAIL"', html)
         self.assertIn('<span class="status status-FAIL">失败</span>', html)
-        self.assertIn("判定发生变化", html)
-        self.assertNotIn("原始判断", html)
-        self.assertNotIn("Skill 复核", html)
+        self.assertIn("完整 URL 可连接并正常返回。", html)
+        for removed in (
+            "判定发生变化",
+            "脚本原判",
+            "原始判断",
+            "discrepancy-note",
+        ):
+            self.assertNotIn(removed, html)
 
     def test_report_has_plain_category_summary_and_independent_result_groups(self):
         html = render_report(assessment(), ASSET_DIR)

@@ -118,8 +118,7 @@ tbody th {
 
 .status-FAIL,
 .status-ERROR,
-.category-status-FAIL,
-.discrepancy-note {
+.category-status-FAIL {
   color: var(--fail);
 }
 
@@ -128,13 +127,6 @@ tbody th {
 .status-SKIPPED,
 .category-status-CONDITIONAL {
   color: var(--warn);
-}
-
-.discrepancy-note {
-  display: block;
-  margin-top: 0.35rem;
-  font-size: 12px;
-  font-weight: 500;
 }
 
 .result-row {

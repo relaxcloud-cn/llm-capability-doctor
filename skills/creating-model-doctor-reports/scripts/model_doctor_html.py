@@ -115,10 +115,6 @@ def _test_row_group(item: dict) -> str:
     test_id = str(item.get("testId", "unknown"))
     detail_id = f"test-detail-{test_id}"
     reviewed = item.get("reviewedStatus", "UNDETERMINED")
-    discrepancy = bool(item.get("discrepancy", False))
-    discrepancy_note = (
-        '<span class="discrepancy-note">判定发生变化</span>' if discrepancy else ""
-    )
     return (
         f'<tbody class="result-group" data-status="{_e(reviewed)}">'
         f'<tr class="result-row" data-detail-id="{_e(detail_id)}">'
@@ -130,7 +126,7 @@ def _test_row_group(item: dict) -> str:
         f'{_status_text(reviewed)}'
         f'<span class="detail">{_e(item.get("rawObservation"))}</span></div></td>'
         '<td data-label="检测结论"><div class="conclusion-layout">'
-        f'<span>{_e(item.get("conclusion"))}{discrepancy_note}</span>'
+        f'<span>{_e(item.get("conclusion"))}</span>'
         f'<button type="button" class="row-toggle" aria-expanded="false" aria-controls="{_e(detail_id)}" '
         f'aria-label="展开检测项 {_e(test_id)}"><span aria-hidden="true">⌄</span></button>'
         "</div></td></tr>"

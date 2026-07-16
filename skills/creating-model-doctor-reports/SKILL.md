@@ -5,7 +5,7 @@ description: Use when a user supplies a Model Doctor audit log and wants a seman
 
 # Creating Model Doctor Reports
 
-Turn one complete Model Doctor `.log` into a canonical `<model-slug>-assessment.json` and self-contained `<model-slug>-customer-readiness-report.html`. Preserve every discovered test, the script's original result, full redacted inputs/outputs, and the Skill's reviewed result.
+Turn one complete Model Doctor `.log` into a canonical `<model-slug>-assessment.json` and self-contained `<model-slug>-customer-readiness-report.html`. Preserve every discovered test, full redacted inputs/outputs, and the Skill's semantic review as the only formal verdict.
 
 ## Safety
 
