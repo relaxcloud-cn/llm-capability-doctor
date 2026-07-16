@@ -27,7 +27,7 @@
 - Modify: `tests/test_model_capability_doctor_script.py`
 - Test: `tests/test_model_capability_doctor_script.py`
 
-- [ ] **Step 1: Replace the catalog and version expectations with the approved contract**
+- [x] **Step 1: Replace the catalog and version expectations with the approved contract**
 
 Update the existing contract tests to require:
 
@@ -49,7 +49,7 @@ self.assertEqual(
 
 Assert representative shifted IDs: `026=开头信息召回`, `032=Thinking 参数接受`, `040=单工具调用`, `051=冷请求总延迟`, and `059=越权请求护栏`.
 
-- [ ] **Step 2: Replace long-output source assertions with capacity-context assertions**
+- [x] **Step 2: Replace long-output source assertions with capacity-context assertions**
 
 Require these exact source facts:
 
@@ -76,7 +76,7 @@ for removed in (
 
 Update the shifted marker assertions to the new IDs, including `ctx_029_a`, `test-055-repeat-${index}`, and the absence of their `0.3.0` forms.
 
-- [ ] **Step 3: Add a fake-curl runtime test for one capacity request**
+- [x] **Step 3: Add a fake-curl runtime test for one capacity request**
 
 Run only test `014` against a fake curl that returns a protocol probe response for the first request and `CTX_014_OK` with `usage.prompt_tokens=12000` for the capacity request. Assert that the audit log contains:
 
@@ -152,7 +152,7 @@ printf '200\t0.010\t0.005\t200'
 
 The fake curl must capture `--data-binary`, write HTTP 200 headers, and return protocol-shaped JSON without contacting an endpoint.
 
-- [ ] **Step 4: Run the focused tests and verify RED**
+- [x] **Step 4: Run the focused tests and verify RED**
 
 Run:
 
@@ -162,7 +162,7 @@ python3 -m unittest tests.test_model_capability_doctor_script -v
 
 Expected: FAIL because the source still reports `0.3.0`, 65 tests, long-output handlers, and old IDs.
 
-- [ ] **Step 5: Commit the failing contract tests**
+- [x] **Step 5: Commit the failing contract tests**
 
 ```bash
 git add tests/test_model_capability_doctor_script.py
@@ -175,7 +175,7 @@ git commit -m "test: define context-only capacity catalog"
 - Modify: `model-capability-doctor.sh`
 - Test: `tests/test_model_capability_doctor_script.py`
 
-- [ ] **Step 1: Publish the new version and catalog**
+- [x] **Step 1: Publish the new version and catalog**
 
 Set:
 
@@ -185,7 +185,7 @@ SCRIPT_VERSION="0.4.0"
 
 Change help text to `62-item core catalog`. Replace tests `014-018` with the five `上下文` capacity levels, delete duplicate entries `026-028`, and shift current `029-065` entries backward by three IDs exactly as specified in the design.
 
-- [ ] **Step 2: Add input-token extraction and the uniform capacity handler**
+- [x] **Step 2: Add input-token extraction and the uniform capacity handler**
 
 Add a protocol-neutral extractor:
 
@@ -216,11 +216,11 @@ detected="request_chars=${chars},input_tokens=${input_tokens:-unknown}"
 
 Use `ERROR` for curl failures, `FAIL` for `400|413|422` and missing markers, `UNDETERMINED` for unknown protocols, and `PASS` only for exact marker recall. The success conclusion must report characters and observed input tokens separately.
 
-- [ ] **Step 3: Remove the long-output path**
+- [x] **Step 3: Remove the long-output path**
 
 Delete `long_output_body`, `output_token_count`, `response_is_truncated`, `perform_long_output_request`, `core_long_structure_complete`, `run_core_long_output_test`, `OUTPUT_8K_*`, and `LONG_OUTPUT_*`. Keep `normalize_json_text` because tool-result tests still use it.
 
-- [ ] **Step 4: Migrate downstream handlers and internal markers**
+- [x] **Step 4: Migrate downstream handlers and internal markers**
 
 Shift all hard-coded IDs and dispatch ranges:
 
@@ -236,7 +236,7 @@ Shift all hard-coded IDs and dispatch ranges:
 
 Update prompt markers, follow-up request IDs, repeated-sample IDs, and any test-specific branches by the same migration table. Do not change test semantics besides IDs.
 
-- [ ] **Step 5: Run focused tests and shell syntax verification**
+- [x] **Step 5: Run focused tests and shell syntax verification**
 
 Run:
 
@@ -247,7 +247,7 @@ python3 -m unittest tests.test_model_capability_doctor_script -v
 
 Expected: shell syntax succeeds and all script contract tests pass.
 
-- [ ] **Step 6: Commit the shell implementation**
+- [x] **Step 6: Commit the shell implementation**
 
 ```bash
 git add model-capability-doctor.sh
@@ -261,7 +261,7 @@ git commit -m "feat: replace long output with context capacity tests"
 - Modify: `skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py`
 - Test: `tests/test_model_doctor_assessment.py`
 
-- [ ] **Step 1: Write failing tests for `0.4.0` and historical `0.3.0` maps**
+- [x] **Step 1: Write failing tests for `0.4.0` and historical `0.3.0` maps**
 
 Specify the current map:
 
@@ -277,7 +277,7 @@ expected_observation = all_ids - expected_critical - expected_important
 
 Keep a separate assertion for the historical `0.3.0` map currently encoded by the tests. Add validation cases proving a wrong `0.4.0` gate and a wrong `0.3.0` gate are both rejected.
 
-- [ ] **Step 2: Run the focused assessment tests and verify RED**
+- [x] **Step 2: Run the focused assessment tests and verify RED**
 
 ```bash
 python3 -m unittest tests.test_model_doctor_assessment -v
@@ -285,7 +285,7 @@ python3 -m unittest tests.test_model_doctor_assessment -v
 
 Expected: FAIL because the module has only one `0.3.0` map.
 
-- [ ] **Step 3: Implement version-specific maps**
+- [x] **Step 3: Implement version-specific maps**
 
 Define:
 
@@ -317,7 +317,7 @@ CATALOG_GATE_LEVELS = {
 
 In `validate_reviews`, select the map by `parsed["run"]["script_version"]` and enforce a gate only when that version has a fixed map. Preserve the current product-principle behavior for older or unknown versions.
 
-- [ ] **Step 4: Run assessment tests and verify GREEN**
+- [x] **Step 4: Run assessment tests and verify GREEN**
 
 ```bash
 python3 -m unittest tests.test_model_doctor_assessment -v
@@ -325,7 +325,7 @@ python3 -m unittest tests.test_model_doctor_assessment -v
 
 Expected: all assessment tests pass.
 
-- [ ] **Step 5: Commit the report mapping implementation**
+- [x] **Step 5: Commit the report mapping implementation**
 
 ```bash
 git add tests/test_model_doctor_assessment.py skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py
@@ -340,7 +340,7 @@ git commit -m "feat: version model doctor gate mappings"
 - Modify: `README.md`
 - Test: `tests/test_model_doctor_skill.py`
 
-- [ ] **Step 1: Write failing skill-rule assertions**
+- [x] **Step 1: Write failing skill-rule assertions**
 
 Require the rules to state:
 
@@ -353,7 +353,7 @@ self.assertIn("次要检测项共 34 项", text)
 self.assertIn("历史 v0.3.0", text)
 ```
 
-- [ ] **Step 2: Run the skill tests and verify RED**
+- [x] **Step 2: Run the skill tests and verify RED**
 
 ```bash
 python3 -m unittest tests.test_model_doctor_skill -v
@@ -361,7 +361,7 @@ python3 -m unittest tests.test_model_doctor_skill -v
 
 Expected: FAIL because the rules still call `0.3.0` current and report 26/39.
 
-- [ ] **Step 3: Update rules and README**
+- [x] **Step 3: Update rules and README**
 
 Document the `0.4.0` map first, followed by the preserved `0.3.0` map. Replace README long-output examples with:
 
@@ -375,7 +375,7 @@ Document the `0.4.0` map first, followed by the preserved `0.3.0` map. Replace R
 
 State that the payloads use 32K/64K/128K/256K/512K characters as approximations, observed input token counts are reported separately, successful recall is a lower bound, and the catalog has 62 tests. Remove recommendations specific to generated long output.
 
-- [ ] **Step 4: Run skill and script tests**
+- [x] **Step 4: Run skill and script tests**
 
 ```bash
 python3 -m unittest tests.test_model_doctor_skill tests.test_model_capability_doctor_script -v
@@ -383,7 +383,7 @@ python3 -m unittest tests.test_model_doctor_skill tests.test_model_capability_do
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit documentation and rule changes**
+- [x] **Step 5: Commit documentation and rule changes**
 
 ```bash
 git add README.md tests/test_model_doctor_skill.py skills/creating-model-doctor-reports/references/evaluation-rules.md
@@ -395,7 +395,7 @@ git commit -m "docs: describe context-only model capacity checks"
 **Files:**
 - Verify: all modified files
 
-- [ ] **Step 1: Run the complete automated suite**
+- [x] **Step 1: Run the complete automated suite**
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -403,7 +403,7 @@ python3 -m unittest discover -s tests -v
 
 Expected: all tests pass with zero failures or errors.
 
-- [ ] **Step 2: Run static and contract checks**
+- [x] **Step 2: Run static and contract checks**
 
 ```bash
 bash -n model-capability-doctor.sh
@@ -414,7 +414,7 @@ git diff --check
 
 Expected: valid shell syntax, help reports `0.4.0`/62 tests, the catalog has exactly 62 unique rows, and no whitespace errors exist.
 
-- [ ] **Step 3: Confirm long-output code is absent**
+- [x] **Step 3: Confirm long-output code is absent**
 
 ```bash
 rg -n 'long_output|LONG_OUTPUT|MODEL_DOCTOR_OUTPUT_|完整 Result JSON|长输出结果' model-capability-doctor.sh README.md skills/creating-model-doctor-reports tests
@@ -422,7 +422,7 @@ rg -n 'long_output|LONG_OUTPUT|MODEL_DOCTOR_OUTPUT_|完整 Result JSON|长输出
 
 Expected: no active-code or current-documentation matches. Historical design and plan documents are intentionally excluded from this check.
 
-- [ ] **Step 4: Inspect the final branch diff and commits**
+- [x] **Step 4: Inspect the final branch diff and commits**
 
 ```bash
 git status --short
