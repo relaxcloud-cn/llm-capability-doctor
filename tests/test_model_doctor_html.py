@@ -20,12 +20,12 @@ from model_doctor_html import render_report  # noqa: E402
 from model_doctor_log import parse_log  # noqa: E402
 
 
-def review(status="PASS"):
+def review(status="PASS", gate="critical"):
     return {
         "testId": "001",
         "reviewedStatus": status,
         "confidence": "high",
-        "gateLevel": "critical",
+        "gateLevel": gate,
         "conclusion": "完整 URL 可连接并正常返回。",
         "logic": {
             "purpose": "验证完整模型地址是否可连接。",
@@ -41,13 +41,13 @@ def review(status="PASS"):
     }
 
 
-def assessment(status="PASS"):
+def assessment(status="PASS", gate="critical"):
     parsed = parse_log(FIXTURES / "minimal.log")
-    return assemble_assessment(parsed, {"001": review(status)})
+    return assemble_assessment(parsed, {"001": review(status, gate)})
 
 
 class ModelDoctorHtmlTests(unittest.TestCase):
-    def test_render_report_uses_legacy_two_table_information_architecture(self):
+    def test_render_report_uses_summary_and_two_priority_result_tables(self):
         html = render_report(assessment(), ASSET_DIR)
         body = html.split("</style>", 1)[1]
 
@@ -55,13 +55,32 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn("Model Doctor 客户模型就绪度报告", html)
         self.assertIn("test-model", html)
         self.assertIn("openai_chat", html)
-        self.assertEqual(body.count("<table"), 2)
+        self.assertEqual(body.count("<table"), 3)
         self.assertIn("能力域总结", body)
-        self.assertIn("逐项检测结果", body)
+        self.assertIn("重要检测项", body)
+        self.assertIn("次要检测项", body)
         self.assertIn("<th>能力域</th><th>状态</th><th>关键数据</th><th>最终结论</th>", body)
         self.assertIn("<th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th>", body)
         for removed in ("status-counts", "filter-bar", "method-grid", "integrity-grid"):
             self.assertNotIn(removed, body)
+
+    def test_result_rows_are_partitioned_by_gate_level_without_duplication(self):
+        important_html = render_report(assessment(gate="important"), ASSET_DIR)
+        important_body = important_html.split("</style>", 1)[1]
+        important_section = important_body.split("重要检测项", 1)[1].split("次要检测项", 1)[0]
+        secondary_section = important_body.split("次要检测项", 1)[1]
+
+        self.assertIn('data-detail-id="test-detail-001"', important_section)
+        self.assertNotIn('data-detail-id="test-detail-001"', secondary_section)
+
+        observation_html = render_report(assessment(gate="observation"), ASSET_DIR)
+        observation_body = observation_html.split("</style>", 1)[1]
+        important_section = observation_body.split("重要检测项", 1)[1].split("次要检测项", 1)[0]
+        secondary_section = observation_body.split("次要检测项", 1)[1]
+
+        self.assertNotIn('data-detail-id="test-detail-001"', important_section)
+        self.assertIn('data-detail-id="test-detail-001"', secondary_section)
+        self.assertEqual(observation_body.count('data-detail-id="test-detail-001"'), 1)
 
     def test_each_result_row_has_one_hidden_accessible_detail_row(self):
         html = render_report(assessment(), ASSET_DIR)

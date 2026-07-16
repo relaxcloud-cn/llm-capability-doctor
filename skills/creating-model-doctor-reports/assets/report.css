@@ -65,6 +65,19 @@ caption {
   margin-bottom: 24px;
 }
 
+.result-section + .result-section {
+  margin-top: 28px;
+}
+
+.results-heading {
+  margin: 0 0 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
 .summary-table col:nth-child(1) { width: 8rem; }
 .summary-table col:nth-child(2) { width: 6rem; }
 .summary-table col:nth-child(3) { width: 14rem; }

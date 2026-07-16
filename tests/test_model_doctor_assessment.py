@@ -13,6 +13,7 @@ CLI = SCRIPT_DIR / "model_doctor_report.py"
 FIXTURES = ROOT / "tests" / "fixtures" / "model-doctor"
 sys.path.insert(0, str(SCRIPT_DIR))
 
+import model_doctor_assessment as assessment_module  # noqa: E402
 from model_doctor_assessment import (  # noqa: E402
     ASSESSMENT_SCHEMA_VERSION,
     assemble_assessment,
@@ -95,6 +96,37 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         errors = validate_reviews(self.parsed, {"001": review})
 
         self.assertTrue(any("request:missing" in error for error in errors))
+
+    def test_current_catalog_gate_mapping_covers_all_65_tests(self):
+        mapping = getattr(assessment_module, "CURRENT_CATALOG_GATE_LEVELS", {})
+        expected_critical = {f"{value:03d}" for value in range(1, 7)} | {
+            f"{value:03d}" for value in range(43, 54)
+        }
+        expected_important = {
+            *(f"{value:03d}" for value in range(26, 29)),
+            *(f"{value:03d}" for value in range(35, 40)),
+            "060",
+        }
+        expected_observation = {
+            *(f"{value:03d}" for value in range(7, 26)),
+            *(f"{value:03d}" for value in range(29, 35)),
+            *(f"{value:03d}" for value in range(40, 43)),
+            *(f"{value:03d}" for value in range(54, 60)),
+            *(f"{value:03d}" for value in range(61, 66)),
+        }
+
+        self.assertEqual(set(mapping), {f"{value:03d}" for value in range(1, 66)})
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "critical"}, expected_critical)
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "important"}, expected_important)
+        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "observation"}, expected_observation)
+
+    def test_validate_reviews_rejects_wrong_gate_for_current_catalog(self):
+        self.parsed["run"]["script_version"] = "0.3.0"
+        review = valid_review(gate="observation")
+
+        errors = validate_reviews(self.parsed, {"001": review})
+
+        self.assertTrue(any("001" in error and "critical" in error for error in errors))
 
     def test_assemble_assessment_uses_reviewed_status_as_only_formal_verdict(self):
         review = valid_review(status="FAIL")

@@ -147,6 +147,19 @@ def _test_rows(items: List[dict]) -> str:
     return "".join(_test_row_group(item) for item in items)
 
 
+def _result_section(model: object, title: str, section_id: str, items: List[dict]) -> str:
+    return (
+        f'<section class="result-section" aria-labelledby="{_e(section_id)}">'
+        f'<h2 id="{_e(section_id)}" class="results-heading">{_e(title)}</h2>'
+        '<table class="results-table">'
+        f'<caption>{_e(model)} {_e(title)}</caption>'
+        '<colgroup><col><col><col><col></colgroup>'
+        '<thead><tr><th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th></tr></thead>'
+        f'{_test_rows(items)}'
+        '</table></section>'
+    )
+
+
 def _observed_protocol(assessment: dict) -> str:
     run = assessment.get("run", {})
     declared = run.get("protocol") or run.get("detected_protocol")
@@ -174,6 +187,9 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     run = assessment.get("run", {})
     model = run.get("model", "未知模型")
     protocol = _observed_protocol(assessment)
+    tests = assessment.get("tests", [])
+    important_tests = [item for item in tests if item.get("gateLevel") in {"critical", "important"}]
+    secondary_tests = [item for item in tests if item.get("gateLevel") == "observation"]
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -194,12 +210,8 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     <tbody>{_category_rows(assessment.get('categories', []))}</tbody>
   </table>
 
-  <table class="results-table">
-    <caption>{_e(model)} 逐项检测结果</caption>
-    <colgroup><col><col><col><col></colgroup>
-    <thead><tr><th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th></tr></thead>
-    {_test_rows(assessment.get('tests', []))}
-  </table>
+  {_result_section(model, '重要检测项', 'important-results-heading', important_tests)}
+  {_result_section(model, '次要检测项', 'secondary-results-heading', secondary_tests)}
 </main>
 <script>{script}</script>
 </body>

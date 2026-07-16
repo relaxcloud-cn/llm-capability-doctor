@@ -13,6 +13,14 @@ STATUSES = {"PASS", "FAIL", "UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"}
 CONFIDENCES = {"high", "medium", "low"}
 GATE_LEVELS = {"critical", "important", "observation"}
 LOGIC_FIELDS = {"purpose", "method", "passCriteria", "failCriteria", "capabilityBoundary"}
+CURRENT_CATALOG_GATE_LEVELS = {
+    **{f"{test_id:03d}": "critical" for test_id in (*range(1, 7), *range(43, 54))},
+    **{f"{test_id:03d}": "important" for test_id in (*range(26, 29), *range(35, 40), 60)},
+    **{
+        f"{test_id:03d}": "observation"
+        for test_id in (*range(7, 26), *range(29, 35), *range(40, 43), *range(54, 60), *range(61, 66))
+    },
+}
 
 
 def _non_empty_string(value: object) -> bool:
@@ -69,6 +77,9 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
             errors.append(f"Test {test_id} confidence is invalid")
         if gate not in GATE_LEVELS:
             errors.append(f"Test {test_id} gateLevel is invalid")
+        expected_gate = CURRENT_CATALOG_GATE_LEVELS.get(test_id)
+        if parsed.get("run", {}).get("script_version") == "0.3.0" and expected_gate and gate != expected_gate:
+            errors.append(f"Test {test_id} gateLevel must be {expected_gate} for script v0.3.0")
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
 

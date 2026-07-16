@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = ROOT / "skills" / "creating-model-doctor-reports"
 SKILL_PATH = SKILL_ROOT / "SKILL.md"
 AGENT_PATH = SKILL_ROOT / "agents" / "openai.yaml"
+RULES_PATH = SKILL_ROOT / "references" / "evaluation-rules.md"
 
 
 class SkillContractTests(unittest.TestCase):
@@ -38,6 +39,16 @@ class SkillContractTests(unittest.TestCase):
 
         self.assertIn('display_name: "Model Doctor Report"', text)
         self.assertIn("$creating-model-doctor-reports", text)
+
+    def test_evaluation_rules_fix_current_catalog_priority_groups(self):
+        text = RULES_PATH.read_text(encoding="utf-8")
+
+        self.assertIn("当前 v0.3.0 的 65 项目录使用固定优先级", text)
+        self.assertIn("`critical`：`001-006`、`043-053`", text)
+        self.assertIn("`important`：`026-028`、`035-039`、`060`", text)
+        self.assertIn("`observation`：`007-025`、`029-034`、`040-042`、`054-059`、`061-065`", text)
+        self.assertIn("重要检测项共 26 项", text)
+        self.assertIn("次要检测项共 39 项", text)
 
 
 if __name__ == "__main__":
