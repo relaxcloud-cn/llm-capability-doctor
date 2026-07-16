@@ -40,15 +40,17 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn('display_name: "Model Doctor Report"', text)
         self.assertIn("$creating-model-doctor-reports", text)
 
-    def test_evaluation_rules_fix_current_catalog_priority_groups(self):
+    def test_evaluation_rules_fix_current_and_historical_catalog_priority_groups(self):
         text = RULES_PATH.read_text(encoding="utf-8")
 
-        self.assertIn("当前 v0.3.0 的 65 项目录使用固定优先级", text)
+        self.assertIn("当前 v0.4.0 的 62 项目录使用固定优先级", text)
+        self.assertIn("`critical`：`001-006`、`040-050`", text)
+        self.assertIn("`important`：`014-018`、`032-036`、`057`", text)
+        self.assertIn("重要检测项共 28 项", text)
+        self.assertIn("次要检测项共 34 项", text)
+        self.assertIn("历史 v0.3.0", text)
         self.assertIn("`critical`：`001-006`、`043-053`", text)
         self.assertIn("`important`：`026-028`、`035-039`、`060`", text)
-        self.assertIn("`observation`：`007-025`、`029-034`、`040-042`、`054-059`、`061-065`", text)
-        self.assertIn("重要检测项共 26 项", text)
-        self.assertIn("次要检测项共 39 项", text)
 
 
 if __name__ == "__main__":

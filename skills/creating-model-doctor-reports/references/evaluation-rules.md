@@ -44,16 +44,24 @@ Use confidence independently from status:
 - `observation`: useful secondary capability or measurement that does not
   independently block use.
 
-当前 v0.3.0 的 65 项目录使用固定优先级，不得根据单次结果升降级：
+当前 v0.4.0 的 62 项目录使用固定优先级，不得根据单次结果升降级：
+
+- `critical`：`001-006`、`040-050`。
+- `important`：`014-018`、`032-036`、`057`。
+- `observation`：`007-013`、`019-031`、`037-039`、`051-056`、`058-062`。
+
+HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”，
+重要检测项共 28 项；将 `observation` 显示为“次要检测项”，次要检测项共 34 项。
+
+历史 v0.3.0 的 65 项目录继续使用其原始固定优先级：
 
 - `critical`：`001-006`、`043-053`。
 - `important`：`026-028`、`035-039`、`060`。
 - `observation`：`007-025`、`029-034`、`040-042`、`054-059`、`061-065`。
 
-HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”，
-重要检测项共 26 项；将 `observation` 显示为“次要检测项”，次要检测项共 39 项。
+历史 v0.3.0 报告包含 26 项重要检测项和 39 项次要检测项。
 对于旧版或未知编号日志，按相同产品原则确定 gate level，不得套用不匹配的
-v0.3.0 编号含义。
+v0.3.0 或 v0.4.0 编号含义。
 
 Overall verdict:
 
@@ -94,12 +102,14 @@ envelope. Require one parseable JSON value when the test asks for JSON. Verify
 field nesting, types, arrays, references, and trailing content. Substring
 presence is not sufficient evidence for a valid contract.
 
-### Long Output
+### Long Output (Historical Logs)
 
 Separate timeout, unsupported limit, truncation, malformed output, and semantic
 incompleteness. Confirm visible content length, reported output tokens when
 present, finish reason, completion marker, and required structure. A timeout
 before first byte is `ERROR` or `UNDETERMINED`, not proof of unsupported output.
+The current v0.4.0 catalog has no long-output tests; apply these rules only to
+historical logs that contain them.
 
 ### Instruction and Text
 
