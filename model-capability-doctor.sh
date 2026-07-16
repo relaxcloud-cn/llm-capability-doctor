@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-SCRIPT_VERSION="0.6.0"
+SCRIPT_VERSION="0.6.1"
+ANTHROPIC_MAX_TOKENS="2048"
 
 usage() {
   printf 'Model Capability Doctor %s\n\n' "$SCRIPT_VERSION"
@@ -131,6 +132,15 @@ redact_url() {
   printf '%s' "$1" | sed -E 's/([?&](api_key|key|token|access_token)=)[^&]*/\1[REDACTED]/g'
 }
 
+mask_api_key() {
+  local value="$1"
+  if (( ${#value} <= 8 )); then
+    printf '%s' '[MASKED]'
+  else
+    printf '%s********%s' "${value:0:4}" "${value: -4}"
+  fi
+}
+
 build_redaction_secrets() {
   local query=""
   local previous_ifs="$IFS"
@@ -232,7 +242,7 @@ write_log_header() {
     echo "started_at: $RUN_STARTED_AT"
     echo "url: $safe_url"
     echo "model: $MODEL"
-    echo "api_key: [REDACTED]"
+    echo "api_key: $(mask_api_key "$API_KEY")"
     echo "curl_version: $(curl --version | sed -n '1p')"
     echo "test_count: $SELECTED_TEST_COUNT"
     echo
@@ -491,7 +501,7 @@ protocol_body() {
       printf '{"model":"%s","input":"%s","stream":%s}' "$escaped_model" "$escaped_prompt" "$stream"
       ;;
     anthropic_messages)
-      printf '{"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"%s"}],"stream":%s}' "$escaped_model" "$escaped_prompt" "$stream"
+      printf '{"model":"%s","max_tokens":%s,"messages":[{"role":"user","content":"%s"}],"stream":%s}' "$escaped_model" "$ANTHROPIC_MAX_TOKENS" "$escaped_prompt" "$stream"
       ;;
     gemini_generate_content)
       printf '{"contents":[{"role":"user","parts":[{"text":"%s"}]}],"generationConfig":{"maxOutputTokens":64}}' "$escaped_prompt"
@@ -1231,7 +1241,7 @@ core_multi_turn_body() {
       printf '{"model":"%s","input":[{"role":"user","content":"Current state is OLD_STATE."},{"role":"assistant","content":"Acknowledged OLD_STATE."},{"role":"user","content":"Correction: current state is NEW_STATE. Reply only NEW_STATE."}],"stream":false}' "$escaped_model"
       ;;
     anthropic_messages)
-      printf '{"model":"%s","max_tokens":64,"messages":[{"role":"user","content":"Current state is OLD_STATE."},{"role":"assistant","content":"Acknowledged OLD_STATE."},{"role":"user","content":"Correction: current state is NEW_STATE. Reply only NEW_STATE."}],"stream":false}' "$escaped_model"
+      printf '{"model":"%s","max_tokens":%s,"messages":[{"role":"user","content":"Current state is OLD_STATE."},{"role":"assistant","content":"Acknowledged OLD_STATE."},{"role":"user","content":"Correction: current state is NEW_STATE. Reply only NEW_STATE."}],"stream":false}' "$escaped_model" "$ANTHROPIC_MAX_TOKENS"
       ;;
     gemini_generate_content)
       printf '{"contents":[{"role":"user","parts":[{"text":"Current state is OLD_STATE."}]},{"role":"model","parts":[{"text":"Acknowledged OLD_STATE."}]},{"role":"user","parts":[{"text":"Correction: current state is NEW_STATE. Reply only NEW_STATE."}]}],"generationConfig":{"maxOutputTokens":64}}'
@@ -1467,7 +1477,7 @@ core_tool_body() {
       printf '{"model":"%s","input":"%s","tools":[%s],"tool_choice":"auto","parallel_tool_calls":%s}' "$escaped_model" "$escaped_prompt" "$responses_tools" "$([[ "$id" == "045" ]] && echo true || echo false)"
       ;;
     anthropic_messages)
-      printf '{"model":"%s","max_tokens":256,"messages":[{"role":"user","content":"%s"}],"tools":[%s]}' "$escaped_model" "$escaped_prompt" "$anthropic_tools"
+      printf '{"model":"%s","max_tokens":%s,"messages":[{"role":"user","content":"%s"}],"tools":[%s]}' "$escaped_model" "$ANTHROPIC_MAX_TOKENS" "$escaped_prompt" "$anthropic_tools"
       ;;
     gemini_generate_content)
       printf '{"contents":[{"role":"user","parts":[{"text":"%s"}]}],"tools":[{"functionDeclarations":[%s]}]}' "$escaped_prompt" "$gemini_tools"

@@ -44,6 +44,42 @@ button {
   margin: 0 auto;
 }
 
+.run-information {
+  margin-bottom: 24px;
+}
+
+.run-information-heading {
+  margin: 0 0 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.run-metadata {
+  margin: 0;
+  border-top: 1px solid var(--line);
+}
+
+.run-metadata > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.run-metadata dt {
+  color: var(--muted-foreground);
+}
+
+.run-metadata dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -289,6 +325,11 @@ pre {
 @media (max-width: 640px) {
   body {
     padding: 10px;
+  }
+
+  .run-metadata > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
   }
 
   table,

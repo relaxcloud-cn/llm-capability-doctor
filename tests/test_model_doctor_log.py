@@ -17,6 +17,21 @@ from model_doctor_log import parse_log, redact_text, test_packet  # noqa: E402
 
 
 class ModelDoctorLogTests(unittest.TestCase):
+    def test_parse_log_preserves_collector_masked_api_key(self):
+        source = (FIXTURES / "minimal.log").read_text(encoding="utf-8")
+        masked = source.replace(
+            "api_key: [REDACTED]",
+            "api_key: sk-t********5678",
+            1,
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "masked.log"
+            path.write_text(masked, encoding="utf-8")
+
+            parsed = parse_log(path)
+
+        self.assertEqual(parsed["run"]["api_key"], "sk-t********5678")
+
     def test_parse_log_extracts_run_request_test_and_summary(self):
         parsed = parse_log(FIXTURES / "minimal.log")
 

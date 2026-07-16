@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -27,7 +28,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def run_fixture(self, scenario, only, *, include_parsed=False):
+    def run_fixture(self, scenario, only, *, include_parsed=False, api_key="fixture-key"):
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             fake_curl = directory / "curl"
@@ -46,7 +47,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
                     "--model",
                     "fixture-model",
                     "--api-key",
-                    "fixture-key",
+                    api_key,
                     "--only",
                     only,
                     "--log-file",
@@ -70,6 +71,40 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("result: PASS", log)
         self.assertIn("REQUEST test-004 BEGIN", log)
         self.assertIn("MODEL_DOCTOR_CASE_004_OK", log)
+
+    def test_anthropic_requests_share_the_2048_output_budget(self):
+        result, _, parsed = self.run_fixture(
+            "anthropic_output_budget",
+            "004,031,032,040",
+            include_parsed=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for request_id in (
+            "protocol-3",
+            "test-004",
+            "test-031",
+            "test-032",
+            "test-040",
+        ):
+            body = json.loads(parsed["requests"][request_id]["requestBody"])
+            self.assertEqual(body["max_tokens"], 2048, request_id)
+        thinking_body = json.loads(parsed["requests"]["test-032"]["requestBody"])
+        self.assertEqual(thinking_body["thinking"]["budget_tokens"], 1024)
+
+    def test_run_header_masks_api_key_without_logging_the_complete_value(self):
+        result, log = self.run_fixture("basic", "004")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("api_key: fixt********-key", log)
+        self.assertNotIn("fixture-key", log)
+
+    def test_short_api_key_is_fully_masked(self):
+        result, log = self.run_fixture("basic", "004", api_key="short")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("api_key: [MASKED]", log)
+        self.assertNotIn("api_key: short", log)
 
     def test_029_requires_the_explicit_cross_segment_contract(self):
         result, log = self.run_fixture("cross_segment_exact", "029")
@@ -281,8 +316,8 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         result = self.run_script("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SCRIPT_VERSION="0.6.0"', source)
-        self.assertIn("Model Capability Doctor 0.6.0", result.stdout)
+        self.assertIn('SCRIPT_VERSION="0.6.1"', source)
+        self.assertIn("Model Capability Doctor 0.6.1", result.stdout)
         self.assertIn("Defaults to 120", result.stdout)
         self.assertIn("62-item core catalog", result.stdout)
 

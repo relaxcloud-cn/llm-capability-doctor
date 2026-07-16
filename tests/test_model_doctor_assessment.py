@@ -138,12 +138,13 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
     def test_current_and_historical_62_item_versions_share_the_gate_mapping(self):
         mappings = getattr(assessment_module, "CATALOG_GATE_LEVELS", {})
 
+        self.assertEqual(mappings["0.6.1"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
         self.assertEqual(mappings["0.6.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
         self.assertEqual(mappings["0.5.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
         self.assertEqual(mappings["0.4.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
 
     def test_validate_reviews_rejects_wrong_gate_for_current_catalog(self):
-        self.parsed["run"]["script_version"] = "0.6.0"
+        self.parsed["run"]["script_version"] = "0.6.1"
         review = valid_review(gate="observation")
 
         errors = validate_reviews(self.parsed, {"001": review})
@@ -151,7 +152,7 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         self.assertTrue(any("001" in error and "critical" in error for error in errors))
 
     def test_validate_reviews_rejects_wrong_gate_for_historical_62_item_catalogs(self):
-        for version in ("0.5.0", "0.4.0"):
+        for version in ("0.6.0", "0.5.0", "0.4.0"):
             with self.subTest(version=version):
                 self.parsed["run"]["script_version"] = version
                 review = valid_review(gate="observation")

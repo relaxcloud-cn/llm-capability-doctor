@@ -37,6 +37,43 @@ def chat(content, *, reasoning_tokens=None):
     )
 
 
+def anthropic_message(content):
+    return json.dumps(
+        {
+            "id": "msg_fixture",
+            "type": "message",
+            "role": "assistant",
+            "model": "fixture-model",
+            "content": [{"type": "text", "text": content}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 8, "output_tokens": 4},
+        },
+        separators=(",", ":"),
+    )
+
+
+def anthropic_tool_use():
+    return json.dumps(
+        {
+            "id": "msg_fixture",
+            "type": "message",
+            "role": "assistant",
+            "model": "fixture-model",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_fixture",
+                    "name": "get_weather",
+                    "input": {"city": "Beijing"},
+                }
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 8, "output_tokens": 4},
+        },
+        separators=(",", ":"),
+    )
+
+
 def truncated_chat(content):
     return '{"choices":[{"message":{"content":' + json.dumps(content)
 
@@ -87,7 +124,22 @@ scenario = os.environ.get("MODEL_DOCTOR_FAKE_SCENARIO", "basic")
 http_status = "200"
 time_total = "0.020"
 
-if "MODEL_DOCTOR_PROTOCOL_OK" in request_body:
+if scenario == "anthropic_output_budget":
+    payload = json.loads(request_body)
+    if "max_tokens" not in payload:
+        response = '{"error":{"message":"max_tokens is required"}}'
+        http_status = "400"
+    elif "MODEL_DOCTOR_CASE_040" in request_body:
+        response = anthropic_tool_use()
+    elif "MODEL_DOCTOR_CASE_004_OK" in request_body:
+        response = anthropic_message("MODEL_DOCTOR_CASE_004_OK")
+    elif "NEW_STATE" in request_body:
+        response = anthropic_message("NEW_STATE")
+    elif "MODEL_DOCTOR_THINKING_OK" in request_body:
+        response = anthropic_message("MODEL_DOCTOR_THINKING_OK")
+    else:
+        response = anthropic_message("MODEL_DOCTOR_PROTOCOL_OK")
+elif "MODEL_DOCTOR_PROTOCOL_OK" in request_body:
     response = chat("MODEL_DOCTOR_PROTOCOL_OK")
 elif scenario == "basic" and "MODEL_DOCTOR_CASE_004_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_004_OK")

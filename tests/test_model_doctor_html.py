@@ -47,6 +47,37 @@ def assessment(status="PASS", gate="critical"):
 
 
 class ModelDoctorHtmlTests(unittest.TestCase):
+    def test_report_header_displays_run_metadata(self):
+        value = assessment()
+        value["run"].update(
+            {
+                "url": "https://model.example/v1/messages?region=cn&mode=<audit>",
+                "model": "deepseek-v4-pro[1m]",
+                "api_key": "sk-t********5678",
+            }
+        )
+
+        html = render_report(value, ASSET_DIR)
+        body = html.split("</style>", 1)[1]
+
+        self.assertIn("检测信息", body)
+        self.assertIn("检测 URL", body)
+        self.assertIn("模型名称", body)
+        self.assertIn("API Key", body)
+        self.assertIn(
+            "https://model.example/v1/messages?region=cn&amp;mode=&lt;audit&gt;",
+            body,
+        )
+        self.assertIn("deepseek-v4-pro[1m]", body)
+        self.assertIn("sk-t********5678", body)
+        self.assertLess(body.index("检测信息"), body.index("能力域总结"))
+
+    def test_report_header_renders_legacy_redacted_api_key(self):
+        html = render_report(assessment(), ASSET_DIR)
+
+        self.assertIn("API Key", html)
+        self.assertIn("[REDACTED]", html)
+
     def test_render_report_uses_summary_and_two_priority_result_tables(self):
         html = render_report(assessment(), ASSET_DIR)
         body = html.split("</style>", 1)[1]

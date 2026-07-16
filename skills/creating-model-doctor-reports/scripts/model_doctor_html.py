@@ -78,6 +78,24 @@ def _category_rows(categories: List[dict]) -> str:
     return "".join(rows)
 
 
+def _run_metadata(run: dict) -> str:
+    fields = (
+        ("检测 URL", run.get("url") or "未知"),
+        ("模型名称", run.get("model") or "未知"),
+        ("API Key", run.get("api_key") or "未知"),
+    )
+    rows = "".join(
+        f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
+        for label, value in fields
+    )
+    return (
+        '<section class="run-information" aria-labelledby="run-information-heading">'
+        '<h1 id="run-information-heading" class="run-information-heading">检测信息</h1>'
+        f'<dl class="run-metadata">{rows}</dl>'
+        "</section>"
+    )
+
+
 def _request_evidence(requests: List[dict]) -> str:
     if not requests:
         return '<p class="empty-evidence">日志未包含可关联的完整请求块。</p>'
@@ -203,6 +221,8 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 </head>
 <body>
 <main class="report-shell" aria-label="{_e(model)} 模型能力检测结论与逐项结果">
+  {_run_metadata(run)}
+
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>
     <colgroup><col><col><col><col></colgroup>
