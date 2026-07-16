@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -79,6 +81,73 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertNotIn("grep -Fq 'ctx_029_a'", source)
         self.assertIn('"test-058-repeat-${index}"', source)
         self.assertNotIn('"test-061-repeat-${index}"', source)
+
+    def test_terminal_shows_only_current_test_while_log_keeps_result_details(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            fake_curl = directory / "curl"
+            log_path = directory / "doctor.log"
+            fake_curl.write_text(
+                """#!/usr/bin/env bash
+if [[ "${1:-}" == "--version" ]]; then
+  echo "curl mock"
+  exit 0
+fi
+output_file=""
+headers_file=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) output_file="$2"; shift 2 ;;
+    --dump-header) headers_file="$2"; shift 2 ;;
+    --write-out) shift 2 ;;
+    *) shift ;;
+  esac
+done
+printf '%s' '{"choices":[{"message":{"content":"MODEL_DOCTOR_OK"}}]}' >"$output_file"
+printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n' >"$headers_file"
+printf '200\t0.010\t0.005\t61'
+""",
+                encoding="utf-8",
+            )
+            fake_curl.chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{directory}:{environment['PATH']}"
+
+            result = subprocess.run(
+                [
+                    "bash",
+                    str(SCRIPT),
+                    "--url",
+                    "https://model.example/v1/chat/completions",
+                    "--model",
+                    "test-model",
+                    "--api-key",
+                    "test-key",
+                    "--only",
+                    "001,002",
+                    "--log-file",
+                    str(log_path),
+                ],
+                cwd=ROOT,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("正在执行检测项 001：URL 可达性", result.stdout)
+            self.assertIn("正在执行检测项 002：协议识别", result.stdout)
+            self.assertLess(
+                result.stdout.index("正在执行检测项 001"),
+                result.stdout.index("正在执行检测项 002"),
+            )
+            self.assertNotIn("检测结果：", result.stdout)
+            self.assertNotIn("检测结论：", result.stdout)
+            log_text = log_path.read_text(encoding="utf-8")
+            self.assertIn("result: PASS", log_text)
+            self.assertIn("conclusion: URL 可连接", log_text)
+            self.assertIn("conclusion: 识别为 OpenAI Chat Completions 兼容接口", log_text)
 
 
 if __name__ == "__main__":

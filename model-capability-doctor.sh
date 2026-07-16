@@ -421,18 +421,14 @@ record_test() {
   local curl_exit="${11:-}"
 
   case "$status" in
-    PASS) PASS_COUNT=$((PASS_COUNT + 1)); RESULT_LABEL="通过" ;;
-    FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)); RESULT_LABEL="失败" ;;
-    UNSUPPORTED) UNSUPPORTED_COUNT=$((UNSUPPORTED_COUNT + 1)); RESULT_LABEL="不支持" ;;
-    UNDETERMINED) UNDETERMINED_COUNT=$((UNDETERMINED_COUNT + 1)); RESULT_LABEL="无法判定" ;;
-    SKIPPED) SKIPPED_COUNT=$((SKIPPED_COUNT + 1)); RESULT_LABEL="跳过" ;;
-    ERROR) ERROR_COUNT=$((ERROR_COUNT + 1)); RESULT_LABEL="执行错误" ;;
-    *) ERROR_COUNT=$((ERROR_COUNT + 1)); RESULT_LABEL="执行错误"; status="ERROR" ;;
+    PASS) PASS_COUNT=$((PASS_COUNT + 1)) ;;
+    FAIL) FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+    UNSUPPORTED) UNSUPPORTED_COUNT=$((UNSUPPORTED_COUNT + 1)) ;;
+    UNDETERMINED) UNDETERMINED_COUNT=$((UNDETERMINED_COUNT + 1)) ;;
+    SKIPPED) SKIPPED_COUNT=$((SKIPPED_COUNT + 1)) ;;
+    ERROR) ERROR_COUNT=$((ERROR_COUNT + 1)) ;;
+    *) ERROR_COUNT=$((ERROR_COUNT + 1)); status="ERROR" ;;
   esac
-
-  printf '检测项 %s：%s\n' "$id" "$name"
-  printf '检测结果：%s\n' "$RESULT_LABEL"
-  printf '检测结论：%s\n\n' "$conclusion"
 
   {
     echo "========== TEST-${id} BEGIN =========="
@@ -1516,7 +1512,13 @@ run_selected_tests() {
   local id=""
   local category=""
   local name=""
+  local protocol_checked=0
   while IFS=$'\t' read -r id category name; do
+    printf '正在执行检测项 %s：%s\n' "$id" "$name"
+    if [[ "$id" != "001" && "$protocol_checked" == "0" ]]; then
+      protocol_checked=1
+      detect_protocol || true
+    fi
     case "$id" in
       001) run_reachability_test "$id" "$category" "$name" ;;
       002) run_protocol_test "$id" "$category" "$name" ;;
@@ -1684,9 +1686,6 @@ CORE_REPEAT_P50_MS=""
 CORE_REPEAT_P95_MS=""
 
 write_log_header
-if selected_catalog | awk -F '\t' '$1 != "001" { found = 1 } END { exit found ? 0 : 1 }'; then
-  detect_protocol || true
-fi
 run_selected_tests
 write_run_summary
 exit 0
