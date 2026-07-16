@@ -25,6 +25,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('SCRIPT_VERSION="0.4.0"', source)
+        self.assertIn("Model Capability Doctor 0.4.0", result.stdout)
         self.assertIn("Defaults to 120", result.stdout)
         self.assertIn("62-item core catalog", result.stdout)
 

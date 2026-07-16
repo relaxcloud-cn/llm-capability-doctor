@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_VERSION="0.4.0"
 
 usage() {
+  printf 'Model Capability Doctor %s\n\n' "$SCRIPT_VERSION"
   cat <<'EOF'
 Usage:
   MODEL_API_KEY='secret' ./model-capability-doctor.sh --url URL --model MODEL [options]
