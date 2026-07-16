@@ -151,7 +151,7 @@ printf '200\t0.010\t0.005\t200'
 
             self.assertEqual(result.returncode, 0, result.stderr)
             log_text = log_path.read_text(encoding="utf-8")
-            self.assertIn("test_id: 014", log_text)
+            self.assertIn("========== TEST-014 BEGIN ==========", log_text)
             self.assertIn("request_chars=32000,input_tokens=12000", log_text)
             self.assertIn("CTX_014_OK", log_text)
             self.assertIn("字符负载", log_text)
