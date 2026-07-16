@@ -48,17 +48,32 @@ def assessment(status="PASS"):
 
 
 class ModelDoctorHtmlTests(unittest.TestCase):
-    def test_render_report_has_decision_first_information_architecture(self):
+    def test_render_report_uses_legacy_two_table_information_architecture(self):
         html = render_report(assessment(), ASSET_DIR)
+        body = html.split("</style>", 1)[1]
 
         self.assertIn('<html lang="zh-CN">', html)
         self.assertIn("Model Doctor 客户模型就绪度报告", html)
-        self.assertIn("READY", html)
         self.assertIn("test-model", html)
         self.assertIn("openai_chat", html)
-        self.assertLess(html.index("总体结论"), html.index("能力域总结"))
-        self.assertLess(html.index("能力域总结"), html.index("检测方法"))
-        self.assertLess(html.index("检测方法"), html.index("逐项检测结果"))
+        self.assertEqual(body.count("<table"), 2)
+        self.assertIn("能力域总结", body)
+        self.assertIn("逐项检测结果", body)
+        self.assertIn("<th>能力域</th><th>状态</th><th>关键数据</th><th>最终结论</th>", body)
+        self.assertIn("<th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th>", body)
+        for removed in ("status-counts", "filter-bar", "method-grid", "integrity-grid"):
+            self.assertNotIn(removed, body)
+
+    def test_each_result_row_has_one_hidden_accessible_detail_row(self):
+        html = render_report(assessment(), ASSET_DIR)
+
+        self.assertIn('class="result-row" data-detail-id="test-detail-001"', html)
+        self.assertIn(
+            'class="row-toggle" aria-expanded="false" aria-controls="test-detail-001"',
+            html,
+        )
+        self.assertIn('id="test-detail-001" class="evidence-row" hidden', html)
+        self.assertIn('<td colspan="4">', html)
 
     def test_render_report_shows_logic_input_output_and_evidence(self):
         html = render_report(assessment(), ASSET_DIR)
@@ -98,25 +113,23 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn("判定发生变化", html)
         self.assertIn("BLOCKED", html)
 
-    def test_render_report_has_grouping_filters_expand_controls_and_print_styles(self):
+    def test_report_has_plain_category_summary_and_independent_result_groups(self):
         html = render_report(assessment(), ASSET_DIR)
+        body = html.split("</style>", 1)[1].split("<script>", 1)[0]
 
-        self.assertIn('data-filter="status"', html)
-        self.assertIn('data-filter="gate"', html)
-        self.assertIn('data-filter="discrepancy"', html)
-        self.assertIn("接口与协议", html)
-        self.assertIn("展开全部证据", html)
+        self.assertIn("接口与协议", body)
+        self.assertIn('class="result-group"', body)
+        self.assertIn('class="result-row"', body)
+        self.assertNotIn('data-filter="status"', body)
+        self.assertNotIn("展开全部证据", body)
         self.assertIn("@media print", html)
-        self.assertIn("position: sticky", html)
-        self.assertNotIn("max-width: 736px", html)
 
-    def test_render_report_status_counts_match_assessment(self):
+    def test_category_and_result_counts_match_assessment(self):
         value = assessment()
         html = render_report(value, ASSET_DIR)
 
-        match = re.search(r'data-status-count="PASS"[^>]*>([0-9]+)<', html)
-        self.assertIsNotNone(match)
-        self.assertEqual(match.group(1), "1")
+        self.assertIn('<td data-label="关键数据">1/1 通过</td>', html)
+        self.assertEqual(html.count('class="result-group"'), 1)
 
     def test_render_report_does_not_mutate_assessment(self):
         value = assessment()
