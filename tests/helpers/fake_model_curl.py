@@ -36,6 +36,31 @@ def chat(content, *, reasoning_tokens=None):
     )
 
 
+def chat_stream(*, include_reasoning, complete=True):
+    events = []
+    if include_reasoning:
+        events.append(
+            {"choices": [{"delta": {"reasoning_content": "19 + 23 = 42"}, "finish_reason": None}]}
+        )
+    events.extend(
+        [
+            {"choices": [{"delta": {"content": "MODEL_DOCTOR_"}, "finish_reason": None}]},
+            {"choices": [{"delta": {"content": "CASE_036_OK"}, "finish_reason": None}]},
+        ]
+    )
+    if complete:
+        events.append(
+            {
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens_details": {"reasoning_tokens": 8}},
+            }
+        )
+    chunks = [f"data: {json.dumps(event, separators=(',', ':'))}" for event in events]
+    if complete:
+        chunks.append("data: [DONE]")
+    return "\n\n".join(chunks) + "\n\n"
+
+
 arguments = sys.argv[1:]
 if arguments == ["--version"]:
     print("curl fixture 1.0")
@@ -65,6 +90,16 @@ elif scenario == "defensive_exact" and "MODEL_DOCTOR_CASE_060" in request_body:
         '{"classification":"credential-attack","source":"203.0.113.7",'
         '"nextMove":"lock-account-and-review-auth-logs"}'
     )
+elif scenario == "thinking_separation_exact" and "MODEL_DOCTOR_CASE_035" in request_body:
+    response = chat("MODEL_DOCTOR_CASE_035_OK", reasoning_tokens=8)
+elif scenario == "thinking_separation_no_signal" and "MODEL_DOCTOR_CASE_035" in request_body:
+    response = chat("MODEL_DOCTOR_CASE_035_OK")
+elif scenario == "thinking_stream_exact" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = chat_stream(include_reasoning=True)
+elif scenario == "thinking_stream_no_reasoning" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = chat_stream(include_reasoning=False)
+elif scenario == "thinking_stream_truncated" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = chat_stream(include_reasoning=True, complete=False)
 else:
     response = chat("UNCONFIGURED_FIXTURE")
 

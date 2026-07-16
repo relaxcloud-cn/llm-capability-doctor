@@ -1108,13 +1108,40 @@ core_thinking_body() {
   esac
 }
 
-thinking_signal_present() {
-  grep -Eqi 'reasoning_content|reasoning_tokens|reasoning_summary|"thinking"|"reasoning"|response\.reasoning' "$1"
+thinking_metadata_present() {
+  grep -Eqi '"reasoning_tokens"[[:space:]]*:[[:space:]]*[1-9][0-9]*|"(reasoning_content|reasoning_summary|thinking)"[[:space:]]*:[[:space:]]*"[^"]+|"type"[[:space:]]*:[[:space:]]*"(reasoning|thinking)"' "$1"
+}
+
+thinking_stream_event_present() {
+  grep -Eqi '"reasoning_content"[[:space:]]*:[[:space:]]*"[^"]+|response\.(reasoning|reasoning_summary)[^"]*\.delta.*"delta"[[:space:]]*:[[:space:]]*"[^"]+|"type"[[:space:]]*:[[:space:]]*"(thinking_delta|reasoning_delta)"' "$1"
+}
+
+stream_completion_present() {
+  grep -Eqi '\[DONE\]|response\.completed|"type"[[:space:]]*:[[:space:]]*"message_stop"|"done"[[:space:]]*:[[:space:]]*true|"finish_reason"[[:space:]]*:[[:space:]]*"(stop|length|tool_calls)"' "$1"
+}
+
+write_stream_visible_evidence() {
+  local source_file="$1" target_file="$2"
+  case "$DETECTED_PROTOCOL" in
+    openai_chat|ollama_chat)
+      json_string_value "$source_file" content all | tr -d '\n' >"$target_file"
+      ;;
+    openai_responses)
+      grep -E 'response\.output_text\.delta' "$source_file" | json_string_value /dev/stdin delta all | tr -d '\n' >"$target_file"
+      ;;
+    anthropic_messages)
+      grep -E '"type"[[:space:]]*:[[:space:]]*"text_delta"' "$source_file" | json_string_value /dev/stdin text all | tr -d '\n' >"$target_file"
+      ;;
+    gemini_generate_content)
+      json_string_value "$source_file" text all | tr -d '\n' >"$target_file"
+      ;;
+    *) : >"$target_file" ;;
+  esac
 }
 
 run_core_thinking_test() {
   local id="$1" category="$2" name="$3"
-  local status="PASS" conclusion="" body="" low_file="" high_file="" evidence_file="" marker="MODEL_DOCTOR_THINKING_OK"
+  local status="PASS" conclusion="" body="" low_file="" high_file="" evidence_file="" marker="MODEL_DOCTOR_THINKING_OK" visible_file="$RUN_TMP_DIR/test-${id}.visible" visible=""
   if [[ "$id" == "033" ]]; then
     body="$(core_thinking_body low "$marker" false)"; perform_request "$body" 0 "test-${id}-low" "$DETECTED_AUTH_MODE"; low_file="$LAST_RESPONSE_FILE"
     if [[ "$LAST_CURL_EXIT" != "0" || ! "$LAST_HTTP_STATUS" =~ ^2 ]]; then status="UNSUPPORTED"; conclusion="Thinking low 档请求未成功"
@@ -1128,18 +1155,28 @@ run_core_thinking_test() {
     body="$(core_thinking_body low 'Reply only MODEL_DOCTOR_CASE_036_OK' true)"
     perform_request "$body" 1 "test-${id}" "$DETECTED_AUTH_MODE"
     evidence_file="$LAST_RESPONSE_FILE"
+    write_stream_visible_evidence "$LAST_RESPONSE_FILE" "$visible_file"
+    visible="$(cat "$visible_file" | trim_text)"
     if [[ "$LAST_CURL_EXIT" != "0" ]]; then status="ERROR"; conclusion="Thinking 流请求失败，curl ${LAST_CURL_EXIT}"
-    elif grep -Eqi 'reasoning|thinking' "$LAST_RESPONSE_FILE" && grep -Fq 'MODEL_DOCTOR_CASE_036_OK' "$LAST_RESPONSE_FILE" && grep -Eqi '\[DONE\]|response\.completed|"done"[[:space:]]*:[[:space:]]*true' "$LAST_RESPONSE_FILE"; then conclusion="请求体启用 stream=true，并收到 reasoning、答案和结束事件"
-    else status="UNDETERMINED"; conclusion="流式请求完成，但未同时检测到 reasoning、答案和结束事件"; fi
+    elif ! stream_completion_present "$LAST_RESPONSE_FILE"; then status="UNDETERMINED"; conclusion="流式响应缺少正常结束事件，无法判定 Thinking 事件能力"
+    elif [[ "$visible" != "MODEL_DOCTOR_CASE_036_OK" ]]; then status="FAIL"; conclusion="完整流式响应未组装出指定的最终答案"
+    elif ! thinking_stream_event_present "$LAST_RESPONSE_FILE"; then status="FAIL"; conclusion="完整流式响应没有独立 reasoning/thinking 事件"
+    else conclusion="请求体启用 stream=true，并收到独立 reasoning 事件、精确答案和结束事件"; fi
   else
-    body="$(core_thinking_body low "$marker" false)"
+    if [[ "$id" == "035" ]]; then
+      marker="MODEL_DOCTOR_CASE_035_OK"
+      body="$(core_thinking_body low "Compute 19 + 23 internally. Reply only ${marker}." false)"
+    else
+      body="$(core_thinking_body low "$marker" false)"
+    fi
     perform_request "$body" 0 "test-${id}" "$DETECTED_AUTH_MODE"
     evidence_file="$LAST_RESPONSE_FILE"
     if [[ "$LAST_CURL_EXIT" != "0" ]]; then status="ERROR"; conclusion="Thinking 请求失败，curl ${LAST_CURL_EXIT}"
     elif [[ "$LAST_HTTP_STATUS" =~ ^(400|404|405|415|422|501)$ ]]; then status="UNSUPPORTED"; conclusion="接口拒绝 Thinking 参数，HTTP ${LAST_HTTP_STATUS}"
     elif [[ "$id" == "032" ]]; then conclusion="接口接受 Thinking 参数"
     elif [[ "$id" == "034" ]] && grep -Eq '"reasoning_tokens"[[:space:]]*:[[:space:]]*[1-9][0-9]*|"reasoning_tokens"[[:space:]]*:[[:space:]]*[1-9]' "$LAST_RESPONSE_FILE"; then conclusion="响应暴露非零 reasoning token"
-    elif [[ "$id" == "035" ]] && thinking_signal_present "$LAST_RESPONSE_FILE" && [[ "$(extract_visible_text "$LAST_RESPONSE_FILE" 2>/dev/null | trim_text)" == "$marker" ]]; then conclusion="响应含独立 reasoning 信号且最终答案可单独提取"
+    elif [[ "$id" == "035" ]] && [[ "$(extract_visible_text "$LAST_RESPONSE_FILE" 2>/dev/null | trim_text)" != "$marker" ]]; then status="FAIL"; conclusion="最终答案不是指定的唯一标记"
+    elif [[ "$id" == "035" ]] && thinking_metadata_present "$LAST_RESPONSE_FILE"; then conclusion="响应含独立 reasoning 元数据且最终答案可单独提取"
     else status="UNDETERMINED"; conclusion="请求成功，但缺少该项可确认的 Thinking 证据"; fi
   fi
   record_test "$id" "$category" "$name" "$status" "$conclusion" "thinking evidence" "" "$(millis_from_seconds "${LAST_TIME_TOTAL:-0}")" "$evidence_file" "${LAST_HTTP_STATUS:-not_available}" "${LAST_CURL_EXIT:-not_available}"

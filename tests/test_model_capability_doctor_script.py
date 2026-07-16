@@ -91,6 +91,28 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("result: PASS", analysis_log)
         self.assertIn("credential-attack", analysis_log)
 
+    def test_035_requires_separate_reasoning_metadata_and_exact_visible_answer(self):
+        _, exact_log = self.run_fixture("thinking_separation_exact", "035")
+        self.assertIn("result: PASS", exact_log)
+        self.assertIn("Compute 19 + 23 internally", exact_log)
+
+        _, no_signal_log = self.run_fixture("thinking_separation_no_signal", "035")
+        self.assertIn("result: UNDETERMINED", no_signal_log)
+
+    def test_036_distinguishes_reasoning_events_from_final_usage(self):
+        _, exact_log = self.run_fixture("thinking_stream_exact", "036")
+        self.assertIn("result: PASS", exact_log)
+
+        _, no_reasoning_log = self.run_fixture("thinking_stream_no_reasoning", "036")
+        self.assertIn("result: FAIL", no_reasoning_log)
+
+    def test_036_treats_an_incomplete_stream_as_undetermined(self):
+        _, truncated_log = self.run_fixture("thinking_stream_truncated", "036")
+        self.assertIn("result: UNDETERMINED", truncated_log)
+        self.assertIn('"reasoning_content"', truncated_log)
+        self.assertIn("MODEL_DOCTOR_CASE_036_OK", truncated_log)
+        self.assertNotIn("data: [DONE]", truncated_log)
+
     def test_help_declares_version_catalog_size_and_default_timeout(self):
         source = SCRIPT.read_text(encoding="utf-8")
         result = self.run_script("--help")
