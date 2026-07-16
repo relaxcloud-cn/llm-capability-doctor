@@ -74,6 +74,18 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn('id="test-detail-001" class="evidence-row" hidden', html)
         self.assertIn('<td colspan="4">', html)
 
+    def test_result_cell_content_stays_grouped_in_mobile_label_grid(self):
+        html = render_report(assessment(), ASSET_DIR)
+
+        self.assertIn(
+            '<td data-label="检测项"><div class="cell-content">',
+            html,
+        )
+        self.assertIn(
+            '<td data-label="检测结果"><div class="cell-content">',
+            html,
+        )
+
     def test_expanded_row_contains_only_approved_logic_and_io_sections(self):
         html = render_report(assessment(), ASSET_DIR)
 
