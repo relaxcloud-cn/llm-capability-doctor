@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model-capability-doctor.sh"
 FAKE_CURL = ROOT / "tests" / "helpers" / "fake_model_curl.py"
+REPORT_SCRIPT_DIR = ROOT / "skills" / "creating-model-doctor-reports" / "scripts"
+sys.path.insert(0, str(REPORT_SCRIPT_DIR))
+
+from model_doctor_log import parse_log  # noqa: E402
 
 
 class ModelCapabilityDoctorScriptTests(unittest.TestCase):
@@ -22,7 +27,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def run_fixture(self, scenario, only):
+    def run_fixture(self, scenario, only, *, include_parsed=False):
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             fake_curl = directory / "curl"
@@ -53,7 +58,10 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            return result, log_path.read_text(encoding="utf-8")
+            log = log_path.read_text(encoding="utf-8")
+            if include_parsed:
+                return result, log, parse_log(log_path)
+            return result, log
 
     def test_fake_curl_fixture_produces_protocol_compatible_audit(self):
         result, log = self.run_fixture("basic", "004")
@@ -151,6 +159,58 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         _, zero_ttfb_log = self.run_fixture("performance_stream_zero_ttfb", "053")
         self.assertIn("result: UNDETERMINED", zero_ttfb_log)
 
+    def test_057_reports_all_four_concurrency_latency_waves(self):
+        result, log, parsed = self.run_fixture(
+            "concurrency_ladder_exact",
+            "057",
+            include_parsed=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request_starts = re.findall(
+            r"^========== REQUEST test-057-c(?:4|8|16|32)-[0-9]+ BEGIN ==========$",
+            log,
+            flags=re.MULTILINE,
+        )
+        self.assertEqual(len(request_starts), 60)
+        self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
+        self.assertIn("result: PASS", log)
+        self.assertIn(
+            "detected: "
+            "c4:success=4/4,p50_ms=2,p95_ms=4,max_ms=4,rate_limited=0;"
+            "c8:success=8/8,p50_ms=4,p95_ms=8,max_ms=8,rate_limited=0;"
+            "c16:success=16/16,p50_ms=8,p95_ms=16,max_ms=16,rate_limited=0;"
+            "c32:success=32/32,p50_ms=16,p95_ms=31,max_ms=32,rate_limited=0",
+            log,
+        )
+        self.assertIn("request_count: 61", log)
+
+    def test_057_rejects_bad_samples_and_continues_through_c32(self):
+        result, log, parsed = self.run_fixture(
+            "concurrency_ladder_partial",
+            "057",
+            include_parsed=True,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("result: FAIL", log)
+        self.assertIn(
+            "c4:success=0/4,p50_ms=not_available,p95_ms=not_available,"
+            "max_ms=not_available,rate_limited=0",
+            log,
+        )
+        self.assertIn(
+            "c8:success=7/8,p50_ms=5,p95_ms=8,max_ms=8,rate_limited=1",
+            log,
+        )
+        self.assertIn(
+            "c16:success=15/16,p50_ms=9,p95_ms=16,max_ms=16,rate_limited=0",
+            log,
+        )
+        self.assertIn("c32:success=32/32", log)
+        self.assertIn("semantic_success=0", log)
+        self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
+
     def test_058_runs_ten_load_requests_and_one_distinct_recovery_probe(self):
         _, exact_log = self.run_fixture("sustained_recovery_exact", "058")
         load_requests = re.findall(
@@ -198,8 +258,8 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         result = self.run_script("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SCRIPT_VERSION="0.5.0"', source)
-        self.assertIn("Model Capability Doctor 0.5.0", result.stdout)
+        self.assertIn('SCRIPT_VERSION="0.6.0"', source)
+        self.assertIn("Model Capability Doctor 0.6.0", result.stdout)
         self.assertIn("Defaults to 120", result.stdout)
         self.assertIn("62-item core catalog", result.stdout)
 
@@ -233,6 +293,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertEqual(names["040"], "单工具调用")
         self.assertEqual(names["051"], "冷请求总延迟")
         self.assertEqual(names["053"], "流式首字节时间")
+        self.assertEqual(names["057"], "4-32 并发响应时间")
         self.assertEqual(names["058"], "持续请求与恢复探针")
         self.assertEqual(names["059"], "越权请求护栏")
 

@@ -3,6 +3,7 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -84,6 +85,7 @@ headers_path = Path(argument_value(arguments, "--dump-header"))
 request_body = argument_value(arguments, "--data-binary")
 scenario = os.environ.get("MODEL_DOCTOR_FAKE_SCENARIO", "basic")
 http_status = "200"
+time_total = "0.020"
 
 if "MODEL_DOCTOR_PROTOCOL_OK" in request_body:
     response = chat("MODEL_DOCTOR_PROTOCOL_OK")
@@ -151,6 +153,21 @@ elif scenario in {
     "sustained_recovery_absent",
 } and "MODEL_DOCTOR_CASE_058_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_058_OK")
+elif scenario in {"concurrency_ladder_exact", "concurrency_ladder_partial"} and (
+    marker_match := re.search(r"MODEL_DOCTOR_057_C(4|8|16|32)_OK", request_body)
+):
+    request_match = re.search(r"test-057-c(4|8|16|32)-([0-9]+)$", output_path.stem)
+    level = int(marker_match.group(1))
+    sample = int(request_match.group(2)) if request_match else 0
+    response = chat(marker_match.group(0))
+    time_total = f"{sample / 1000:.3f}"
+    if scenario == "concurrency_ladder_partial" and level == 4:
+        response = chat("WRONG_OUTPUT")
+    elif scenario == "concurrency_ladder_partial" and (level, sample) == (8, 3):
+        response = chat("RATE_LIMITED")
+        http_status = "429"
+    elif scenario == "concurrency_ladder_partial" and (level, sample) == (16, 2):
+        time_total = "malformed"
 elif scenario == "unextractable_visible_answer" and any(
     marker in request_body
     for marker in (
@@ -194,6 +211,8 @@ headers_path.write_text(
     encoding="utf-8",
 )
 time_starttransfer = "0" if scenario == "performance_stream_zero_ttfb" else "0.005"
-sys.stdout.write(f"{http_status}\t0.020\t{time_starttransfer}\t{len(response.encode('utf-8'))}")
+sys.stdout.write(
+    f"{http_status}\t{time_total}\t{time_starttransfer}\t{len(response.encode('utf-8'))}"
+)
 if scenario == "transport_failure":
     raise SystemExit(7)
