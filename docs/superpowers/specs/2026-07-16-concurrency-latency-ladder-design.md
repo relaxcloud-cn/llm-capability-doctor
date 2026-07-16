@@ -21,7 +21,7 @@ This change:
 - preserves per-request evidence in the audit log;
 - makes the generated assessment and HTML report show the ladder summary instead
   of the last request's metrics; and
-- increments the script contract version from `0.4.0` to `0.5.0` while retaining
+- increments the script contract version from `0.5.0` to `0.6.0` while retaining
   historical report mappings.
 
 This change does not add sustained load, throughput, TTFT, token-generation
@@ -152,9 +152,10 @@ The report's semantic review should explain:
 - that the observation is a short-run snapshot rather than an SLA or sustained
   throughput result.
 
-Historical `0.3.0` and `0.4.0` catalog gate mappings remain unchanged. Version
-`0.5.0` receives a new mapping with the same 62 IDs and gate levels because test
-`057` keeps its identity and readiness importance while changing its contract.
+Historical `0.3.0`, `0.4.0`, and `0.5.0` catalog gate mappings remain unchanged.
+Version `0.6.0` receives a new mapping with the same 62 IDs and gate levels
+because test `057` keeps its identity and readiness importance while changing
+its contract.
 
 ## Error Handling
 
@@ -182,7 +183,7 @@ Automated coverage will verify:
 - parsed evidence links all concurrency requests to test `057`;
 - assessment and HTML output display the four-wave summary instead of the final
   request alone;
-- version `0.5.0` has a complete gate mapping while historical mappings remain
+- version `0.6.0` has a complete gate mapping while historical mappings remain
   available; and
 - shell syntax checks and the complete Python test suite pass.
 
