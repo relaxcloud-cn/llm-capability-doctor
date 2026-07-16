@@ -113,6 +113,40 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("MODEL_DOCTOR_CASE_036_OK", truncated_log)
         self.assertNotIn("data: [DONE]", truncated_log)
 
+    def test_053_reports_streaming_ttfb_without_calling_it_first_token_latency(self):
+        _, exact_log = self.run_fixture("performance_stream_exact", "053")
+        self.assertIn("name: 流式首字节时间", exact_log)
+        self.assertIn("result: PASS", exact_log)
+        self.assertIn("该指标是 TTFB，不是首 Token 时间", exact_log)
+        self.assertNotIn("首 Token 近似时间", exact_log)
+
+        _, truncated_log = self.run_fixture("performance_stream_truncated", "053")
+        self.assertIn("result: UNDETERMINED", truncated_log)
+
+    def test_058_runs_ten_load_requests_and_one_distinct_recovery_probe(self):
+        _, exact_log = self.run_fixture("sustained_recovery_exact", "058")
+        load_requests = re.findall(
+            r"^========== REQUEST test-058-repeat-\d+ BEGIN ==========$",
+            exact_log,
+            flags=re.MULTILINE,
+        )
+        recovery_requests = re.findall(
+            r"^========== REQUEST test-058-recovery BEGIN ==========$",
+            exact_log,
+            flags=re.MULTILINE,
+        )
+
+        self.assertEqual(len(load_requests), 10)
+        self.assertEqual(len(recovery_requests), 1)
+        self.assertIn("MODEL_DOCTOR_CASE_058_RECOVERY_OK", exact_log)
+        self.assertIn("result: PASS", exact_log)
+        self.assertIn("recovery=PASS", exact_log)
+
+    def test_058_fails_when_the_post_load_recovery_probe_fails(self):
+        _, recovery_failure_log = self.run_fixture("sustained_recovery_missing", "058")
+        self.assertIn("result: FAIL", recovery_failure_log)
+        self.assertIn("recovery=FAIL", recovery_failure_log)
+
     def test_help_declares_version_catalog_size_and_default_timeout(self):
         source = SCRIPT.read_text(encoding="utf-8")
         result = self.run_script("--help")

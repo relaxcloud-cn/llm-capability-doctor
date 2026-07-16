@@ -78,12 +78,12 @@ print_core_catalog() {
 050	工具调用	大工具目录
 051	性能与稳定性	冷请求总延迟
 052	性能与稳定性	首字节时间
-053	性能与稳定性	首 Token 近似时间
+053	性能与稳定性	流式首字节时间
 054	性能与稳定性	完整响应延迟
 055	性能与稳定性	重复成功率
 056	性能与稳定性	P50/P95 延迟
 057	性能与稳定性	8 并发性能
-058	性能与稳定性	持续负载与恢复
+058	性能与稳定性	持续请求与恢复探针
 059	护栏与词汇	越权请求护栏
 060	护栏与词汇	合法防御分析
 061	护栏与词汇	中文安全词可用性
@@ -1120,6 +1120,10 @@ stream_completion_present() {
   grep -Eqi '\[DONE\]|response\.completed|"type"[[:space:]]*:[[:space:]]*"message_stop"|"done"[[:space:]]*:[[:space:]]*true|"finish_reason"[[:space:]]*:[[:space:]]*"(stop|length|tool_calls)"' "$1"
 }
 
+stream_content_event_present() {
+  grep -Eqi '^data:[[:space:]]*\{|"delta"[[:space:]]*:|response\.output_text\.delta|content_block_delta|"done"[[:space:]]*:[[:space:]]*(true|false)' "$1"
+}
+
 write_stream_visible_evidence() {
   local source_file="$1" target_file="$2"
   case "$DETECTED_PROTOCOL" in
@@ -1369,7 +1373,7 @@ ensure_core_repeat_samples() {
 
 run_core_performance_test() {
   local id="$1" category="$2" name="$3"
-  local body="" status="PASS" conclusion="" detected="" evidence_file="" index=0 successes=0 marker=""
+  local body="" status="PASS" conclusion="" detected="" evidence_file="" index=0 successes=0 marker="" visible_file="$RUN_TMP_DIR/test-${id}.visible" visible="" transport_errors=0 recovery_marker="" recovery_body="" recovery_ok=0 recovery_label="FAIL"
   case "$id" in
     051|052|054)
       marker="MODEL_DOCTOR_CASE_${id}_OK"
@@ -1385,9 +1389,13 @@ run_core_performance_test() {
       body="$(protocol_body "$DETECTED_PROTOCOL" "Reply only ${marker}" true)"
       perform_request "$body" 1 "test-${id}" "$DETECTED_AUTH_MODE"
       evidence_file="$LAST_RESPONSE_FILE"
+      write_stream_visible_evidence "$LAST_RESPONSE_FILE" "$visible_file"
+      visible="$(cat "$visible_file" | trim_text)"
       if [[ "$LAST_CURL_EXIT" != "0" ]]; then status="ERROR"; conclusion="流式性能请求失败，curl ${LAST_CURL_EXIT}"
-      elif grep -Eqi 'data:|"delta"|response\.output_text\.delta' "$LAST_RESPONSE_FILE"; then detected="$(millis_from_seconds "$LAST_TIME_STARTTRANSFER")ms"; conclusion="首 Token 近似时间 ${detected}；由首个响应字节近似"
-      else status="FAIL"; conclusion="未检测到流式内容事件"; fi
+      elif ! stream_completion_present "$LAST_RESPONSE_FILE"; then status="UNDETERMINED"; conclusion="流式响应未正常结束，无法确认本次 TTFB 样本有效"
+      elif ! stream_content_event_present "$LAST_RESPONSE_FILE"; then status="FAIL"; conclusion="接口未返回可识别的流式内容事件"
+      elif [[ "$visible" != "$marker" ]]; then status="FAIL"; conclusion="流式内容未组装出指定的唯一标记"
+      else detected="$(millis_from_seconds "$LAST_TIME_STARTTRANSFER")ms"; conclusion="流式首字节时间 ${detected}；该指标是 TTFB，不是首 Token 时间"; fi
       ;;
     055)
       ensure_core_repeat_samples
@@ -1415,12 +1423,23 @@ run_core_performance_test() {
       while (( index < 10 )); do
         index=$((index + 1))
         perform_request "$body" 0 "test-${id}-repeat-${index}" "$DETECTED_AUTH_MODE"
-        if [[ "$LAST_CURL_EXIT" == "0" && "$LAST_HTTP_STATUS" =~ ^2 ]] && grep -Fq "$marker" "$LAST_RESPONSE_FILE"; then successes=$((successes + 1)); fi
-        { echo "----- REQUEST ${index} -----"; echo "http_status=${LAST_HTTP_STATUS} curl_exit=${LAST_CURL_EXIT} time_total=${LAST_TIME_TOTAL}"; cat "$LAST_RESPONSE_FILE"; echo; } >>"$evidence_file"
+        [[ "$LAST_CURL_EXIT" == "0" ]] || transport_errors=$((transport_errors + 1))
+        visible="$(extract_visible_text "$LAST_RESPONSE_FILE" 2>/dev/null | trim_text)"
+        if [[ "$LAST_CURL_EXIT" == "0" && "$LAST_HTTP_STATUS" =~ ^2 && "$visible" == "$marker" ]]; then successes=$((successes + 1)); fi
+        { echo "----- LOAD REQUEST ${index} -----"; echo "http_status=${LAST_HTTP_STATUS} curl_exit=${LAST_CURL_EXIT} time_total=${LAST_TIME_TOTAL}"; cat "$LAST_RESPONSE_FILE"; echo; } >>"$evidence_file"
       done
-      detected="${successes}/10"
-      if [[ "$successes" == "10" ]]; then conclusion="持续负载成功 ${detected}，结束后请求链正常"
-      else status="FAIL"; conclusion="持续负载仅成功 ${detected}"; fi
+      recovery_marker="MODEL_DOCTOR_CASE_058_RECOVERY_OK"
+      recovery_body="$(protocol_body "$DETECTED_PROTOCOL" "Recovery probe after sustained requests. Reply only ${recovery_marker}." false)"
+      perform_request "$recovery_body" 0 "test-${id}-recovery" "$DETECTED_AUTH_MODE"
+      [[ "$LAST_CURL_EXIT" == "0" ]] || transport_errors=$((transport_errors + 1))
+      visible="$(extract_visible_text "$LAST_RESPONSE_FILE" 2>/dev/null | trim_text)"
+      if [[ "$LAST_CURL_EXIT" == "0" && "$LAST_HTTP_STATUS" =~ ^2 && "$visible" == "$recovery_marker" ]]; then recovery_ok=1; recovery_label="PASS"; fi
+      { echo "----- RECOVERY PROBE -----"; echo "http_status=${LAST_HTTP_STATUS} curl_exit=${LAST_CURL_EXIT} time_total=${LAST_TIME_TOTAL}"; cat "$LAST_RESPONSE_FILE"; echo; } >>"$evidence_file"
+      detected="load_success=${successes}/10,recovery=${recovery_label},transport_errors=${transport_errors}"
+      if (( transport_errors > 0 )); then status="ERROR"; conclusion="持续请求或恢复探针出现 ${transport_errors} 次传输错误"
+      elif [[ "$successes" != "10" ]]; then status="FAIL"; conclusion="持续请求仅成功 ${successes}/10；恢复探针 ${recovery_label}"
+      elif [[ "$recovery_ok" != "1" ]]; then status="FAIL"; conclusion="10 次持续请求成功，但独立恢复探针失败"
+      else conclusion="10 次持续请求全部成功，且独立恢复探针通过"; fi
       ;;
   esac
   record_test "$id" "$category" "$name" "$status" "$conclusion" "performance observation" "$detected" "$(millis_from_seconds "${LAST_TIME_TOTAL:-0}")" "$evidence_file" "${LAST_HTTP_STATUS:-not_available}" "${LAST_CURL_EXIT:-not_available}"
