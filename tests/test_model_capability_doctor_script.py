@@ -101,6 +101,12 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         _, no_signal_log = self.run_fixture("thinking_separation_no_signal", "035")
         self.assertIn("result: FAIL", no_signal_log)
 
+        _, empty_container_log = self.run_fixture("thinking_separation_empty_container", "035")
+        self.assertIn("result: FAIL", empty_container_log)
+
+        _, empty_summary_log = self.run_fixture("thinking_separation_empty_summary", "035")
+        self.assertIn("result: FAIL", empty_summary_log)
+
     def test_036_distinguishes_reasoning_events_from_final_usage(self):
         _, exact_log = self.run_fixture("thinking_stream_exact", "036")
         self.assertIn("result: PASS", exact_log)
@@ -115,6 +121,17 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("MODEL_DOCTOR_CASE_036_OK", truncated_log)
         self.assertNotIn("data: [DONE]", truncated_log)
 
+        _, done_only_log = self.run_fixture("thinking_stream_done_only", "036")
+        self.assertIn("result: UNDETERMINED", done_only_log)
+
+        _, length_log = self.run_fixture("thinking_stream_length", "036")
+        self.assertIn("result: FAIL", length_log)
+
+    def test_036_classifies_explicit_parameter_rejection_as_unsupported(self):
+        _, rejected_log = self.run_fixture("thinking_stream_rejected", "036")
+        self.assertIn("http_status: 400", rejected_log)
+        self.assertIn("result: UNSUPPORTED", rejected_log)
+
     def test_053_reports_streaming_ttfb_without_calling_it_first_token_latency(self):
         _, exact_log = self.run_fixture("performance_stream_exact", "053")
         self.assertIn("name: 流式首字节时间", exact_log)
@@ -123,7 +140,13 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertNotIn("首 Token 近似时间", exact_log)
 
         _, truncated_log = self.run_fixture("performance_stream_truncated", "053")
-        self.assertIn("result: UNDETERMINED", truncated_log)
+        self.assertIn("result: FAIL", truncated_log)
+
+        _, done_only_log = self.run_fixture("performance_stream_done_only", "053")
+        self.assertIn("result: FAIL", done_only_log)
+
+        _, length_log = self.run_fixture("performance_stream_length", "053")
+        self.assertIn("result: FAIL", length_log)
 
         _, zero_ttfb_log = self.run_fixture("performance_stream_zero_ttfb", "053")
         self.assertIn("result: UNDETERMINED", zero_ttfb_log)
@@ -151,6 +174,24 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         _, recovery_failure_log = self.run_fixture("sustained_recovery_missing", "058")
         self.assertIn("result: FAIL", recovery_failure_log)
         self.assertIn("recovery=FAIL", recovery_failure_log)
+
+        _, recovery_absent_log = self.run_fixture("sustained_recovery_absent", "058")
+        self.assertIn("result: ERROR", recovery_absent_log)
+
+    def test_exact_graders_keep_unextractable_evidence_separate_from_wrong_answers(self):
+        for scenario in (
+            "unextractable_visible_answer",
+            "malformed_visible_answer",
+            "invalid_balanced_visible_answer",
+        ):
+            for test_id in ("029", "035", "038", "060"):
+                with self.subTest(scenario=scenario, test_id=test_id):
+                    _, log = self.run_fixture(scenario, test_id)
+                    self.assertIn("result: UNDETERMINED", log)
+
+    def test_transport_failure_takes_priority_over_unknown_protocol(self):
+        _, log = self.run_fixture("transport_failure", "038")
+        self.assertIn("result: ERROR", log)
 
     def test_help_declares_version_catalog_size_and_default_timeout(self):
         source = SCRIPT.read_text(encoding="utf-8")

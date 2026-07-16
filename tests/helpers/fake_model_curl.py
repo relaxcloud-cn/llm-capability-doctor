@@ -36,7 +36,21 @@ def chat(content, *, reasoning_tokens=None):
     )
 
 
-def chat_stream(*, content="MODEL_DOCTOR_CASE_036_OK", include_reasoning=False, complete=True):
+def truncated_chat(content):
+    return '{"choices":[{"message":{"content":' + json.dumps(content)
+
+
+def invalid_balanced_chat(content):
+    return '{"choices":[{"message":{"content":' + json.dumps(content) + "} garbage}]}"
+
+
+def chat_stream(
+    *,
+    content="MODEL_DOCTOR_CASE_036_OK",
+    include_reasoning=False,
+    complete=True,
+    finish_reason="stop",
+):
     events = []
     if include_reasoning:
         events.append(
@@ -47,10 +61,10 @@ def chat_stream(*, content="MODEL_DOCTOR_CASE_036_OK", include_reasoning=False, 
         {"choices": [{"delta": {"content": part}, "finish_reason": None}]}
         for part in (content[:split_at], content[split_at:])
     )
-    if complete:
+    if complete and finish_reason is not None:
         events.append(
             {
-                "choices": [{"delta": {}, "finish_reason": "stop"}],
+                "choices": [{"delta": {}, "finish_reason": finish_reason}],
                 "usage": {"completion_tokens_details": {"reasoning_tokens": 8}},
             }
         )
@@ -69,6 +83,7 @@ output_path = Path(argument_value(arguments, "--output"))
 headers_path = Path(argument_value(arguments, "--dump-header"))
 request_body = argument_value(arguments, "--data-binary")
 scenario = os.environ.get("MODEL_DOCTOR_FAKE_SCENARIO", "basic")
+http_status = "200"
 
 if "MODEL_DOCTOR_PROTOCOL_OK" in request_body:
     response = chat("MODEL_DOCTOR_PROTOCOL_OK")
@@ -93,31 +108,92 @@ elif scenario == "thinking_separation_exact" and "MODEL_DOCTOR_CASE_035" in requ
     response = chat("MODEL_DOCTOR_CASE_035_OK", reasoning_tokens=8)
 elif scenario == "thinking_separation_no_signal" and "MODEL_DOCTOR_CASE_035" in request_body:
     response = chat("MODEL_DOCTOR_CASE_035_OK")
+elif scenario == "thinking_separation_empty_container" and "MODEL_DOCTOR_CASE_035" in request_body:
+    payload = json.loads(chat("MODEL_DOCTOR_CASE_035_OK"))
+    payload["choices"][0]["message"]["reasoning"] = {"type": "reasoning"}
+    response = json.dumps(payload, separators=(",", ":"))
+elif scenario == "thinking_separation_empty_summary" and "MODEL_DOCTOR_CASE_035" in request_body:
+    payload = json.loads(chat("MODEL_DOCTOR_CASE_035_OK"))
+    payload["event"] = "response.reasoning_summary_text.done"
+    response = json.dumps(payload, separators=(",", ":"))
 elif scenario == "thinking_stream_exact" and "MODEL_DOCTOR_CASE_036" in request_body:
     response = chat_stream(include_reasoning=True)
 elif scenario == "thinking_stream_no_reasoning" and "MODEL_DOCTOR_CASE_036" in request_body:
     response = chat_stream(include_reasoning=False)
 elif scenario == "thinking_stream_truncated" and "MODEL_DOCTOR_CASE_036" in request_body:
     response = chat_stream(include_reasoning=True, complete=False)
+elif scenario == "thinking_stream_done_only" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = chat_stream(include_reasoning=True, finish_reason=None)
+elif scenario == "thinking_stream_length" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = chat_stream(include_reasoning=True, finish_reason="length")
+elif scenario == "thinking_stream_rejected" and "MODEL_DOCTOR_CASE_036" in request_body:
+    response = '{"error":{"message":"reasoning_effort is not supported"}}'
+    http_status = "400"
 elif scenario == "performance_stream_exact" and "MODEL_DOCTOR_CASE_053" in request_body:
     response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK")
 elif scenario == "performance_stream_truncated" and "MODEL_DOCTOR_CASE_053" in request_body:
     response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK", complete=False)
+elif scenario == "performance_stream_done_only" and "MODEL_DOCTOR_CASE_053" in request_body:
+    response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK", finish_reason=None)
+elif scenario == "performance_stream_length" and "MODEL_DOCTOR_CASE_053" in request_body:
+    response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK", finish_reason="length")
 elif scenario == "performance_stream_zero_ttfb" and "MODEL_DOCTOR_CASE_053" in request_body:
     response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK")
 elif scenario == "sustained_recovery_exact" and "MODEL_DOCTOR_CASE_058_RECOVERY_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_058_RECOVERY_OK")
 elif scenario == "sustained_recovery_missing" and "MODEL_DOCTOR_CASE_058_RECOVERY_OK" in request_body:
     response = chat("RECOVERY_NOT_READY")
-elif scenario in {"sustained_recovery_exact", "sustained_recovery_missing"} and "MODEL_DOCTOR_CASE_058_OK" in request_body:
+elif scenario == "sustained_recovery_absent" and "MODEL_DOCTOR_CASE_058_RECOVERY_OK" in request_body:
+    response = ""
+elif scenario in {
+    "sustained_recovery_exact",
+    "sustained_recovery_missing",
+    "sustained_recovery_absent",
+} and "MODEL_DOCTOR_CASE_058_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_058_OK")
+elif scenario == "unextractable_visible_answer" and any(
+    marker in request_body
+    for marker in (
+        "MODEL_DOCTOR_CASE_029",
+        "MODEL_DOCTOR_CASE_035",
+        "MODEL_DOCTOR_CASE_038",
+        "MODEL_DOCTOR_CASE_060",
+    )
+):
+    response = chat(None)
+elif scenario == "malformed_visible_answer" and "MODEL_DOCTOR_CASE_029" in request_body:
+    response = truncated_chat("CTX_029_A;CTX_029_B;ALPHA-GAMMA")
+elif scenario == "malformed_visible_answer" and "MODEL_DOCTOR_CASE_035" in request_body:
+    response = truncated_chat("MODEL_DOCTOR_CASE_035_OK")
+elif scenario == "malformed_visible_answer" and "MODEL_DOCTOR_CASE_038" in request_body:
+    response = truncated_chat('{"order":["A","B","C"],"bTime":"09:22","cTime":"09:27"}')
+elif scenario == "malformed_visible_answer" and "MODEL_DOCTOR_CASE_060" in request_body:
+    response = truncated_chat(
+        '{"classification":"credential-attack","source":"203.0.113.7",'
+        '"nextMove":"lock-account-and-review-auth-logs"}'
+    )
+elif scenario == "invalid_balanced_visible_answer" and "MODEL_DOCTOR_CASE_029" in request_body:
+    response = invalid_balanced_chat("CTX_029_A;CTX_029_B;ALPHA-GAMMA")
+elif scenario == "invalid_balanced_visible_answer" and "MODEL_DOCTOR_CASE_035" in request_body:
+    response = invalid_balanced_chat("MODEL_DOCTOR_CASE_035_OK")
+elif scenario == "invalid_balanced_visible_answer" and "MODEL_DOCTOR_CASE_038" in request_body:
+    response = invalid_balanced_chat(
+        '{"order":["A","B","C"],"bTime":"09:22","cTime":"09:27"}'
+    )
+elif scenario == "invalid_balanced_visible_answer" and "MODEL_DOCTOR_CASE_060" in request_body:
+    response = invalid_balanced_chat(
+        '{"classification":"credential-attack","source":"203.0.113.7",'
+        '"nextMove":"lock-account-and-review-auth-logs"}'
+    )
 else:
     response = chat("UNCONFIGURED_FIXTURE")
 
 output_path.write_text(response, encoding="utf-8")
 headers_path.write_text(
-    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
+    f"HTTP/1.1 {http_status} Fixture\r\nContent-Type: application/json\r\n\r\n",
     encoding="utf-8",
 )
 time_starttransfer = "0" if scenario == "performance_stream_zero_ttfb" else "0.005"
-sys.stdout.write(f"200\t0.020\t{time_starttransfer}\t{len(response.encode('utf-8'))}")
+sys.stdout.write(f"{http_status}\t0.020\t{time_starttransfer}\t{len(response.encode('utf-8'))}")
+if scenario == "transport_failure":
+    raise SystemExit(7)
