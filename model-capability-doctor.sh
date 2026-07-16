@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-SCRIPT_VERSION="0.5.0"
+SCRIPT_VERSION="0.6.0"
 
 usage() {
   printf 'Model Capability Doctor %s\n\n' "$SCRIPT_VERSION"
@@ -82,7 +82,7 @@ print_core_catalog() {
 054	性能与稳定性	完整响应延迟
 055	性能与稳定性	重复成功率
 056	性能与稳定性	P50/P95 延迟
-057	性能与稳定性	8 并发性能
+057	性能与稳定性	4-32 并发响应时间
 058	性能与稳定性	持续请求与恢复探针
 059	护栏与词汇	越权请求护栏
 060	护栏与词汇	合法防御分析
@@ -97,6 +97,19 @@ timestamp() {
 
 millis_from_seconds() {
   awk -v value="${1:-0}" 'BEGIN { printf "%d", (value * 1000) + 0.5 }'
+}
+
+nearest_rank_from_sorted_file() {
+  local file="$1"
+  local percentile="$2"
+  awk -v percentile="$percentile" '
+    { values[NR] = $1 }
+    END {
+      if (NR == 0) exit
+      rank = int((NR * percentile + 99) / 100)
+      print values[rank]
+    }
+  ' "$file"
 }
 
 json_escape() {
@@ -596,6 +609,7 @@ parallel_curl_worker() {
   local request_body="$1"
   local prefix="$2"
   local auth_mode="$3"
+  local gate_file="$4"
   local curl_args=(
     --silent --show-error --max-time "$TIMEOUT_SECONDS"
     --output "${prefix}.body"
@@ -612,6 +626,9 @@ parallel_curl_worker() {
     x_api_key) curl_args+=(--header "x-api-key: $API_KEY" --header 'anthropic-version: 2023-06-01') ;;
     x_goog_api_key) curl_args+=(--header "x-goog-api-key: $API_KEY") ;;
   esac
+  while [[ ! -e "$gate_file" ]]; do
+    sleep 0.01
+  done
   timestamp >"${prefix}.started"
   curl "${curl_args[@]}" "$URL" >"${prefix}.metrics" 2>"${prefix}.stderr"
   echo "$?" >"${prefix}.exit"
@@ -622,7 +639,7 @@ run_parallel_batch() {
   local id="$1"
   local concurrency="$2"
   local label="$3"
-  local marker="MODEL_DOCTOR_${id}_${label}_OK"
+  local marker=""
   local body=""
   local index=0
   local prefix=""
@@ -636,18 +653,29 @@ run_parallel_batch() {
   local started_at=""
   local completed_at=""
   local audit_file=""
-  local max_time="0"
+  local upper_label=""
+  local visible=""
+  local latency_ms=""
+  local semantic_success=0
   local successes=0
   local rate_limited=0
   local evidence="$RUN_TMP_DIR/test-${id}-${label}.batch"
+  local times_file="$RUN_TMP_DIR/test-${id}-${label}.times"
+  local sorted_file="${times_file}.sorted"
+  local gate_file="$RUN_TMP_DIR/test-${id}-${label}.gate"
+  upper_label="$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]')"
+  marker="MODEL_DOCTOR_${id}_${upper_label}_OK"
   body="$(protocol_body "$DETECTED_PROTOCOL" "Reply only ${marker}" false)"
   : >"$evidence"
+  : >"$times_file"
+  rm -f "$gate_file"
   while (( index < concurrency )); do
     index=$((index + 1))
     prefix="$RUN_TMP_DIR/test-${id}-${label}-${index}"
-    parallel_curl_worker "$body" "$prefix" "$DETECTED_AUTH_MODE" &
+    parallel_curl_worker "$body" "$prefix" "$DETECTED_AUTH_MODE" "$gate_file" &
     pids="$pids $!"
   done
+  : >"$gate_file"
   for pid in $pids; do
     wait "$pid" || true
   done
@@ -662,12 +690,21 @@ run_parallel_batch() {
     curl_exit="$(cat "${prefix}.exit" 2>/dev/null || echo 1)"
     started_at="$(cat "${prefix}.started" 2>/dev/null || timestamp)"
     completed_at="$(cat "${prefix}.completed" 2>/dev/null || timestamp)"
-    if [[ "$curl_exit" == "0" && "$http" =~ ^2 ]]; then successes=$((successes + 1)); fi
+    visible="$(extract_visible_text "${prefix}.body" 2>/dev/null | trim_text)"
+    semantic_success=0
+    latency_ms="not_available"
+    if [[ "$time_total" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      latency_ms="$(millis_from_seconds "$time_total")"
+    fi
+    if [[ "$curl_exit" == "0" && "$http" =~ ^2[0-9][0-9]$ && "$visible" == "$marker" && "$latency_ms" != "not_available" ]]; then
+      semantic_success=1
+      successes=$((successes + 1))
+      printf '%s\n' "$latency_ms" >>"$times_file"
+    fi
     [[ "$http" == "429" ]] && rate_limited=$((rate_limited + 1))
-    max_time="$(awk -v current="$max_time" -v candidate="${time_total:-0}" 'BEGIN { print candidate > current ? candidate : current }')"
     {
       echo "----- REQUEST ${index} -----"
-      echo "http_status=${http:-000} curl_exit=${curl_exit} time_total=${time_total:-0}"
+      echo "concurrency=${concurrency} request_index=${index} http_status=${http:-000} curl_exit=${curl_exit} semantic_success=${semantic_success} time_total_ms=${latency_ms}"
       cat "${prefix}.body" 2>/dev/null || true
       echo
     } >>"$evidence"
@@ -679,10 +716,13 @@ run_parallel_batch() {
     redact_stream <"$audit_file" >>"$LOG_FILE"
     LAST_REQUEST_AUDIT_FILE="$audit_file"
   done
+  sort -n "$times_file" >"$sorted_file"
   REQUEST_COUNT=$((REQUEST_COUNT + concurrency))
   BATCH_SUCCESS_COUNT="$successes"
   BATCH_RATE_LIMITED="$rate_limited"
-  BATCH_MAX_TIME="$max_time"
+  BATCH_P50_MS="$(nearest_rank_from_sorted_file "$sorted_file" 50)"
+  BATCH_P95_MS="$(nearest_rank_from_sorted_file "$sorted_file" 95)"
+  BATCH_MAX_MS="$(tail -n 1 "$sorted_file")"
   BATCH_EVIDENCE_FILE="$evidence"
 }
 
@@ -1556,6 +1596,7 @@ ensure_core_repeat_samples() {
 run_core_performance_test() {
   local id="$1" category="$2" name="$3"
   local body="" status="PASS" conclusion="" detected="" evidence_file="" index=0 successes=0 marker="" visible_file="$RUN_TMP_DIR/test-${id}.visible" visible="" transport_errors=0 recovery_marker="" recovery_body="" recovery_ok=0 recovery_label="FAIL" recovery_evidence_present=0
+  local concurrency=0 separator="" segment="" combined_evidence=""
   case "$id" in
     051|052|054)
       marker="MODEL_DOCTOR_CASE_${id}_OK"
@@ -1596,10 +1637,30 @@ run_core_performance_test() {
       else status="UNDETERMINED"; conclusion="成功样本不足，无法计算 P50/P95"; fi
       ;;
     057)
-      run_parallel_batch "$id" 8 "c8"
-      evidence_file="$BATCH_EVIDENCE_FILE"; detected="${BATCH_SUCCESS_COUNT}/8"
-      if [[ "$BATCH_SUCCESS_COUNT" == "8" ]]; then conclusion="8 并发成功 ${detected}"
-      else status="FAIL"; conclusion="8 并发仅成功 ${detected}，限流 ${BATCH_RATE_LIMITED}"; fi
+      if [[ "$DETECTED_PROTOCOL" == "unknown" ]]; then
+        status="UNDETERMINED"
+        conclusion="未知协议，无法执行并发响应时间检测"
+        detected="c4:not_available;c8:not_available;c16:not_available;c32:not_available"
+        evidence_file="$PROTOCOL_PROBE_RESPONSE_FILE"
+      else
+        combined_evidence="$RUN_TMP_DIR/test-${id}.concurrency-ladder"
+        : >"$combined_evidence"
+        detected=""
+        conclusion=""
+        separator=""
+        for concurrency in 4 8 16 32; do
+          run_parallel_batch "$id" "$concurrency" "c${concurrency}"
+          cat "$BATCH_EVIDENCE_FILE" >>"$combined_evidence"
+          segment="c${concurrency}:success=${BATCH_SUCCESS_COUNT}/${concurrency},p50_ms=${BATCH_P50_MS:-not_available},p95_ms=${BATCH_P95_MS:-not_available},max_ms=${BATCH_MAX_MS:-not_available},rate_limited=${BATCH_RATE_LIMITED}"
+          detected="${detected}${separator}${segment}"
+          conclusion="${conclusion}${separator}${concurrency} 并发成功 ${BATCH_SUCCESS_COUNT}/${concurrency}，P50 ${BATCH_P50_MS:-不可用}ms，P95 ${BATCH_P95_MS:-不可用}ms，最大 ${BATCH_MAX_MS:-不可用}ms，限流 ${BATCH_RATE_LIMITED}"
+          separator=";"
+          if [[ "$BATCH_SUCCESS_COUNT" != "$concurrency" ]]; then
+            status="FAIL"
+          fi
+        done
+        evidence_file="$combined_evidence"
+      fi
       ;;
     058)
       marker="MODEL_DOCTOR_CASE_058_OK"
@@ -1829,6 +1890,12 @@ CORE_REPEAT_TIMES_FILE=""
 CORE_REPEAT_EVIDENCE_FILE=""
 CORE_REPEAT_P50_MS=""
 CORE_REPEAT_P95_MS=""
+BATCH_SUCCESS_COUNT=0
+BATCH_RATE_LIMITED=0
+BATCH_P50_MS=""
+BATCH_P95_MS=""
+BATCH_MAX_MS=""
+BATCH_EVIDENCE_FILE=""
 
 write_log_header
 run_selected_tests
