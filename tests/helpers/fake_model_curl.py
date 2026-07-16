@@ -103,6 +103,8 @@ elif scenario == "performance_stream_exact" and "MODEL_DOCTOR_CASE_053" in reque
     response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK")
 elif scenario == "performance_stream_truncated" and "MODEL_DOCTOR_CASE_053" in request_body:
     response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK", complete=False)
+elif scenario == "performance_stream_zero_ttfb" and "MODEL_DOCTOR_CASE_053" in request_body:
+    response = chat_stream(content="MODEL_DOCTOR_CASE_053_OK")
 elif scenario == "sustained_recovery_exact" and "MODEL_DOCTOR_CASE_058_RECOVERY_OK" in request_body:
     response = chat("MODEL_DOCTOR_CASE_058_RECOVERY_OK")
 elif scenario == "sustained_recovery_missing" and "MODEL_DOCTOR_CASE_058_RECOVERY_OK" in request_body:
@@ -117,4 +119,5 @@ headers_path.write_text(
     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n",
     encoding="utf-8",
 )
-sys.stdout.write(f"200\t0.020\t0.005\t{len(response.encode('utf-8'))}")
+time_starttransfer = "0" if scenario == "performance_stream_zero_ttfb" else "0.005"
+sys.stdout.write(f"200\t0.020\t{time_starttransfer}\t{len(response.encode('utf-8'))}")

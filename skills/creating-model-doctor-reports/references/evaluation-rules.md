@@ -44,7 +44,7 @@ Use confidence independently from status:
 - `observation`: useful secondary capability or measurement that does not
   independently block use.
 
-当前 v0.4.0 的 62 项目录使用固定优先级，不得根据单次结果升降级：
+当前 v0.5.0 的 62 项目录使用固定优先级，不得根据单次结果升降级：
 
 - `critical`：`001-006`、`040-050`。
 - `important`：`014-018`、`032-036`、`057`。
@@ -52,6 +52,8 @@ Use confidence independently from status:
 
 HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”，
 重要检测项共 28 项；将 `observation` 显示为“次要检测项”，次要检测项共 34 项。
+
+历史 v0.4.0 的 62 项目录使用与 v0.5.0 相同的固定优先级。
 
 历史 v0.3.0 的 65 项目录继续使用其原始固定优先级：
 
@@ -61,7 +63,7 @@ HTML 报告将 `critical` 和 `important` 合并显示为“重要检测项”�
 
 历史 v0.3.0 报告包含 26 项重要检测项和 39 项次要检测项。
 对于旧版或未知编号日志，按相同产品原则确定 gate level，不得套用不匹配的
-v0.3.0 或 v0.4.0 编号含义。
+v0.3.0、v0.4.0 或 v0.5.0 编号含义。
 
 Overall verdict:
 
@@ -84,6 +86,17 @@ Never replace these gates with an average score.
 8. Judge observable evidence independently; never use a parsed script result as assessment ground truth or copy it into final artifacts.
 9. Use the requested model name and observed returned model as separate facts.
 10. Never claim that a model name proves upstream commercial model identity.
+11. Judge the contract stated in the logged request. Do not grade against
+    hidden collector metadata when `expected`, `detected`, a test label, or a
+    scripted conclusion adds an unstated requirement.
+12. Before claiming evidence is absent, inventory request IDs and counts, then
+    inspect the referenced request bodies, responses, completion fields, and
+    raw metrics directly.
+13. When complete evidence contradicts a stated requirement, use `FAIL`, not `UNDETERMINED`.
+    Reserve `UNDETERMINED` for evidence that is genuinely
+    incomplete, ambiguous, truncated, or unsafe to interpret.
+14. Curl `time_starttransfer` is TTFB only. It is not TTFT or the timestamp of
+    the first visible model token.
 
 ## 5. Category-Specific Rules
 
@@ -108,7 +121,7 @@ Separate timeout, unsupported limit, truncation, malformed output, and semantic
 incompleteness. Confirm visible content length, reported output tokens when
 present, finish reason, completion marker, and required structure. A timeout
 before first byte is `ERROR` or `UNDETERMINED`, not proof of unsupported output.
-The current v0.4.0 catalog has no long-output tests; apply these rules only to
+The current v0.5.0 catalog has no long-output tests; apply these rules only to
 historical logs that contain them.
 
 ### Instruction and Text

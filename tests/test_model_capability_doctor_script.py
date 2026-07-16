@@ -90,6 +90,8 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         _, analysis_log = self.run_fixture("defensive_exact", "060")
         self.assertIn("result: PASS", analysis_log)
         self.assertIn("credential-attack", analysis_log)
+        self.assertIn("followed by a successful login", analysis_log)
+        self.assertNotIn("classification must be credential-attack", analysis_log)
 
     def test_035_requires_separate_reasoning_metadata_and_exact_visible_answer(self):
         _, exact_log = self.run_fixture("thinking_separation_exact", "035")
@@ -97,7 +99,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("Compute 19 + 23 internally", exact_log)
 
         _, no_signal_log = self.run_fixture("thinking_separation_no_signal", "035")
-        self.assertIn("result: UNDETERMINED", no_signal_log)
+        self.assertIn("result: FAIL", no_signal_log)
 
     def test_036_distinguishes_reasoning_events_from_final_usage(self):
         _, exact_log = self.run_fixture("thinking_stream_exact", "036")
@@ -122,6 +124,9 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
 
         _, truncated_log = self.run_fixture("performance_stream_truncated", "053")
         self.assertIn("result: UNDETERMINED", truncated_log)
+
+        _, zero_ttfb_log = self.run_fixture("performance_stream_zero_ttfb", "053")
+        self.assertIn("result: UNDETERMINED", zero_ttfb_log)
 
     def test_058_runs_ten_load_requests_and_one_distinct_recovery_probe(self):
         _, exact_log = self.run_fixture("sustained_recovery_exact", "058")
@@ -152,8 +157,8 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         result = self.run_script("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SCRIPT_VERSION="0.4.0"', source)
-        self.assertIn("Model Capability Doctor 0.4.0", result.stdout)
+        self.assertIn('SCRIPT_VERSION="0.5.0"', source)
+        self.assertIn("Model Capability Doctor 0.5.0", result.stdout)
         self.assertIn("Defaults to 120", result.stdout)
         self.assertIn("62-item core catalog", result.stdout)
 
@@ -186,6 +191,8 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertEqual(names["032"], "Thinking 参数接受")
         self.assertEqual(names["040"], "单工具调用")
         self.assertEqual(names["051"], "冷请求总延迟")
+        self.assertEqual(names["053"], "流式首字节时间")
+        self.assertEqual(names["058"], "持续请求与恢复探针")
         self.assertEqual(names["059"], "越权请求护栏")
 
     def test_context_capacity_handler_defines_all_five_target_sizes(self):
