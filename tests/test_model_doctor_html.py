@@ -133,6 +133,33 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertNotIn("展开全部证据", body)
         self.assertIn("@media print", html)
 
+    def test_report_css_matches_legacy_narrow_table_and_responsive_contract(self):
+        html = render_report(assessment(), ASSET_DIR)
+
+        for expected in (
+            "max-width: 736px",
+            "border-collapse: collapse",
+            "prefers-color-scheme: dark",
+            "@media (max-width: 640px)",
+            ".evidence-row[hidden]",
+            "overflow-wrap: anywhere",
+        ):
+            self.assertIn(expected, html)
+        self.assertNotIn("max-width: 1440px", html)
+        self.assertNotIn("position: sticky", html)
+
+    def test_report_script_toggles_detail_hidden_state_and_aria_without_inner_html(self):
+        html = render_report(assessment(), ASSET_DIR)
+
+        for expected in (
+            '.querySelectorAll(".result-row")',
+            'button.setAttribute("aria-expanded"',
+            "detail.hidden = !expanded",
+            'row.classList.toggle("is-expanded"',
+        ):
+            self.assertIn(expected, html)
+        self.assertNotIn("innerHTML", html)
+
     def test_category_and_result_counts_match_assessment(self):
         value = assessment()
         html = render_report(value, ASSET_DIR)

@@ -1,43 +1,20 @@
 (() => {
   "use strict";
 
-  const state = { status: "all", gate: "all", discrepancy: "all" };
-  const items = Array.from(document.querySelectorAll(".test-item"));
-  const buttons = Array.from(document.querySelectorAll("[data-filter]"));
-  const expandButton = document.querySelector("[data-action='expand-all']");
+  document.querySelectorAll(".result-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const detail = document.getElementById(row.dataset.detailId);
+      const button = row.querySelector(".row-toggle");
+      if (!detail || !button) return;
 
-  const applyFilters = () => {
-    items.forEach((item) => {
-      const visible =
-        (state.status === "all" || item.dataset.status === state.status) &&
-        (state.gate === "all" || item.dataset.gate === state.gate) &&
-        (state.discrepancy === "all" || item.dataset.discrepancy === state.discrepancy);
-      item.hidden = !visible;
-    });
-
-    document.querySelectorAll(".category-section").forEach((section) => {
-      const visibleCount = section.querySelectorAll(".test-item:not([hidden])").length;
-      section.hidden = visibleCount === 0;
-    });
-  };
-
-  buttons.forEach((button) => {
-    button.addEventListener("click", () => {
-      const group = button.dataset.filter;
-      state[group] = button.dataset.value;
-      buttons
-        .filter((candidate) => candidate.dataset.filter === group)
-        .forEach((candidate) => candidate.setAttribute("aria-pressed", candidate === button ? "true" : "false"));
-      applyFilters();
+      const expanded = button.getAttribute("aria-expanded") !== "true";
+      button.setAttribute("aria-expanded", expanded ? "true" : "false");
+      button.setAttribute(
+        "aria-label",
+        `${expanded ? "收起" : "展开"}检测项 ${button.getAttribute("aria-controls").replace("test-detail-", "")}`,
+      );
+      detail.hidden = !expanded;
+      row.classList.toggle("is-expanded", expanded);
     });
   });
-
-  if (expandButton) {
-    expandButton.addEventListener("click", () => {
-      const visibleItems = items.filter((item) => !item.hidden);
-      const shouldOpen = visibleItems.some((item) => !item.open);
-      visibleItems.forEach((item) => { item.open = shouldOpen; });
-      expandButton.textContent = shouldOpen ? "收起全部证据" : "展开全部证据";
-    });
-  }
 })();
