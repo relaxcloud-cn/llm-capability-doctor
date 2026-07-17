@@ -9,7 +9,6 @@
   --detail: rgba(26, 28, 31, 0.035);
   --code: #f5f6f7;
   --focus: #1478d4;
-  --warn: #765700;
   --fail: #b42318;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
@@ -166,16 +165,8 @@ tbody th {
 }
 
 .status-FAIL,
-.status-ERROR,
 .category-status-FAIL {
   color: var(--fail);
-}
-
-.status-UNDETERMINED,
-.status-UNSUPPORTED,
-.status-SKIPPED,
-.category-status-CONDITIONAL {
-  color: var(--warn);
 }
 
 .result-row {
@@ -317,7 +308,6 @@ pre {
     --detail: rgba(255, 255, 255, 0.035);
     --code: #111111;
     --focus: #83c3ff;
-    --warn: #e0bb5a;
     --fail: #ff856f;
   }
 }

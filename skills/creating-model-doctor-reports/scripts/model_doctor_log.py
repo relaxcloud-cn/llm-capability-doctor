@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse Model Doctor audit logs into inert, redacted evidence."""
+"""Parse evidence-v1 Model Doctor logs into inert, redacted evidence."""
 
 from __future__ import annotations
 
@@ -10,9 +10,21 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
 
-PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-log.v1"
-SECRET_QUERY_KEYS = {"api_key", "key", "token", "access_token", "client_secret", "password"}
-SECRET_JSON_KEYS = SECRET_QUERY_KEYS | {"apiKey", "clientSecret", "authorization"}
+PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
+EVIDENCE_LOG_SCHEMA = "llm-capability-doctor.evidence.v1"
+SECRET_QUERY_KEYS = {
+    "api_key",
+    "key",
+    "token",
+    "access_token",
+    "client_secret",
+    "password",
+}
+SECRET_JSON_KEYS = SECRET_QUERY_KEYS | {
+    "apiKey",
+    "clientSecret",
+    "authorization",
+}
 SECRET_HEADER_NAMES = {
     "authorization",
     "proxy-authorization",
@@ -22,6 +34,13 @@ SECRET_HEADER_NAMES = {
     "cookie",
     "set-cookie",
 }
+FORBIDDEN_MANIFEST_FIELDS = {
+    "result",
+    "expected",
+    "detected",
+    "conclusion",
+    "status",
+}
 
 
 def _discover_secrets(value: str) -> Set[str]:
@@ -29,7 +48,10 @@ def _discover_secrets(value: str) -> Set[str]:
 
     for match in re.finditer(r"https?://[^\s'\"]+", value):
         try:
-            for key, item in parse_qsl(urlsplit(match.group(0)).query, keep_blank_values=True):
+            for key, item in parse_qsl(
+                urlsplit(match.group(0)).query,
+                keep_blank_values=True,
+            ):
                 if key.lower() in SECRET_QUERY_KEYS and item:
                     secrets.add(item)
         except ValueError:
@@ -45,7 +67,9 @@ def _discover_secrets(value: str) -> Set[str]:
                     secrets.add(item[7:].strip())
 
     json_key_pattern = re.compile(
-        r'"(' + "|".join(re.escape(key) for key in sorted(SECRET_JSON_KEYS)) + r')"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
+        r'"('
+        + "|".join(re.escape(key) for key in sorted(SECRET_JSON_KEYS))
+        + r')"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)"',
         re.IGNORECASE,
     )
     for match in json_key_pattern.finditer(value):
@@ -107,7 +131,8 @@ def _key_values(value: str) -> Dict[str, str]:
 
 def _section(block: str, name: str) -> str:
     pattern = re.compile(
-        rf"^----- {re.escape(name)} BEGIN -----\n(.*?)^----- {re.escape(name)} END -----$",
+        rf"^----- {re.escape(name)} BEGIN -----\n(.*?)"
+        rf"^----- {re.escape(name)} END -----$",
         re.MULTILINE | re.DOTALL,
     )
     match = pattern.search(block)
@@ -128,7 +153,7 @@ def _blocks(text: str, kind: str) -> List[Tuple[str, str]]:
         end_marker = end_template.format(identifier=identifier)
         end_index = text.find(end_marker, match.end())
         if end_index < 0:
-            continue
+            raise ValueError(f"Unterminated {kind.lower()} block: {identifier}")
         body_start = match.end()
         if text[body_start : body_start + 1] == "\n":
             body_start += 1
@@ -152,12 +177,9 @@ def _run_summary(text: str) -> Dict[str, str]:
         return {}
     body = text[start + len(marker) :]
     end = body.find("========== END ==========")
-    return _key_values(body if end < 0 else body[:end])
-
-
-def _request_test_id(request_id: str) -> Optional[str]:
-    match = re.match(r"^test-([0-9]+)(?:-|$)", request_id)
-    return match.group(1) if match else None
+    if end < 0:
+        raise ValueError("Unterminated RUN SUMMARY")
+    return _key_values(body[:end])
 
 
 def _sum_usage(response_bodies: Iterable[str]) -> Dict[str, int]:
@@ -176,67 +198,68 @@ def _sum_usage(response_bodies: Iterable[str]) -> Dict[str, int]:
     return totals
 
 
-def _link_exact_response_requests(
-    tests: Dict[str, Dict[str, object]],
-    requests: Dict[str, Dict[str, object]],
-) -> int:
-    """Link legacy shared requests only when non-empty response evidence is unique."""
-
-    response_index: Dict[str, List[str]] = {}
-    for request_id, request in requests.items():
-        response_body = str(request.get("responseBody", "")).strip()
-        if response_body:
-            response_index.setdefault(response_body, []).append(request_id)
-
-    linked = 0
-    for test in tests.values():
-        if test.get("requestRefs"):
-            continue
-        raw_response = str(test.get("rawResponse", "")).strip()
-        candidates = response_index.get(raw_response, []) if raw_response else []
-        if len(candidates) == 1:
-            test["requestRefs"] = candidates.copy()
-            linked += 1
-    return linked
+def _required_count(values: Dict[str, str], field: str) -> int:
+    raw = values.get(field)
+    if raw is None or not re.fullmatch(r"[0-9]+", raw):
+        raise ValueError(f"Missing or invalid count field {field}: {raw!r}")
+    return int(raw)
 
 
-def _warn_on_count_mismatch(
-    warnings: List[str], label: str, declared: object, discovered: int
+def _validate_count(
+    values: Dict[str, str],
+    field: str,
+    discovered: int,
 ) -> None:
-    try:
-        declared_count = int(str(declared))
-    except (TypeError, ValueError):
-        return
-    if declared_count != discovered:
-        warnings.append(
-            f"Log declared {label}={declared_count} but parser discovered {discovered}"
+    declared = _required_count(values, field)
+    if declared != discovered:
+        raise ValueError(
+            f"Declared count {field}={declared} does not match discovered {discovered}"
         )
 
 
+def _parse_request_refs(value: str, test_id: str) -> List[str]:
+    if value == "":
+        return []
+    refs = [item.strip() for item in value.split(",")]
+    if any(not item for item in refs):
+        raise ValueError(f"Invalid request_refs for TEST-{test_id}: {value!r}")
+    if len(set(refs)) != len(refs):
+        raise ValueError(f"Duplicate request_refs for TEST-{test_id}: {value!r}")
+    return refs
+
+
 def parse_log(path: Path) -> Dict[str, object]:
-    """Parse one audit log without changing it or retaining its absolute path."""
+    """Parse one strict evidence-v1 log without retaining its absolute path."""
 
     path = Path(path)
     raw = path.read_bytes()
     decoded = raw.decode("utf-8", errors="replace")
     secrets = _discover_secrets(decoded)
     text = redact_text(decoded, secrets)
-    warnings: List[str] = []
 
     run = _run_header(text)
-    if not run:
-        warnings.append("Missing or invalid MODEL DOCTOR RUN header")
+    if run.get("log_schema") != EVIDENCE_LOG_SCHEMA:
+        raise ValueError(
+            f"Unsupported or missing log_schema: {run.get('log_schema')!r}"
+        )
 
     requests: Dict[str, Dict[str, object]] = {}
     for identifier, block in _blocks(text, "REQUEST"):
+        if identifier in requests:
+            raise ValueError(f"Duplicate request block: {identifier}")
         metadata_text = block.split("-----", 1)[0]
         metadata = _key_values(metadata_text)
-        metrics = _key_values(_section(block, "RESPONSE METRICS"))
+        if metadata.get("request_id", identifier) != identifier:
+            raise ValueError(
+                f"Request block {identifier} declares request_id="
+                f"{metadata.get('request_id')!r}"
+            )
         requests[identifier] = {
             **metadata,
-            "request_id": metadata.get("request_id", identifier),
+            "request_id": identifier,
+            "curlCommand": _section(block, "CURL COMMAND"),
             "requestBody": _section(block, "REQUEST BODY"),
-            "metrics": metrics,
+            "metrics": _key_values(_section(block, "RESPONSE METRICS")),
             "responseHeaders": _section(block, "RESPONSE HEADERS"),
             "stderr": _section(block, "CURL STDERR"),
             "responseBody": _section(block, "RESPONSE BODY"),
@@ -244,35 +267,35 @@ def parse_log(path: Path) -> Dict[str, object]:
 
     tests: Dict[str, Dict[str, object]] = {}
     for identifier, block in _blocks(text, "TEST"):
-        metadata_text = block.split("----- RAW RESPONSE BEGIN -----", 1)[0]
-        metadata: Dict[str, object] = _key_values(metadata_text)
-        metadata["id"] = identifier
-        metadata["rawResponse"] = _section(block, "RAW RESPONSE")
-        metadata["requestRefs"] = [
-            request_id
-            for request_id in requests
-            if _request_test_id(request_id) == identifier
-        ]
-        tests[identifier] = metadata
-
-    script_version = run.get("script_version", "")
-    compatibility_links = 0
-    if script_version.startswith("0.1"):
-        compatibility_links = _link_exact_response_requests(tests, requests)
-        declared_count = run.get("test_count", "unknown")
-        warnings.append(
-            "Legacy Model Doctor "
-            f"v{script_version} log detected (declared {declared_count} tests); "
-            f"preserved all discovered tests and added {compatibility_links} exact-response evidence links"
-        )
+        if identifier in tests:
+            raise ValueError(f"Duplicate test block: {identifier}")
+        metadata = _key_values(block)
+        forbidden = FORBIDDEN_MANIFEST_FIELDS.intersection(metadata)
+        if forbidden:
+            raise ValueError(
+                f"TEST-{identifier} contains forbidden judgment fields: "
+                f"{', '.join(sorted(forbidden))}"
+            )
+        if "request_refs" not in metadata:
+            raise ValueError(f"TEST-{identifier} is missing request_refs")
+        refs = _parse_request_refs(metadata.pop("request_refs"), identifier)
+        for request_id in refs:
+            if request_id not in requests:
+                raise ValueError(
+                    f"TEST-{identifier} references missing request: {request_id}"
+                )
+        tests[identifier] = {
+            **metadata,
+            "id": identifier,
+            "requestRefs": refs,
+        }
 
     summary = _run_summary(text)
     if not summary:
-        warnings.append("Missing RUN SUMMARY; counts must be reconstructed")
-    _warn_on_count_mismatch(warnings, "test_count", run.get("test_count"), len(tests))
-    _warn_on_count_mismatch(
-        warnings, "request_count", summary.get("request_count"), len(requests)
-    )
+        raise ValueError("Missing RUN SUMMARY")
+    _validate_count(run, "selected_test_count", len(tests))
+    _validate_count(summary, "request_count", len(requests))
+    _validate_count(summary, "test_manifest_count", len(tests))
 
     return {
         "schemaVersion": PARSED_SCHEMA_VERSION,
@@ -288,7 +311,7 @@ def parse_log(path: Path) -> Dict[str, object]:
         "tokenTotals": _sum_usage(
             request["responseBody"] for request in requests.values()
         ),
-        "warnings": warnings,
+        "warnings": [],
     }
 
 
@@ -304,6 +327,8 @@ def test_packet(parsed: Dict[str, object], test_id: str) -> Dict[str, object]:
         "source": parsed.get("source", {}),
         "run": parsed.get("run", {}),
         "test": test,
-        "requests": [requests[request_id] for request_id in test.get("requestRefs", [])],
+        "requests": [
+            requests[request_id] for request_id in test.get("requestRefs", [])
+        ],
         "warnings": parsed.get("warnings", []),
     }

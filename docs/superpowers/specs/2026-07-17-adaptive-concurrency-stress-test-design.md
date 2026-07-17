@@ -1,5 +1,10 @@
 # 自适应并发压测设计
 
+> Superseded: this document assigns semantic validation, aggregation,
+> recommendation, and status to the shell collector. Do not execute this plan.
+> A replacement must follow the evidence-only boundary in
+> `2026-07-17-evidence-only-collector-design.md`.
+
 ## 概要
 
 将检测项 `057` 当前的短时并发快照替换为一项需显式启用、证据可审计的持续压测，用于确定标准模型负载下客户端观测到的最佳并发。结果必须在保证语义成功和自适应 P95 延迟门槛的前提下，找出成功输出 Token 吞吐量最高的并发档位。

@@ -1,0 +1,60 @@
+========== MODEL DOCTOR RUN ==========
+run_id: MD-20260717-TEST-001
+script_version: 0.7.0
+log_schema: llm-capability-doctor.evidence.v1
+started_at: 2026-07-17T10:00:00+0800
+url: https://model.example/v1/chat/completions
+model: test-model
+api_key: [REDACTED]
+curl_version: curl test
+selected_test_count: 1
+
+========== REQUEST test-001 BEGIN ==========
+request_id: test-001
+started_at: 2026-07-17T10:00:00+0800
+completed_at: 2026-07-17T10:00:01+0800
+protocol: openai_chat
+auth_mode: bearer
+stream: 0
+
+----- CURL COMMAND BEGIN -----
+curl --request POST --data-binary @- https://model.example/v1/chat/completions
+----- CURL COMMAND END -----
+
+----- REQUEST BODY BEGIN -----
+{"model":"test-model","messages":[{"role":"user","content":"Reply only OK"}]}
+----- REQUEST BODY END -----
+
+----- RESPONSE METRICS BEGIN -----
+curl_exit_code: 0
+http_status: 200
+time_total: 1.250000
+time_starttransfer: 0.750000
+size_download: 128
+----- RESPONSE METRICS END -----
+
+----- RESPONSE HEADERS BEGIN -----
+content-type: application/json
+----- RESPONSE HEADERS END -----
+
+----- CURL STDERR BEGIN -----
+----- CURL STDERR END -----
+
+----- RESPONSE BODY BEGIN -----
+{"model":"test-model","choices":[{"message":{"content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":2,"total_tokens":10}}
+----- RESPONSE BODY END -----
+========== REQUEST test-001 END ==========
+
+========== TEST-001 BEGIN ==========
+name: URL 可达性
+category: 接口与协议
+completed_at: 2026-07-17T10:00:01+0800
+request_refs: test-001
+========== TEST-001 END ==========
+
+========== RUN SUMMARY ==========
+completed_at: 2026-07-17T10:00:01+0800
+duration_seconds: 1
+request_count: 1
+test_manifest_count: 1
+========== END ==========
