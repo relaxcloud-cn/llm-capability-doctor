@@ -296,6 +296,36 @@ class ModelDoctorCliAssessmentTests(unittest.TestCase):
             self.assertEqual(invalid.returncode, 2)
             self.assertIn("001", invalid.stderr)
 
+    def test_validate_command_rejects_non_evidence_parsed_schema(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            parsed_path = directory / "parsed.json"
+            reviews_path = directory / "reviews.json"
+            parsed = parse_log(FIXTURES / "minimal.log")
+            parsed["schemaVersion"] = "llm-capability-doctor.parsed-log.v1"
+            parsed_path.write_text(json.dumps(parsed), encoding="utf-8")
+            reviews_path.write_text(
+                json.dumps({"001": valid_review()}),
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "validate",
+                    str(parsed_path),
+                    str(reviews_path),
+                ],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("parsed-evidence.v1", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

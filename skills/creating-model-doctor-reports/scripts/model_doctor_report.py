@@ -13,7 +13,7 @@ from typing import Sequence
 
 from model_doctor_assessment import assemble_assessment, validate_reviews
 from model_doctor_html import render_report
-from model_doctor_log import parse_log, test_packet
+from model_doctor_log import PARSED_SCHEMA_VERSION, parse_log, test_packet
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -57,6 +57,13 @@ def _write_output(requested: Path, content: str) -> Path:
     return destination
 
 
+def _require_parsed_schema(parsed: dict) -> None:
+    if parsed.get("schemaVersion") != PARSED_SCHEMA_VERSION:
+        raise CliUsageError(
+            f"Parsed evidence must use {PARSED_SCHEMA_VERSION}"
+        )
+
+
 def _summary(parsed: dict) -> dict:
     tests = parsed.get("tests", {})
     requests = parsed.get("requests", {})
@@ -85,6 +92,7 @@ def _summary_command(arguments: argparse.Namespace) -> int:
     parsed = _load_json(arguments.parsed)
     if not isinstance(parsed, dict):
         raise CliUsageError("Parsed evidence must be a JSON object")
+    _require_parsed_schema(parsed)
     print(_json_text(_summary(parsed)), end="")
     return 0
 
@@ -93,6 +101,7 @@ def _packet_command(arguments: argparse.Namespace) -> int:
     parsed = _load_json(arguments.parsed)
     if not isinstance(parsed, dict):
         raise CliUsageError("Parsed evidence must be a JSON object")
+    _require_parsed_schema(parsed)
     identifiers = [item.strip() for item in arguments.ids.split(",") if item.strip()]
     if not identifiers:
         raise CliUsageError("--ids must contain at least one test ID")
@@ -109,6 +118,7 @@ def _validated_inputs(parsed_path: Path, reviews_path: Path) -> tuple[dict, dict
     reviews = _load_json(reviews_path)
     if not isinstance(parsed, dict):
         raise CliUsageError("Parsed evidence must be a JSON object")
+    _require_parsed_schema(parsed)
     if not isinstance(reviews, dict):
         raise CliUsageError("Reviews must be a JSON object keyed by test ID")
     return parsed, reviews, validate_reviews(parsed, reviews)

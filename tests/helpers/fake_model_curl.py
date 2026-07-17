@@ -336,8 +336,7 @@ if tool_chain_match:
     elif follow_match:
         response = tool_chain_follow(protocol, follow_match.group(1))
     else:
-        response = '{"fixture":"unexpected-tool-chain-request"}'
-        http_status = "400"
+        response = tool_chain_probe(protocol)
 elif scenario == "anthropic_output_budget":
     payload = json.loads(request_body)
     if "max_tokens" not in payload:
