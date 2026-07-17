@@ -32,9 +32,9 @@ def valid_review(test_id="001", status="PASS", gate="critical", confidence="high
         "conclusion": "可观察证据满足该检测项要求。",
         "logic": {
             "purpose": "验证目标能力。",
-            "method": "检查请求、响应和运行指标。",
+            "method": "检查 manifest 引用的请求、响应和运行指标。",
             "passCriteria": ["存在完整且一致的直接证据。"],
-            "failCriteria": ["响应与要求冲突。"],
+            "failCriteria": ["证据缺失、错误或与要求冲突。"],
             "capabilityBoundary": "仅证明本次请求中的可观察行为。",
         },
         "evidenceRefs": [f"request:test-{test_id}"],
@@ -42,6 +42,35 @@ def valid_review(test_id="001", status="PASS", gate="critical", confidence="high
         "limitations": [],
         "retestInstructions": [],
     }
+
+
+def parsed_with_tests(*test_ids):
+    parsed = parse_log(FIXTURES / "minimal.log")
+    template_test = parsed["tests"]["001"]
+    template_request = parsed["requests"]["test-001"]
+    categories = {
+        "001": "接口与协议",
+        "051": "性能与稳定性",
+        "057": "性能与稳定性",
+    }
+    parsed["tests"] = {}
+    parsed["requests"] = {}
+    for test_id in test_ids:
+        request_id = f"test-{test_id}"
+        request = deepcopy(template_request)
+        request["request_id"] = request_id
+        test = deepcopy(template_test)
+        test.update(
+            {
+                "id": test_id,
+                "name": f"Test {test_id}",
+                "category": categories.get(test_id, "测试分类"),
+                "requestRefs": [request_id],
+            }
+        )
+        parsed["requests"][request_id] = request
+        parsed["tests"][test_id] = test
+    return parsed
 
 
 class ModelDoctorAssessmentTests(unittest.TestCase):
@@ -52,6 +81,16 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         errors = validate_reviews(self.parsed, {})
 
         self.assertTrue(any("001" in error and "missing" in error.lower() for error in errors))
+
+    def test_only_pass_and_fail_are_valid_review_statuses(self):
+        for status in ("UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"):
+            with self.subTest(status=status):
+                review = valid_review(status=status)
+                self.assertTrue(validate_reviews(self.parsed, {"001": review}))
+        for status in ("PASS", "FAIL"):
+            with self.subTest(status=status):
+                review = valid_review(status=status)
+                self.assertEqual(validate_reviews(self.parsed, {"001": review}), [])
 
     def test_validate_reviews_rejects_pass_without_evidence(self):
         review = valid_review()
@@ -72,16 +111,6 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
 
         self.assertGreaterEqual(len(errors), 4)
 
-    def test_validate_reviews_requires_unknown_reason_and_retest(self):
-        review = valid_review(status="UNDETERMINED", confidence="low")
-        review["limitations"] = []
-        review["retestInstructions"] = []
-
-        errors = validate_reviews(self.parsed, {"001": review})
-
-        self.assertTrue(any("limitations" in error for error in errors))
-        self.assertTrue(any("retestInstructions" in error for error in errors))
-
     def test_validate_reviews_rejects_low_confidence_critical_pass(self):
         review = valid_review(confidence="low")
 
@@ -98,7 +127,7 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         self.assertTrue(any("request:missing" in error for error in errors))
 
     def test_current_catalog_gate_mapping_covers_all_62_tests(self):
-        mapping = getattr(assessment_module, "CURRENT_CATALOG_GATE_LEVELS", {})
+        mapping = assessment_module.CURRENT_CATALOG_GATE_LEVELS
         expected_critical = {f"{value:03d}" for value in range(1, 7)} | {
             f"{value:03d}" for value in range(40, 51)
         }
@@ -108,138 +137,85 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
             "057",
         }
         all_ids = {f"{value:03d}" for value in range(1, 63)}
-        expected_observation = all_ids - expected_critical - expected_important
 
         self.assertEqual(set(mapping), all_ids)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "critical"}, expected_critical)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "important"}, expected_important)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "observation"}, expected_observation)
-
-    def test_historical_v0_3_gate_mapping_remains_available(self):
-        mapping = getattr(assessment_module, "V0_3_CATALOG_GATE_LEVELS", {})
-        expected_critical = {f"{value:03d}" for value in range(1, 7)} | {
-            f"{value:03d}" for value in range(43, 54)
-        }
-        expected_important = {
-            *(f"{value:03d}" for value in range(26, 29)),
-            *(f"{value:03d}" for value in range(35, 40)),
-            "060",
-        }
-        all_ids = {f"{value:03d}" for value in range(1, 66)}
-
-        self.assertEqual(set(mapping), all_ids)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "critical"}, expected_critical)
-        self.assertEqual({test_id for test_id, gate in mapping.items() if gate == "important"}, expected_important)
         self.assertEqual(
-            {test_id for test_id, gate in mapping.items() if gate == "observation"},
-            all_ids - expected_critical - expected_important,
+            {test_id for test_id, gate in mapping.items() if gate == "critical"},
+            expected_critical,
         )
-
-    def test_current_and_historical_62_item_versions_share_the_gate_mapping(self):
-        mappings = getattr(assessment_module, "CATALOG_GATE_LEVELS", {})
-
-        self.assertEqual(mappings["0.6.1"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
-        self.assertEqual(mappings["0.6.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
-        self.assertEqual(mappings["0.5.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
-        self.assertEqual(mappings["0.4.0"], assessment_module.CURRENT_CATALOG_GATE_LEVELS)
+        self.assertEqual(
+            {test_id for test_id, gate in mapping.items() if gate == "important"},
+            expected_important,
+        )
+        self.assertFalse(hasattr(assessment_module, "V0_3_CATALOG_GATE_LEVELS"))
+        self.assertFalse(hasattr(assessment_module, "CATALOG_GATE_LEVELS"))
 
     def test_validate_reviews_rejects_wrong_gate_for_current_catalog(self):
-        self.parsed["run"]["script_version"] = "0.6.1"
         review = valid_review(gate="observation")
 
         errors = validate_reviews(self.parsed, {"001": review})
 
         self.assertTrue(any("001" in error and "critical" in error for error in errors))
 
-    def test_validate_reviews_rejects_wrong_gate_for_historical_62_item_catalogs(self):
-        for version in ("0.6.0", "0.5.0", "0.4.0"):
-            with self.subTest(version=version):
-                self.parsed["run"]["script_version"] = version
-                review = valid_review(gate="observation")
-
-                errors = validate_reviews(self.parsed, {"001": review})
-
-                self.assertTrue(
-                    any("001" in error and "critical" in error for error in errors)
-                )
-
-    def test_validate_reviews_rejects_wrong_gate_for_historical_v0_3_catalog(self):
-        self.parsed["run"]["script_version"] = "0.3.0"
-        review = valid_review(gate="observation")
-
-        errors = validate_reviews(self.parsed, {"001": review})
-
-        self.assertTrue(any("001" in error and "critical" in error for error in errors))
-
-    def test_concurrency_ladder_uses_detected_summary_as_raw_observation(self):
-        summary = (
-            "c4:success=4/4,p50_ms=100,p95_ms=140,max_ms=140,rate_limited=0;"
-            "c8:success=8/8,p50_ms=120,p95_ms=190,max_ms=190,rate_limited=0;"
-            "c16:success=16/16,p50_ms=150,p95_ms=240,max_ms=250,rate_limited=0;"
-            "c32:success=32/32,p50_ms=210,p95_ms=390,max_ms=420,rate_limited=0"
-        )
-        self.parsed["run"]["script_version"] = "0.6.0"
-        test = self.parsed["tests"].pop("001")
-        request = self.parsed["requests"].pop("test-001")
-        test.update(
-            {
-                "id": "057",
-                "name": "4-32 并发响应时间",
-                "category": "性能与稳定性",
-                "detected": summary,
-                "requestRefs": ["test-057-c4-1"],
-            }
-        )
-        request["request_id"] = "test-057-c4-1"
-        self.parsed["tests"]["057"] = test
-        self.parsed["requests"]["test-057-c4-1"] = request
-        review = valid_review(test_id="057", gate="important")
-        review["evidenceRefs"] = ["request:test-057-c4-1"]
-
-        assessment = assemble_assessment(self.parsed, {"057": review})
-
-        self.assertEqual(assessment["tests"][0]["rawObservation"], summary)
-
-    def test_historical_057_keeps_its_request_metrics_as_raw_observation(self):
-        self.parsed["run"]["script_version"] = "0.5.0"
-        test = self.parsed["tests"].pop("001")
-        request = self.parsed["requests"].pop("test-001")
-        test.update(
-            {
-                "id": "057",
-                "name": "8 并发性能",
-                "category": "性能与稳定性",
-                "detected": "8/8",
-                "requestRefs": ["test-057-c8-1"],
-            }
-        )
-        request["request_id"] = "test-057-c8-1"
-        self.parsed["tests"]["057"] = test
-        self.parsed["requests"]["test-057-c8-1"] = request
-        review = valid_review(test_id="057", gate="important")
-        review["evidenceRefs"] = ["request:test-057-c8-1"]
-
-        assessment = assemble_assessment(self.parsed, {"057": review})
-
-        self.assertEqual(
-            assessment["tests"][0]["rawObservation"],
-            "HTTP 200 · 1.250000s · 128 bytes",
-        )
-
-    def test_assemble_assessment_uses_reviewed_status_as_only_formal_verdict(self):
+    def test_assemble_assessment_uses_binary_v3_contract(self):
         review = valid_review(status="FAIL")
         assessment = assemble_assessment(self.parsed, {"001": review})
         item = assessment["tests"][0]
 
-        self.assertEqual(ASSESSMENT_SCHEMA_VERSION, "llm-capability-doctor.assessment.v2")
-        self.assertEqual(assessment["schemaVersion"], "llm-capability-doctor.assessment.v2")
+        self.assertEqual(
+            ASSESSMENT_SCHEMA_VERSION,
+            "llm-capability-doctor.assessment.v3",
+        )
+        self.assertEqual(
+            assessment["schemaVersion"],
+            "llm-capability-doctor.assessment.v3",
+        )
         self.assertEqual(item["reviewedStatus"], "FAIL")
-        for removed in ("originalStatus", "discrepancy", "originalTest"):
-            self.assertNotIn(removed, item)
-        self.assertNotIn("summary", assessment)
-        self.assertEqual(assessment["overall"]["counts"]["FAIL"], 1)
+        self.assertEqual(set(assessment["overall"]["counts"]), {"PASS", "FAIL"})
+        self.assertNotIn("conditions", assessment["overall"])
 
-    def test_assessment_schema_declares_skill_only_v2_contract(self):
+    def test_category_and_overall_are_binary(self):
+        parsed = parsed_with_tests("001", "051")
+        assessment = assemble_assessment(
+            parsed,
+            {
+                "001": valid_review(status="PASS", gate="critical"),
+                "051": valid_review(
+                    test_id="051",
+                    status="FAIL",
+                    gate="observation",
+                ),
+            },
+        )
+
+        self.assertEqual(
+            {item["status"] for item in assessment["categories"]},
+            {"PASS", "FAIL"},
+        )
+        self.assertEqual(assessment["overall"]["verdict"], "READY")
+        failed_category = next(
+            item for item in assessment["categories"] if item["status"] == "FAIL"
+        )
+        self.assertEqual(failed_category["failures"], ["051"])
+        self.assertNotIn("unknowns", failed_category)
+
+    def test_important_failure_blocks_overall_readiness(self):
+        parsed = parsed_with_tests("057")
+        assessment = assemble_assessment(
+            parsed,
+            {
+                "057": valid_review(
+                    test_id="057",
+                    status="FAIL",
+                    gate="important",
+                )
+            },
+        )
+
+        self.assertEqual(assessment["overall"]["verdict"], "BLOCKED")
+        self.assertEqual(assessment["overall"]["blockers"][0]["testId"], "057")
+
+    def test_assessment_schema_declares_binary_v3_contract(self):
         schema_path = (
             ROOT
             / "skills"
@@ -248,41 +224,19 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
             / "assessment-schema.json"
         )
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
+        overall = schema["properties"]["overall"]
         test_schema = schema["properties"]["tests"]["items"]
 
-        self.assertEqual(schema["$id"], "llm-capability-doctor.assessment.v2")
+        self.assertEqual(schema["$id"], "llm-capability-doctor.assessment.v3")
         self.assertEqual(
             schema["properties"]["schemaVersion"]["const"],
-            "llm-capability-doctor.assessment.v2",
+            "llm-capability-doctor.assessment.v3",
         )
-        self.assertIn("reviewedStatus", test_schema["required"])
-        for removed in ("originalStatus", "discrepancy", "originalTest"):
-            self.assertNotIn(removed, test_schema["required"])
-            self.assertNotIn(removed, test_schema.get("properties", {}))
-
-    def test_overall_verdict_blocks_on_critical_failure(self):
-        assessment = assemble_assessment(
-            self.parsed,
-            {"001": valid_review(status="FAIL", gate="critical")},
-        )
-
-        self.assertEqual(assessment["overall"]["verdict"], "BLOCKED")
-        self.assertEqual(assessment["overall"]["blockers"][0]["testId"], "001")
-
-    def test_overall_verdict_is_conditional_on_critical_unknown(self):
-        review = valid_review(status="UNDETERMINED", gate="critical", confidence="low")
-        review["limitations"] = ["响应正文缺失。"]
-        review["retestInstructions"] = ["重新运行检测项 001。"]
-
-        assessment = assemble_assessment(self.parsed, {"001": review})
-
-        self.assertEqual(assessment["overall"]["verdict"], "CONDITIONAL")
-
-    def test_overall_verdict_is_ready_when_all_non_observation_gates_pass(self):
-        assessment = assemble_assessment(self.parsed, {"001": valid_review()})
-
-        self.assertEqual(assessment["overall"]["verdict"], "READY")
-        self.assertEqual(assessment["categories"][0]["counts"]["PASS"], 1)
+        self.assertEqual(test_schema["properties"]["reviewedStatus"]["enum"], ["PASS", "FAIL"])
+        self.assertEqual(overall["properties"]["verdict"]["enum"], ["READY", "BLOCKED"])
+        self.assertIn("blockers", overall["required"])
+        self.assertNotIn("conditions", overall["required"])
+        self.assertNotIn("conditions", overall.get("properties", {}))
 
     def test_validate_assessment_detects_tampered_counts(self):
         assessment = assemble_assessment(self.parsed, {"001": valid_review()})
@@ -300,11 +254,23 @@ class ModelDoctorCliAssessmentTests(unittest.TestCase):
             directory = Path(temporary_directory)
             parsed_path = directory / "parsed.json"
             reviews_path = directory / "reviews.json"
-            parsed_path.write_text(json.dumps(parse_log(FIXTURES / "minimal.log")), encoding="utf-8")
-            reviews_path.write_text(json.dumps({"001": valid_review()}), encoding="utf-8")
+            parsed_path.write_text(
+                json.dumps(parse_log(FIXTURES / "minimal.log")),
+                encoding="utf-8",
+            )
+            reviews_path.write_text(
+                json.dumps({"001": valid_review()}),
+                encoding="utf-8",
+            )
 
             valid = subprocess.run(
-                [sys.executable, str(CLI), "validate", str(parsed_path), str(reviews_path)],
+                [
+                    sys.executable,
+                    str(CLI),
+                    "validate",
+                    str(parsed_path),
+                    str(reviews_path),
+                ],
                 cwd=ROOT,
                 capture_output=True,
                 text=True,
@@ -315,7 +281,13 @@ class ModelDoctorCliAssessmentTests(unittest.TestCase):
 
             reviews_path.write_text("{}", encoding="utf-8")
             invalid = subprocess.run(
-                [sys.executable, str(CLI), "validate", str(parsed_path), str(reviews_path)],
+                [
+                    sys.executable,
+                    str(CLI),
+                    "validate",
+                    str(parsed_path),
+                    str(reviews_path),
+                ],
                 cwd=ROOT,
                 capture_output=True,
                 text=True,

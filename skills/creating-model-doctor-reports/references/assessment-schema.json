@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v2",
-  "title": "LLM Capability Doctor Assessment",
+  "$id": "llm-capability-doctor.assessment.v3",
+  "title": "LLM Capability Doctor Binary Assessment",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -14,7 +14,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v2"
+      "const": "llm-capability-doctor.assessment.v3"
     },
     "generatedAt": {
       "type": "string"
@@ -28,15 +28,46 @@
     },
     "overall": {
       "type": "object",
-      "required": ["verdict", "counts", "blockers", "conditions"],
+      "required": ["verdict", "counts", "blockers"],
       "properties": {
         "verdict": {
-          "enum": ["READY", "CONDITIONAL", "BLOCKED"]
+          "enum": ["READY", "BLOCKED"]
+        },
+        "counts": {
+          "type": "object",
+          "required": ["PASS", "FAIL"],
+          "properties": {
+            "PASS": {"type": "integer", "minimum": 0},
+            "FAIL": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        },
+        "blockers": {
+          "type": "array"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "categories": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "counts", "failures"],
+        "properties": {
+          "name": {"type": "string"},
+          "status": {"enum": ["PASS", "FAIL"]},
+          "counts": {
+            "type": "object",
+            "required": ["PASS", "FAIL"],
+            "additionalProperties": false
+          },
+          "failures": {
+            "type": "array",
+            "items": {"type": "string"}
+          }
+        },
+        "additionalProperties": false
+      }
     },
     "tests": {
       "type": "array",
@@ -52,6 +83,7 @@
           "conclusion",
           "logic",
           "evidenceRefs",
+          "evidenceExcerpts",
           "limitations",
           "retestInstructions",
           "requests"
@@ -61,7 +93,7 @@
             "enum": ["critical", "important", "observation"]
           },
           "reviewedStatus": {
-            "enum": ["PASS", "FAIL", "UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"]
+            "enum": ["PASS", "FAIL"]
           },
           "confidence": {
             "enum": ["high", "medium", "low"]
