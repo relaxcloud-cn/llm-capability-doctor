@@ -41,10 +41,12 @@
   --log-file './contract-test.log'
 ```
 2.执行完成后将客户现场的contract-test.log拷贝出来
+
 3.在自己电脑安装model doctor的skill，将下面这句话复制给codex执行
 ```bash
 帮我安装https://github.com/relaxcloud-cn/llm-capability-doctor/tree/main/skills/creating-model-doctor-reports到本地
 ```
+
 4.在codex输入这句话，使用skill分析日志得到模型体检的html报告
 ```
 使用model doctor report技能分析下 contract-test.log
