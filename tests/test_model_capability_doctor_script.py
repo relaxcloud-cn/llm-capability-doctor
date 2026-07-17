@@ -13,6 +13,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model-capability-doctor.sh"
 FAKE_CURL = ROOT / "tests" / "helpers" / "fake_model_curl.py"
+README = ROOT / "README.md"
+STRESS_DESIGN = (
+    ROOT
+    / "docs"
+    / "superpowers"
+    / "specs"
+    / "2026-07-17-adaptive-concurrency-stress-test-design.md"
+)
+STRESS_PLAN = (
+    ROOT
+    / "docs"
+    / "superpowers"
+    / "plans"
+    / "2026-07-17-adaptive-concurrency-stress-test.md"
+)
 SUPPORTED_PROTOCOLS = (
     "openai_chat",
     "openai_responses",
@@ -448,6 +463,41 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             self.assertNotIn(forbidden, summary.lower())
         self.assertNotIn("检测结果：", result.stdout)
         self.assertNotIn("检测结论：", result.stdout)
+
+    def test_readme_documents_the_evidence_only_breaking_workflow(self):
+        text = README.read_text(encoding="utf-8")
+
+        for required in (
+            "0.7.0",
+            "llm-capability-doctor.evidence.v1",
+            "llm-capability-doctor.assessment.v3",
+            "Shell 脚本只负责执行 curl 并记录完整证据",
+            "Skill 是唯一的二元评判者",
+            "旧日志不受支持，必须使用 v0.7.0 重新采集",
+            "PASS",
+            "FAIL",
+            "MODEL_API_KEY",
+            "--only",
+        ):
+            self.assertIn(required, text)
+        for forbidden in (
+            "v0.5.0 检测契约",
+            "UNDETERMINED",
+            "脚本的 `expected`",
+            "定向复测这七项",
+        ):
+            self.assertNotIn(forbidden, text)
+
+    def test_old_adaptive_stress_documents_are_marked_non_executable(self):
+        for path in (STRESS_DESIGN, STRESS_PLAN):
+            with self.subTest(path=path.name):
+                opening = path.read_text(encoding="utf-8")[:700]
+                self.assertIn("Superseded:", opening)
+                self.assertIn("Do not execute this plan", opening)
+                self.assertIn(
+                    "2026-07-17-evidence-only-collector-design.md",
+                    opening,
+                )
 
 
 if __name__ == "__main__":

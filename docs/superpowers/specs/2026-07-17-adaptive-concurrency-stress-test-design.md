@@ -1,5 +1,10 @@
 # Adaptive Concurrency Stress Test Design
 
+> Superseded: this document assigns semantic validation, aggregation,
+> recommendation, and status to the shell collector. Do not execute this plan.
+> A replacement must follow the evidence-only boundary in
+> `2026-07-17-evidence-only-collector-design.md`.
+
 ## Summary
 
 Replace the current short concurrency snapshot in test `057` with an opt-in,
