@@ -758,6 +758,117 @@ json_string_value() {
   ' "$file"
 }
 
+json_raw_member() {
+  local file="$1"
+  local key="$2"
+  local mode="${3:-last}"
+  awk -v wanted="$key" -v pick="$mode" '
+    function skip_space(position,    char_) {
+      while (position <= length(document)) {
+        char_ = substr(document, position, 1)
+        if (char_ != " " && char_ != "\t" && char_ != "\r" && char_ != "\n") break
+        position++
+      }
+      return position
+    }
+    function string_end(start,    position, char_, escaped) {
+      escaped = 0
+      for (position = start + 1; position <= length(document); position++) {
+        char_ = substr(document, position, 1)
+        if (escaped) {
+          escaped = 0
+        } else if (char_ == "\\") {
+          escaped = 1
+        } else if (char_ == "\"") {
+          return position
+        }
+      }
+      return 0
+    }
+    function value_end(start,    first, position, char_, end_, braces, brackets) {
+      first = substr(document, start, 1)
+      if (first == "\"") return string_end(start)
+      if (first != "{" && first != "[") {
+        for (position = start; position <= length(document); position++) {
+          char_ = substr(document, position, 1)
+          if (char_ == "," || char_ == "}" || char_ == "]" || char_ ~ /[[:space:]]/) break
+        }
+        return position > start ? position - 1 : 0
+      }
+      braces = 0
+      brackets = 0
+      for (position = start; position <= length(document); position++) {
+        char_ = substr(document, position, 1)
+        if (char_ == "\"") {
+          end_ = string_end(position)
+          if (!end_) return 0
+          position = end_
+          continue
+        }
+        if (char_ == "{") braces++
+        else if (char_ == "}") braces--
+        else if (char_ == "[") brackets++
+        else if (char_ == "]") brackets--
+        if (braces < 0 || brackets < 0) return 0
+        if (braces == 0 && brackets == 0) return position
+      }
+      return 0
+    }
+    function complete_document(    position, char_, end_, braces, brackets) {
+      braces = 0
+      brackets = 0
+      for (position = 1; position <= length(document); position++) {
+        char_ = substr(document, position, 1)
+        if (char_ == "\"") {
+          end_ = string_end(position)
+          if (!end_) return 0
+          position = end_
+          continue
+        }
+        if (char_ == "{") braces++
+        else if (char_ == "}") braces--
+        else if (char_ == "[") brackets++
+        else if (char_ == "]") brackets--
+        if (braces < 0 || brackets < 0) return 0
+      }
+      return braces == 0 && brackets == 0
+    }
+    { document = document (NR > 1 ? "\n" : "") $0 }
+    END {
+      if (!complete_document()) exit 1
+      position = 1
+      found = 0
+      while (position <= length(document)) {
+        if (substr(document, position, 1) != "\"") {
+          position++
+          continue
+        }
+        key_end = string_end(position)
+        if (!key_end) exit 1
+        key = substr(document, position + 1, key_end - position - 1)
+        value_start = skip_space(key_end + 1)
+        if (key == wanted && substr(document, value_start, 1) == ":") {
+          value_start = skip_space(value_start + 1)
+          end_ = value_end(value_start)
+          if (!end_) exit 1
+          value = substr(document, value_start, end_ - value_start + 1)
+          if (pick == "first") {
+            print value
+            exit 0
+          }
+          found = 1
+          selected = value
+          position = end_ + 1
+        } else {
+          position = key_end + 1
+        }
+      }
+      if (!found) exit 1
+      print selected
+    }
+  ' "$file"
+}
+
 run_core_interface_test() {
   local id="$1" category="$2" name="$3"
   local body="" request_refs=""
@@ -967,7 +1078,7 @@ core_tool_body() {
     anthropic_tools="{\"name\":\"get_weather\",\"description\":\"Get weather\",\"input_schema\":${weather_parameters}}"
     gemini_tools="{\"name\":\"get_weather\",\"description\":\"Get weather\",\"parameters\":${weather_parameters}}"
   fi
-  if [[ "$id" == "041" || "$id" == "045" || "$id" == "050" ]]; then
+  if [[ "$id" == "041" || "$id" == "045" || "$id" == "047" || "$id" == "050" ]]; then
     chat_tools="${chat_tools},{\"type\":\"function\",\"function\":{\"name\":\"get_time\",\"description\":\"Get time\",\"parameters\":{\"type\":\"object\",\"properties\":{\"zone\":{\"type\":\"string\"}},\"required\":[\"zone\"],\"additionalProperties\":false},\"strict\":true}}"
     responses_tools="${responses_tools},{\"type\":\"function\",\"name\":\"get_time\",\"description\":\"Get time\",\"parameters\":{\"type\":\"object\",\"properties\":{\"zone\":{\"type\":\"string\"}},\"required\":[\"zone\"],\"additionalProperties\":false},\"strict\":true}"
     anthropic_tools="${anthropic_tools},{\"name\":\"get_time\",\"description\":\"Get time\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"zone\":{\"type\":\"string\"}},\"required\":[\"zone\"]}}"
@@ -1004,7 +1115,7 @@ extract_tool_call_id() {
   case "$DETECTED_PROTOCOL" in
     openai_responses)
       value="$(json_string_value "$file" call_id last)"; [[ -n "$value" ]] || value="$(json_string_value "$file" id last)" ;;
-    openai_chat|anthropic_messages|ollama_chat)
+    openai_chat|anthropic_messages|gemini_generate_content|ollama_chat)
       value="$(json_string_value "$file" id all | awk '/^(call[-_]|toolu[-_]|tool[-_]?call[-_])/{ print; exit }')"
       if [[ -z "$value" ]]; then
         value="$(json_string_value "$file" id all | awk '!/^(chatcmpl[-_]|resp[-_]|msg[-_])/{ print; exit }')"
@@ -1015,34 +1126,59 @@ extract_tool_call_id() {
   printf '%s' "$value"
 }
 
+extract_tool_name() {
+  json_string_value "$1" name first
+}
+
 extract_response_id() {
   json_string_value "$1" id first
 }
 
 core_tool_followup_body() {
-  local id="$1" call_id="$2" response_id="$3" escaped_model="" original_prompt="" tool_output="WEATHER_SUNNY" escaped_prompt=""
+  local id="$1" first_file="$2" call_id="$3" response_id="$4" tool_name="$5"
+  local escaped_model="" original_prompt="" escaped_prompt="" tool_output="WEATHER_SUNNY" escaped_tool_output=""
+  local escaped_call_id="" escaped_response_id="" escaped_tool_name="" assistant_message="" assistant_content="" candidate_content="" tools=""
   escaped_model="$(printf '%s' "$MODEL" | json_escape)"
   original_prompt="$(core_tool_prompt "$id")"
   escaped_prompt="$(printf '%s' "$original_prompt" | json_escape)"
   [[ "$id" == "049" ]] && tool_output='ERROR: timeout'
+  escaped_tool_output="$(printf '%s' "$tool_output" | json_escape)"
+  escaped_call_id="$(printf '%s' "$call_id" | json_escape)"
+  escaped_response_id="$(printf '%s' "$response_id" | json_escape)"
+  escaped_tool_name="$(printf '%s' "$tool_name" | json_escape)"
+  tools="$(printf '%s' "$TOOL_INITIAL_BODY" | json_raw_member /dev/stdin tools first)" || return 1
   case "$DETECTED_PROTOCOL" in
     openai_responses)
-      if [[ "$id" == "047" ]]; then
-        printf '{"model":"%s","previous_response_id":"%s","input":[{"type":"function_call_output","call_id":"%s","output":"%s"}],"tools":[{"type":"function","name":"get_time","description":"Get time","parameters":{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"],"additionalProperties":false},"strict":true}]}' "$escaped_model" "$response_id" "$call_id" "$tool_output"
-      elif [[ "$id" == "049" ]]; then
-        printf '{"model":"%s","previous_response_id":"%s","input":[{"type":"function_call_output","call_id":"%s","output":"%s"}],"tools":[{"type":"function","name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},"strict":true}]}' "$escaped_model" "$response_id" "$call_id" "$tool_output"
-      else
-        printf '{"model":"%s","previous_response_id":"%s","input":[{"type":"function_call_output","call_id":"%s","output":"%s"}]}' "$escaped_model" "$response_id" "$call_id" "$tool_output"
-      fi
+      [[ -n "$response_id" && -n "$call_id" ]] || return 1
+      printf '{"model":"%s","previous_response_id":"%s","input":[{"type":"function_call_output","call_id":"%s","output":"%s"}],"tools":%s}' "$escaped_model" "$escaped_response_id" "$escaped_call_id" "$escaped_tool_output" "$tools"
       ;;
     openai_chat)
-      if [[ "$id" == "047" ]]; then
-        printf '{"model":"%s","messages":[{"role":"user","content":"%s"},{"role":"assistant","content":null,"tool_calls":[{"id":"%s","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":\\"Beijing\\"}"}}]},{"role":"tool","tool_call_id":"%s","content":"%s"}],"tools":[{"type":"function","function":{"name":"get_time","description":"Get time","parameters":{"type":"object","properties":{"zone":{"type":"string"}},"required":["zone"],"additionalProperties":false},"strict":true}}],"stream":false}' "$escaped_model" "$escaped_prompt" "$call_id" "$call_id" "$tool_output"
-      elif [[ "$id" == "049" ]]; then
-        printf '{"model":"%s","messages":[{"role":"user","content":"%s"},{"role":"assistant","content":null,"tool_calls":[{"id":"%s","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":\\"Beijing\\"}"}}]},{"role":"tool","tool_call_id":"%s","content":"%s"}],"tools":[{"type":"function","function":{"name":"get_weather","description":"Get weather","parameters":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false},"strict":true}}],"stream":false}' "$escaped_model" "$escaped_prompt" "$call_id" "$call_id" "$tool_output"
+      [[ -n "$call_id" ]] || return 1
+      assistant_message="$(json_raw_member "$first_file" message first)" || return 1
+      printf '{"model":"%s","messages":[{"role":"user","content":"%s"},%s,{"role":"tool","tool_call_id":"%s","content":"%s"}],"tools":%s,"stream":false}' "$escaped_model" "$escaped_prompt" "$assistant_message" "$escaped_call_id" "$escaped_tool_output" "$tools"
+      ;;
+    anthropic_messages)
+      [[ -n "$call_id" ]] || return 1
+      assistant_content="$(json_raw_member "$first_file" content first)" || return 1
+      if [[ "$id" == "049" ]]; then
+        printf '{"model":"%s","max_tokens":%s,"messages":[{"role":"user","content":"%s"},{"role":"assistant","content":%s},{"role":"user","content":[{"type":"tool_result","tool_use_id":"%s","content":"%s","is_error":true}]}],"tools":%s}' "$escaped_model" "$ANTHROPIC_MAX_TOKENS" "$escaped_prompt" "$assistant_content" "$escaped_call_id" "$escaped_tool_output" "$tools"
       else
-        printf '{"model":"%s","messages":[{"role":"user","content":"%s"},{"role":"assistant","content":null,"tool_calls":[{"id":"%s","type":"function","function":{"name":"get_weather","arguments":"{\\"city\\":\\"Beijing\\"}"}}]},{"role":"tool","tool_call_id":"%s","content":"%s"}],"stream":false}' "$escaped_model" "$escaped_prompt" "$call_id" "$call_id" "$tool_output"
+        printf '{"model":"%s","max_tokens":%s,"messages":[{"role":"user","content":"%s"},{"role":"assistant","content":%s},{"role":"user","content":[{"type":"tool_result","tool_use_id":"%s","content":"%s"}]}],"tools":%s}' "$escaped_model" "$ANTHROPIC_MAX_TOKENS" "$escaped_prompt" "$assistant_content" "$escaped_call_id" "$escaped_tool_output" "$tools"
       fi
+      ;;
+    gemini_generate_content)
+      [[ -n "$call_id" && -n "$tool_name" ]] || return 1
+      candidate_content="$(json_raw_member "$first_file" content first)" || return 1
+      if [[ "$id" == "049" ]]; then
+        printf '{"contents":[{"role":"user","parts":[{"text":"%s"}]},%s,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"%s","response":{"error":"timeout"}}}]}],"tools":%s}' "$escaped_prompt" "$candidate_content" "$escaped_call_id" "$escaped_tool_name" "$tools"
+      else
+        printf '{"contents":[{"role":"user","parts":[{"text":"%s"}]},%s,{"role":"user","parts":[{"functionResponse":{"id":"%s","name":"%s","response":{"result":"%s"}}}]}],"tools":%s}' "$escaped_prompt" "$candidate_content" "$escaped_call_id" "$escaped_tool_name" "$escaped_tool_output" "$tools"
+      fi
+      ;;
+    ollama_chat)
+      [[ -n "$tool_name" ]] || return 1
+      assistant_message="$(json_raw_member "$first_file" message first)" || return 1
+      printf '{"model":"%s","messages":[{"role":"user","content":"%s"},%s,{"role":"tool","tool_name":"%s","content":"%s"}],"tools":%s,"stream":false}' "$escaped_model" "$escaped_prompt" "$assistant_message" "$escaped_tool_name" "$escaped_tool_output" "$tools"
       ;;
     *) return 1 ;;
   esac
@@ -1050,16 +1186,18 @@ core_tool_followup_body() {
 
 run_core_tool_test() {
   local id="$1" category="$2" name="$3"
-  local prompt="" body="" first_file="" call_id="" response_id="" follow_body="" request_refs=""
+  local prompt="" body="" first_file="" call_id="" response_id="" tool_name="" follow_body="" request_refs=""
   prompt="$(core_tool_prompt "$id")"
   body="$(core_tool_body "$id" "$prompt")"
+  TOOL_INITIAL_BODY="$body"
   perform_request "$body" 0 "test-${id}" "$DETECTED_AUTH_MODE"
   first_file="$LAST_RESPONSE_FILE"
   request_refs="$LAST_REQUEST_ID"
   if [[ "$id" == "047" || "$id" == "048" || "$id" == "049" ]]; then
     call_id="$(extract_tool_call_id "$first_file")"
     response_id="$(extract_response_id "$first_file")"
-    if [[ -n "$call_id" ]] && follow_body="$(core_tool_followup_body "$id" "$call_id" "$response_id")"; then
+    tool_name="$(extract_tool_name "$first_file")"
+    if follow_body="$(core_tool_followup_body "$id" "$first_file" "$call_id" "$response_id" "$tool_name")"; then
       perform_request "$follow_body" 0 "test-${id}-follow" "$DETECTED_AUTH_MODE"
       request_refs="$(append_request_ref "$request_refs" "$LAST_REQUEST_ID")"
     fi

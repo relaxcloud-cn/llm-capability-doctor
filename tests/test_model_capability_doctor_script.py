@@ -13,6 +13,13 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model-capability-doctor.sh"
 FAKE_CURL = ROOT / "tests" / "helpers" / "fake_model_curl.py"
+SUPPORTED_PROTOCOLS = (
+    "openai_chat",
+    "openai_responses",
+    "anthropic_messages",
+    "gemini_generate_content",
+    "ollama_chat",
+)
 
 FORBIDDEN_JUDGMENT_FIELDS = (
     "result:",
@@ -59,6 +66,19 @@ def request_body(log: str, request_id: str) -> str:
     )
     if not match:
         raise AssertionError(f"Missing request body for {request_id}")
+    return match.group(1).strip()
+
+
+def response_body(log: str, request_id: str) -> str:
+    block = delimited_block(log, "REQUEST", request_id)
+    match = re.search(
+        r"^----- RESPONSE BODY BEGIN -----$(.*?)"
+        r"^----- RESPONSE BODY END -----$",
+        block,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise AssertionError(f"Missing response body for {request_id}")
     return match.group(1).strip()
 
 
@@ -297,6 +317,60 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertEqual(refs, ["test-033-low", "test-033-high"])
         self.assertIn('"reasoning_effort":"low"', request_body(log, refs[0]))
         self.assertIn('"reasoning_effort":"high"', request_body(log, refs[1]))
+
+    def test_tool_followups_round_trip_observed_assistant_turns_for_all_protocols(self):
+        for protocol in SUPPORTED_PROTOCOLS:
+            with self.subTest(protocol=protocol):
+                result, log = self.run_fixture(
+                    f"{protocol}_tool_chain",
+                    "047,048,049",
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for test_id in ("047", "048", "049"):
+                    refs = manifest_request_refs(log, test_id)
+                    self.assertEqual(len(refs), 2, (protocol, test_id, refs))
+                    first = json.loads(response_body(log, refs[0]))
+                    follow = json.loads(request_body(log, refs[1]))
+                    self.assert_followup_round_trips(
+                        protocol,
+                        first,
+                        follow,
+                        test_id,
+                    )
+
+    def assert_followup_round_trips(self, protocol, first, follow, test_id):
+        sentinel = f"OBSERVED_{protocol.upper()}_{test_id}"
+        self.assertIn(sentinel, json.dumps(follow, separators=(",", ":")))
+        if protocol == "openai_chat":
+            assistant = first["choices"][0]["message"]
+            self.assertEqual(follow["messages"][1], assistant)
+            call_id = assistant["tool_calls"][0]["id"]
+            self.assertEqual(follow["messages"][2]["tool_call_id"], call_id)
+        elif protocol == "openai_responses":
+            tool_call = first["output"][0]
+            self.assertEqual(follow["previous_response_id"], first["id"])
+            self.assertEqual(follow["input"][0]["call_id"], tool_call["call_id"])
+        elif protocol == "anthropic_messages":
+            assistant_content = first["content"]
+            self.assertEqual(follow["messages"][1]["content"], assistant_content)
+            self.assertEqual(
+                follow["messages"][2]["content"][0]["tool_use_id"],
+                assistant_content[0]["id"],
+            )
+        elif protocol == "gemini_generate_content":
+            assistant_content = first["candidates"][0]["content"]
+            self.assertEqual(follow["contents"][1], assistant_content)
+            function_call = assistant_content["parts"][0]["functionCall"]
+            function_response = follow["contents"][2]["parts"][0][
+                "functionResponse"
+            ]
+            self.assertEqual(function_response["id"], function_call["id"])
+            self.assertEqual(function_response["name"], function_call["name"])
+        else:
+            assistant = first["message"]
+            self.assertEqual(follow["messages"][1], assistant)
+            tool_name = assistant["tool_calls"][0]["function"]["name"]
+            self.assertEqual(follow["messages"][2]["tool_name"], tool_name)
 
     def test_performance_manifests_reference_raw_requests_without_aggregates(self):
         result, log = self.run_fixture(

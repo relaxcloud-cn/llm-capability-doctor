@@ -75,6 +75,187 @@ def anthropic_tool_use():
     )
 
 
+def tool_chain_probe(protocol):
+    if protocol == "openai_chat":
+        return chat("MODEL_DOCTOR_PROTOCOL_OK")
+    if protocol == "openai_responses":
+        return json.dumps(
+            {
+                "id": "resp_probe",
+                "object": "response",
+                "output": [{"type": "message", "content": []}],
+                "output_text": "MODEL_DOCTOR_PROTOCOL_OK",
+            },
+            separators=(",", ":"),
+        )
+    if protocol == "anthropic_messages":
+        return anthropic_message("MODEL_DOCTOR_PROTOCOL_OK")
+    if protocol == "gemini_generate_content":
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "role": "model",
+                            "parts": [{"text": "MODEL_DOCTOR_PROTOCOL_OK"}],
+                        },
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        )
+    return json.dumps(
+        {
+            "model": "fixture-model",
+            "message": {"role": "assistant", "content": "MODEL_DOCTOR_PROTOCOL_OK"},
+            "done": True,
+            "done_reason": "stop",
+        },
+        separators=(",", ":"),
+    )
+
+
+def tool_chain_first(protocol, test_id):
+    sentinel = f"OBSERVED_{protocol.upper()}_{test_id}"
+    tool_name = "get_weather"
+    if protocol == "openai_chat":
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": f"call_{test_id}",
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(
+                            {"city": "Beijing", "sentinel": sentinel},
+                            separators=(",", ":"),
+                        ),
+                    },
+                }
+            ],
+            "fixture_sentinel": sentinel,
+        }
+        payload = {
+            "id": f"chatcmpl_{test_id}",
+            "object": "chat.completion",
+            "choices": [{"message": message, "finish_reason": "tool_calls"}],
+        }
+    elif protocol == "openai_responses":
+        payload = {
+            "id": f"resp_{test_id}_{sentinel}",
+            "object": "response",
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": f"fc_{test_id}",
+                    "call_id": f"call_{test_id}_{sentinel}",
+                    "name": tool_name,
+                    "arguments": json.dumps({"city": "Beijing"}),
+                }
+            ],
+            "output_text": "",
+        }
+    elif protocol == "anthropic_messages":
+        payload = {
+            "id": f"msg_{test_id}",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": f"toolu_{test_id}",
+                    "name": tool_name,
+                    "input": {"city": "Beijing", "sentinel": sentinel},
+                    "fixture_sentinel": sentinel,
+                }
+            ],
+            "stop_reason": "tool_use",
+        }
+    elif protocol == "gemini_generate_content":
+        payload = {
+            "candidates": [
+                {
+                    "content": {
+                        "role": "model",
+                        "parts": [
+                            {
+                                "functionCall": {
+                                    "id": f"gem_call_{test_id}",
+                                    "name": tool_name,
+                                    "args": {"city": "Beijing", "sentinel": sentinel},
+                                },
+                                "fixture_sentinel": sentinel,
+                            }
+                        ],
+                    },
+                    "finishReason": "STOP",
+                }
+            ]
+        }
+    else:
+        payload = {
+            "model": "fixture-model",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": tool_name,
+                            "arguments": {"city": "Beijing", "sentinel": sentinel},
+                        }
+                    }
+                ],
+                "fixture_sentinel": sentinel,
+            },
+            "done": True,
+            "done_reason": "stop",
+        }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def tool_chain_follow(protocol, test_id):
+    marker = f"MODEL_DOCTOR_CASE_{test_id}_FOLLOW_OK"
+    if protocol == "openai_responses":
+        return json.dumps(
+            {
+                "id": f"resp_{test_id}_follow",
+                "object": "response",
+                "output": [],
+                "output_text": marker,
+            },
+            separators=(",", ":"),
+        )
+    if protocol == "anthropic_messages":
+        return anthropic_message(marker)
+    if protocol == "gemini_generate_content":
+        return json.dumps(
+            {
+                "candidates": [
+                    {
+                        "content": {"role": "model", "parts": [{"text": marker}]},
+                        "finishReason": "STOP",
+                    }
+                ]
+            },
+            separators=(",", ":"),
+        )
+    if protocol == "ollama_chat":
+        return json.dumps(
+            {
+                "model": "fixture-model",
+                "message": {"role": "assistant", "content": marker},
+                "done": True,
+                "done_reason": "stop",
+            },
+            separators=(",", ":"),
+        )
+    return chat(marker)
+
+
 def truncated_chat(content):
     return '{"choices":[{"message":{"content":' + json.dumps(content)
 
@@ -128,7 +309,36 @@ if delay:
 http_status = "200"
 time_total = "0.020"
 
-if scenario == "anthropic_output_budget":
+tool_chain_match = re.fullmatch(
+    r"(openai_chat|openai_responses|anthropic_messages|gemini_generate_content|ollama_chat)_tool_chain",
+    scenario,
+)
+if tool_chain_match:
+    protocol = tool_chain_match.group(1)
+    probe_indexes = {
+        "openai_chat": 1,
+        "openai_responses": 2,
+        "anthropic_messages": 3,
+        "gemini_generate_content": 4,
+        "ollama_chat": 5,
+    }
+    probe_match = re.fullmatch(r"protocol-([0-9]+)", output_path.stem)
+    first_match = re.fullmatch(r"test-(047|048|049)", output_path.stem)
+    follow_match = re.fullmatch(r"test-(047|048|049)-follow", output_path.stem)
+    if probe_match:
+        if int(probe_match.group(1)) == probe_indexes[protocol]:
+            response = tool_chain_probe(protocol)
+        else:
+            response = '{"fixture":"protocol-mismatch"}'
+            http_status = "400"
+    elif first_match:
+        response = tool_chain_first(protocol, first_match.group(1))
+    elif follow_match:
+        response = tool_chain_follow(protocol, follow_match.group(1))
+    else:
+        response = '{"fixture":"unexpected-tool-chain-request"}'
+        http_status = "400"
+elif scenario == "anthropic_output_budget":
     payload = json.loads(request_body)
     if "max_tokens" not in payload:
         response = '{"error":{"message":"max_tokens is required"}}'
