@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate semantic reviews and assemble the Model Doctor assessment."""
+"""Validate binary semantic reviews and assemble a Model Doctor assessment."""
 
 from __future__ import annotations
 
@@ -8,15 +8,23 @@ from datetime import datetime, timezone
 from typing import Dict, List, Set
 
 
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v2"
-STATUSES = {"PASS", "FAIL", "UNSUPPORTED", "UNDETERMINED", "SKIPPED", "ERROR"}
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v3"
+STATUSES = {"PASS", "FAIL"}
 CONFIDENCES = {"high", "medium", "low"}
 GATE_LEVELS = {"critical", "important", "observation"}
-LOGIC_FIELDS = {"purpose", "method", "passCriteria", "failCriteria", "capabilityBoundary"}
+LOGIC_FIELDS = {
+    "purpose",
+    "method",
+    "passCriteria",
+    "failCriteria",
+    "capabilityBoundary",
+}
 
 
 def _catalog_gate_levels(
-    catalog_size: int, critical: Set[str], important: Set[str]
+    catalog_size: int,
+    critical: Set[str],
+    important: Set[str],
 ) -> Dict[str, str]:
     all_ids = {f"{test_id:03d}" for test_id in range(1, catalog_size + 1)}
     observation = all_ids - critical - important
@@ -27,23 +35,11 @@ def _catalog_gate_levels(
     }
 
 
-V0_3_CATALOG_GATE_LEVELS = _catalog_gate_levels(
-    65,
-    {f"{test_id:03d}" for test_id in (*range(1, 7), *range(43, 54))},
-    {f"{test_id:03d}" for test_id in (*range(26, 29), *range(35, 40), 60)},
-)
 CURRENT_CATALOG_GATE_LEVELS = _catalog_gate_levels(
     62,
     {f"{test_id:03d}" for test_id in (*range(1, 7), *range(40, 51))},
     {f"{test_id:03d}" for test_id in (*range(14, 19), *range(32, 37), 57)},
 )
-CATALOG_GATE_LEVELS = {
-    "0.3.0": V0_3_CATALOG_GATE_LEVELS,
-    "0.4.0": CURRENT_CATALOG_GATE_LEVELS,
-    "0.5.0": CURRENT_CATALOG_GATE_LEVELS,
-    "0.6.0": CURRENT_CATALOG_GATE_LEVELS,
-    "0.6.1": CURRENT_CATALOG_GATE_LEVELS,
-}
 
 
 def _non_empty_string(value: object) -> bool:
@@ -61,14 +57,14 @@ def _string_list(value: object, require_item: bool = False) -> bool:
 def _evidence_ref_exists(parsed: dict, reference: str) -> bool:
     if reference.startswith("request:"):
         return reference.split(":", 1)[1] in parsed.get("requests", {})
-    if reference.startswith("test:") and reference.endswith(":raw"):
+    if reference.startswith("test:") and reference.endswith(":manifest"):
         parts = reference.split(":")
         return len(parts) == 3 and parts[1] in parsed.get("tests", {})
     return False
 
 
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
-    """Return human-readable errors for Codex-authored semantic reviews."""
+    """Return human-readable errors for Skill-authored binary reviews."""
 
     errors: List[str] = []
     parsed_tests = parsed.get("tests", {})
@@ -100,12 +96,9 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
             errors.append(f"Test {test_id} confidence is invalid")
         if gate not in GATE_LEVELS:
             errors.append(f"Test {test_id} gateLevel is invalid")
-        script_version = parsed.get("run", {}).get("script_version")
-        expected_gate = CATALOG_GATE_LEVELS.get(script_version, {}).get(test_id)
+        expected_gate = CURRENT_CATALOG_GATE_LEVELS.get(test_id)
         if expected_gate and gate != expected_gate:
-            errors.append(
-                f"Test {test_id} gateLevel must be {expected_gate} for script {script_version}"
-            )
+            errors.append(f"Test {test_id} gateLevel must be {expected_gate}")
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
 
@@ -127,84 +120,99 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         else:
             for reference in evidence_refs:
                 if not _evidence_ref_exists(parsed, reference):
-                    errors.append(f"Test {test_id} evidence reference does not exist: {reference}")
+                    errors.append(
+                        f"Test {test_id} evidence reference does not exist: {reference}"
+                    )
 
         if not _string_list(review.get("evidenceExcerpts"), require_item=True):
-            errors.append(f"Test {test_id} evidenceExcerpts must contain observable text")
+            errors.append(
+                f"Test {test_id} evidenceExcerpts must contain observable text"
+            )
         if not _string_list(review.get("limitations")):
             errors.append(f"Test {test_id} limitations must be a string array")
         if not _string_list(review.get("retestInstructions")):
-            errors.append(f"Test {test_id} retestInstructions must be a string array")
-
-        if status == "UNDETERMINED":
-            if not _string_list(review.get("limitations"), require_item=True):
-                errors.append(f"Test {test_id} UNDETERMINED requires limitations")
-            if not _string_list(review.get("retestInstructions"), require_item=True):
-                errors.append(f"Test {test_id} UNDETERMINED requires retestInstructions")
+            errors.append(
+                f"Test {test_id} retestInstructions must be a string array"
+            )
         if status == "PASS" and gate == "critical" and confidence == "low":
-            errors.append(f"Test {test_id} low-confidence critical PASS is not allowed")
+            errors.append(
+                f"Test {test_id} low-confidence critical PASS is not allowed"
+            )
 
     return errors
 
 
-def _raw_observation(test: dict, requests: List[dict], script_version: str) -> str:
-    if script_version == "0.6.0" and str(test.get("id")) == "057" and test.get("detected"):
-        return str(test["detected"])
-    if requests:
-        metrics = requests[-1].get("metrics", {})
-        parts = []
-        if metrics.get("http_status"):
-            parts.append(f"HTTP {metrics['http_status']}")
-        if metrics.get("time_total"):
-            parts.append(f"{metrics['time_total']}s")
-        if metrics.get("size_download"):
-            parts.append(f"{metrics['size_download']} bytes")
-        if parts:
-            return " · ".join(parts)
-    return str(test.get("detected") or test.get("conclusion") or "No direct observation")
+def _raw_observation(requests: List[dict]) -> str:
+    if not requests:
+        return "Manifest references no request evidence"
+    metrics = requests[-1].get("metrics", {})
+    parts = []
+    if metrics.get("http_status"):
+        parts.append(f"HTTP {metrics['http_status']}")
+    if metrics.get("time_total"):
+        parts.append(f"{metrics['time_total']}s")
+    if metrics.get("size_download"):
+        parts.append(f"{metrics['size_download']} bytes")
+    return " · ".join(parts) if parts else "Request evidence recorded"
 
 
 def _status_counts(items: List[dict]) -> Dict[str, int]:
-    return {status: sum(1 for item in items if item["reviewedStatus"] == status) for status in sorted(STATUSES)}
+    return {
+        status: sum(
+            1 for item in items if item["reviewedStatus"] == status
+        )
+        for status in ("PASS", "FAIL")
+    }
 
 
 def _category_status(items: List[dict]) -> str:
-    statuses = {item["reviewedStatus"] for item in items}
-    if statuses & {"FAIL", "ERROR"}:
-        return "FAIL"
-    if statuses & {"UNSUPPORTED", "UNDETERMINED", "SKIPPED"}:
-        return "CONDITIONAL"
-    return "PASS"
+    return "PASS" if all(item["reviewedStatus"] == "PASS" for item in items) else "FAIL"
+
+
+def _summary(item: dict) -> dict:
+    return {
+        "testId": item["testId"],
+        "name": item["name"],
+        "status": item["reviewedStatus"],
+        "conclusion": item["conclusion"],
+    }
 
 
 def _overall(items: List[dict]) -> dict:
     blockers = [
-        {"testId": item["testId"], "name": item["name"], "status": item["reviewedStatus"], "conclusion": item["conclusion"]}
+        _summary(item)
         for item in items
-        if item["gateLevel"] == "critical" and item["reviewedStatus"] in {"FAIL", "ERROR"}
+        if item["gateLevel"] in {"critical", "important"}
+        and item["reviewedStatus"] == "FAIL"
     ]
-    conditions = [
-        {"testId": item["testId"], "name": item["name"], "status": item["reviewedStatus"], "conclusion": item["conclusion"]}
-        for item in items
-        if item["gateLevel"] in {"critical", "important"} and item["reviewedStatus"] != "PASS"
-        and not (item["gateLevel"] == "critical" and item["reviewedStatus"] in {"FAIL", "ERROR"})
-    ]
-    if blockers:
-        verdict = "BLOCKED"
-    elif conditions:
-        verdict = "CONDITIONAL"
-    else:
-        verdict = "READY"
     return {
-        "verdict": verdict,
+        "verdict": "BLOCKED" if blockers else "READY",
         "counts": _status_counts(items),
         "blockers": blockers,
-        "conditions": conditions,
     }
 
 
+def _categories(items: List[dict]) -> List[dict]:
+    category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
+    for item in items:
+        category_items.setdefault(item["category"], []).append(item)
+    return [
+        {
+            "name": name,
+            "status": _category_status(group),
+            "counts": _status_counts(group),
+            "failures": [
+                item["testId"]
+                for item in group
+                if item["reviewedStatus"] == "FAIL"
+            ],
+        }
+        for name, group in category_items.items()
+    ]
+
+
 def assemble_assessment(parsed: dict, reviews: dict) -> dict:
-    """Merge parsed evidence with validated semantic reviews."""
+    """Merge strict parsed evidence with validated binary reviews."""
 
     errors = validate_reviews(parsed, reviews)
     if errors:
@@ -225,11 +233,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
                 "confidence": review["confidence"],
                 "conclusion": review["conclusion"],
                 "logic": review["logic"],
-                "rawObservation": _raw_observation(
-                    test,
-                    requests,
-                    str(parsed.get("run", {}).get("script_version", "")),
-                ),
+                "rawObservation": _raw_observation(requests),
                 "metrics": [request.get("metrics", {}) for request in requests],
                 "evidenceRefs": review["evidenceRefs"],
                 "evidenceExcerpts": review["evidenceExcerpts"],
@@ -239,28 +243,6 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
             }
         )
 
-    category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
-    for item in items:
-        category_items.setdefault(item["category"], []).append(item)
-    categories = [
-        {
-            "name": name,
-            "status": _category_status(group),
-            "counts": _status_counts(group),
-            "criticalFailures": [
-                item["testId"]
-                for item in group
-                if item["gateLevel"] == "critical" and item["reviewedStatus"] in {"FAIL", "ERROR"}
-            ],
-            "unknowns": [
-                item["testId"]
-                for item in group
-                if item["reviewedStatus"] in {"UNSUPPORTED", "UNDETERMINED", "SKIPPED"}
-            ],
-        }
-        for name, group in category_items.items()
-    ]
-
     return {
         "schemaVersion": ASSESSMENT_SCHEMA_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -269,13 +251,13 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "overall": _overall(items),
-        "categories": categories,
+        "categories": _categories(items),
         "tests": items,
     }
 
 
 def validate_assessment(assessment: dict) -> List[str]:
-    """Validate cross-field consistency after assessment assembly."""
+    """Validate binary cross-field consistency after assessment assembly."""
 
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
@@ -283,13 +265,20 @@ def validate_assessment(assessment: dict) -> List[str]:
     items = assessment.get("tests")
     if not isinstance(items, list):
         return errors + ["tests must be an array"]
-    expected_counts = _status_counts(items)
-    actual_counts = assessment.get("overall", {}).get("counts")
-    if actual_counts != expected_counts:
-        errors.append("overall counts do not match test results")
+    if any(item.get("reviewedStatus") not in STATUSES for item in items):
+        errors.append("tests contain a non-binary reviewedStatus")
     expected_overall = _overall(items)
-    if assessment.get("overall", {}).get("verdict") != expected_overall["verdict"]:
+    actual_overall = assessment.get("overall", {})
+    if actual_overall.get("counts") != expected_overall["counts"]:
+        errors.append("overall counts do not match test results")
+    if actual_overall.get("verdict") != expected_overall["verdict"]:
         errors.append("overall verdict does not match gate results")
-    if any("path" in assessment.get("source", {}) for _ in [0]):
+    if actual_overall.get("blockers") != expected_overall["blockers"]:
+        errors.append("overall blockers do not match gate results")
+    if assessment.get("categories") != _categories(items):
+        errors.append("categories do not match test results")
+    if "conditions" in actual_overall:
+        errors.append("overall must not contain conditions")
+    if "path" in assessment.get("source", {}):
         errors.append("source must not expose an absolute path")
     return errors

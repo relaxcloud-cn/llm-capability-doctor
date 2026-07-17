@@ -1,5 +1,10 @@
 # Adaptive Concurrency Stress Test Implementation Plan
 
+> Superseded: this document assigns semantic validation, aggregation,
+> recommendation, and status to the shell collector. Do not execute this plan.
+> A replacement must follow the evidence-only boundary in
+> `2026-07-17-evidence-only-collector-design.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace test `057`'s one-wave concurrency snapshot with an opt-in sustained stress test that recommends the lowest concurrency on the highest eligible output-token-throughput plateau.

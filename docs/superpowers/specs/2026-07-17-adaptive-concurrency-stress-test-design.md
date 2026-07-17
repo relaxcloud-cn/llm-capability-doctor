@@ -1,80 +1,58 @@
-# Adaptive Concurrency Stress Test Design
+# 自适应并发压测设计
 
-## Summary
+> Superseded: this document assigns semantic validation, aggregation,
+> recommendation, and status to the shell collector. Do not execute this plan.
+> A replacement must follow the evidence-only boundary in
+> `2026-07-17-evidence-only-collector-design.md`.
 
-Replace the current short concurrency snapshot in test `057` with an opt-in,
-auditable stress test that determines the client-observed best concurrency for
-a standardized model workload. The result must identify the concurrency level
-that maximizes successful output-token throughput while preserving semantic
-success and an adaptive P95 latency guardrail.
+## 概要
 
-The standard run uses one workload profile, tests up to concurrency `64`, and
-targets an 8-12 minute runtime. It first evaluates a coarse power-of-two ladder,
-then tests one or two intermediate levels around the best coarse result.
+将检测项 `057` 当前的短时并发快照替换为一项需显式启用、证据可审计的持续压测，用于确定标准模型负载下客户端观测到的最佳并发。结果必须在保证语义成功和自适应 P95 延迟门槛的前提下，找出成功输出 Token 吞吐量最高的并发档位。
 
-## Goals
+标准模式只使用一种负载规格，最高测试并发 `64`，目标运行时间为 8-12 分钟。测试先执行二次幂粗测阶梯，再在最佳粗测档位附近补测一至两个中间档位。
 
-- Measure sustained behavior at each concurrency level instead of launching one
-  finite request wave.
-- Report successful requests per second, output tokens per second, complete
-  response latency, semantic success, throttling, and transport failures.
-- Recommend one best concurrency and a stable concurrency interval.
-- Keep the complete run reproducible and auditable from the Model Doctor log.
-- Protect customer endpoints with an explicit maximum concurrency and severe
-  overload stop conditions.
-- Preserve the current single-script, curl-based customer-site workflow.
+## 目标
 
-## Non-Goals
+- 持续测量每个并发档位的行为，而不是仅启动一波有限请求。
+- 报告每秒成功请求数、每秒输出 Token 数、完整响应延迟、语义成功、限流和传输失败。
+- 推荐一个最佳并发值和一个稳定并发区间。
+- 保证完整运行可以从 Model Doctor 日志中复现和审计。
+- 通过明确的最大并发和严重过载停止条件保护客户模型端点。
+- 保留当前单 Bash 脚本、基于 curl 的客户现场使用流程。
 
-- Proving a provider SLA or the absolute capacity of the upstream model fleet.
-- Measuring server-side accelerator utilization or queue depth.
-- Isolating internet, gateway, and model execution time from one another.
-- Measuring TTFT or TPOT in the first version. Curl `time_starttransfer` remains
-  TTFB and must not be relabeled as TTFT.
-- Testing several prompt-length or output-length profiles in one run.
-- Automatically raising the maximum concurrency above `64`.
+## 非目标
 
-## Current Behavior and Gap
+- 证明服务商 SLA 或上游模型集群的绝对容量。
+- 测量服务端加速卡利用率或队列深度。
+- 将互联网、网关和模型执行耗时彼此分离。
+- 在第一版中测量 TTFT 或 TPOT。curl 的 `time_starttransfer` 仍然是 TTFB，不得改称 TTFT。
+- 在一次运行中同时测试多种提示词长度或输出长度规格。
+- 自动将最大并发提升到 `64` 以上。
 
-Test `057` currently launches synchronized waves at concurrency `4`, `8`, `16`,
-and `32`. Each worker performs one short exact-marker request. The test reports
-semantic success count, rate-limit count, P50, nearest-rank P95, and maximum
-complete-response latency.
+## 当前行为与缺口
 
-That design is a useful short capacity snapshot, but it cannot determine the
-best concurrency because it does not measure steady-state throughput, uses an
-unrepresentatively small response, has no baseline-relative latency guardrail,
-and does not refine the search around a promising concurrency level.
+检测项 `057` 当前会在并发 `4`、`8`、`16` 和 `32` 下各启动一波同步请求。每个 worker 只执行一次短的精确标记请求。测试报告语义成功数、限流数、P50、nearest-rank P95 和最大完整响应延迟。
 
-## Selected Approach
+这种设计可作为短时容量快照，但无法判断最佳并发，因为它不测量稳态吞吐，响应负载过小且不具代表性，没有相对于基线的延迟门槛，也不会在有希望的并发区间附近进一步细化搜索。
 
-Use a two-stage adaptive search.
+## 选定方案
 
-1. Run a coarse ladder at concurrency `1`, `2`, `4`, `8`, `16`, `32`, and `64`.
-2. Determine the best eligible coarse level using successful output-token
-   throughput.
-3. Test one intermediate level between the best coarse level and each existing
-   neighbor when that midpoint is a distinct integer.
-4. Recompute the recommendation from all measured levels.
+采用两阶段自适应搜索。
 
-For example, when concurrency `16` is the best coarse result, the refinement
-stage tests `12` and `24`. If an edge level wins, only its available neighbor is
-refined. Every reported recommendation is therefore a measured value, never an
-interpolated value.
+1. 在并发 `1`、`2`、`4`、`8`、`16`、`32` 和 `64` 执行粗测阶梯。
+2. 使用成功输出 Token 吞吐量确定最佳合格粗测档位。
+3. 当中点为不同整数时，在最佳粗测档位与其两侧已有相邻档位之间各补测一个中间值。
+4. 使用全部已测档位重新计算推荐结果。
 
-This approach is preferred over a fixed ladder because it gives a more useful
-recommendation, and preferred over continuous hill climbing because throughput
-and latency are noisy and not guaranteed to be monotonic.
+例如，若并发 `16` 是最佳粗测结果，则细化阶段测试 `12` 和 `24`。若最佳结果位于边界，只细化存在相邻档位的一侧。因此，报告中的推荐值一定是实际测量值，不是插值估算值。
 
-When a configured maximum is lower than `64`, the coarse ladder contains every
-power-of-two level not exceeding that maximum and also the exact maximum when it
-is not already present. The approved standard configuration uses maximum `64`.
+与固定阶梯相比，该方案能给出更有用的推荐；与连续爬山搜索相比，该方案对吞吐和延迟噪声更稳健，因为性能曲线不一定单调。
 
-## Invocation and Safety
+当配置的最大并发低于 `64` 时，粗测阶梯包含不超过最大值的所有二次幂档位；若最大值本身不是二次幂，还必须加入该精确最大值。已批准的标准配置最大并发为 `64`。
 
-The sustained stress test must be explicitly enabled because it is materially
-more expensive and more disruptive than the current catalog run. The intended
-interface is:
+## 调用方式与安全性
+
+持续压测的成本和干扰明显高于当前目录测试，因此必须显式启用。预期调用方式为：
 
 ```bash
 ./model-capability-doctor.sh \
@@ -87,321 +65,236 @@ interface is:
   --log-file './stress-test.log'
 ```
 
-Supported stress modes:
+支持的压测模式：
 
-- `off`: do not run the sustained stress test. Test `057` is `SKIPPED` with a
-  concrete rerun command.
-- `standard`: run the best-concurrency test defined by this specification.
+- `off`：不运行持续压测。检测项 `057` 记为 `SKIPPED`，并给出明确复测命令。
+- `standard`：运行本设计定义的最佳并发测试。
 
-The command-line default remains `off` so a normal all-catalog run cannot
-silently generate sustained load. `--stress-max-concurrency` defaults to `64`
-when a stress mode is enabled and rejects values below `1` or above `64`.
+命令行默认值保持为 `off`，避免普通全目录检测在未告知的情况下产生持续负载。启用压测模式后，`--stress-max-concurrency` 默认值为 `64`，并拒绝小于 `1` 或大于 `64` 的值。
 
-The script prints the selected mode, maximum concurrency, workload, expected
-runtime range, and the fact that the run generates billable model traffic before
-starting test `057`. It remains non-interactive so it is usable in automation.
+启动检测项 `057` 前，脚本必须输出所选模式、最大并发、负载规格、预计运行时间范围，并明确说明本次运行会产生可计费模型流量。脚本保持非交互式，以便用于自动化。
 
-## Standard Workload
+## 标准负载
 
-Each measured request uses:
+每个被测请求使用：
 
-- a deterministic synthetic, non-sensitive payload containing approximately
-  4,096 ASCII characters, targeting roughly 1,000 input tokens while recording
-  the actual provider-reported count;
-- a request for approximately 256 visible English words, accepted only when it
-  contains 200-320 whitespace-delimited words before the final marker;
-- a unique request nonce near the beginning of the input to prevent accidental
-  prefix-cache reuse from dominating the result;
-- a required final marker tied to that nonce; and
-- a response budget large enough to produce the requested text and marker.
+- 确定性的合成非敏感负载，约含 4,096 个 ASCII 字符，目标约为 1,000 个输入 Token，同时记录服务商实际返回的 Token 数；
+- 约 256 个可见英文单词的输出要求；只有最终标记前包含 200-320 个以空白分隔的单词时才接受；
+- 位于输入靠前位置的唯一请求 nonce，避免意外命中前缀缓存而主导结果；
+- 与 nonce 绑定的必需结束标记；
+- 足以生成所需正文和结束标记的响应预算。
 
-The marker verifies that the visible response completed the assigned request.
-HTTP `2xx` alone is not a successful sample. The response is successful only
-when transport, HTTP, protocol completion, visible marker, and usable timing
-evidence all pass.
+结束标记用于证明可见响应完成了指定任务。仅有 HTTP `2xx` 不构成成功样本。只有传输、HTTP、协议完成状态、可见结束标记和有效计时证据全部通过时，样本才算成功。
 
-The workload generator must be deterministic apart from the nonce. The report
-states that this synthetic profile represents one standardized workload and
-does not predict every application workload.
+除 nonce 外，负载生成器必须保持确定性。报告必须说明该合成规格只代表一种标准负载，不能预测所有应用负载。
 
-The script has no model-specific tokenizer and therefore records the generated
-payload size and provider-reported input tokens as separate facts. Provider
-`output_tokens` can include reasoning or other non-visible tokens; the report
-labels tokens/s as provider-reported output-token throughput, not visible-token
-generation speed.
+脚本没有模型专用 tokenizer，因此必须分别记录生成负载的大小和服务商返回的输入 Token 数。服务商的 `output_tokens` 可能包含推理 Token 或其他不可见 Token；报告中的 tokens/s 必须标注为“服务商返回的输出 Token 吞吐量”，不得称为可见 Token 生成速度。
 
-## Sampling Schedule
+## 采样计划
 
-### Baseline
+### 基线
 
-Concurrency `1` establishes the latency baseline. It performs two unmeasured
-warm-up completions, then measures for at least 45 seconds. Measurement may
-extend to 90 seconds to obtain 15 completed samples. If fewer than 10 successful
-samples are available at the hard limit, the recommendation is
-`UNDETERMINED` because the adaptive P95 guardrail is not credible. A baseline
-with 10-14 successful samples is allowed but lowers recommendation confidence
-and is called out in the report.
+并发 `1` 用于建立延迟基线。先完成两次不计入统计的预热请求，再至少测量 45 秒。为获得 15 个完成样本，测量最多可延长至 90 秒。若达到硬上限时仍少于 10 个成功样本，则推荐结果为 `UNDETERMINED`，因为此时自适应 P95 门槛不可信。
 
-### Coarse Levels
+基线有 10-14 个成功样本时允许继续推荐，但必须降低推荐置信度，并在报告中明确说明。
 
-Each remaining coarse level has:
+### 粗测档位
 
-- a 5-second warm-up period excluded from statistics;
-- a 30-second measurement window;
-- closed-loop workers, where each worker starts its next request immediately
-  after its previous request completes; and
-- a drain phase that waits for requests started before the measurement cutoff.
+其余每个粗测档位包含：
 
-After warm-up requests have fully drained, the measurement clock starts and all
-workers are released together. Every request started before the 30-second cutoff
-is a measured sample, including a request that completes during drain. No new
-request starts after the cutoff. The throughput denominator is the elapsed time
-from the synchronized measurement start until the final measured request
-completes, so slow in-flight work is penalized rather than omitted.
+- 不计入统计的 5 秒预热期；
+- 30 秒测量窗口；
+- 闭环 worker，每个 worker 在前一个请求完成后立即启动下一个请求；
+- 排空阶段，等待测量截止点之前已经启动的请求完成。
 
-The run proceeds in ascending order to limit load surprises.
+预热请求全部排空后，开始测量计时并同时释放全部 worker。在 30 秒截止点之前启动的请求都属于测量样本，包括在排空阶段才完成的请求。截止点之后不得启动新请求。
 
-### Refinement Levels
+吞吐量分母为同步测量开始到最后一个测量请求完成之间的实际耗时，因此慢速在途请求会受到惩罚，而不是被忽略。
 
-Each distinct midpoint around the best eligible coarse level uses the same
-5-second warm-up and 30-second measurement window. Refinement levels are run in
-ascending order.
+测试按并发升序进行，以减少意外负载风险。
 
-The standard run is expected to finish in 8-12 minutes, including baseline
-extension, request drain time, refinement, and endpoint latency variation.
+### 细化档位
 
-## Per-Sample Data
+最佳合格粗测档位附近的每个不同中点，同样使用 5 秒预热和 30 秒测量窗口。细化档位也按升序执行。
 
-Every sample receives a stable request ID and records:
+标准模式预计在 8-12 分钟内完成，包括基线延长、请求排空、细化测试和端点延迟波动。
 
-- concurrency level and worker index;
-- warm-up or measured classification;
-- monotonic offset from the level start where available;
-- curl exit code and HTTP status;
-- complete-response latency from curl `time_total`;
-- TTFB from curl `time_starttransfer`, labeled only as TTFB;
-- semantic-success boolean and failure reason;
-- rate-limit, timeout, transport-error, and HTTP 5xx classification;
-- reported input, cache-read, cache-creation, and output tokens when available;
-- redacted request and response evidence; and
-- request start and completion timestamps.
+## 单样本数据
 
-Warm-up samples remain auditable but do not contribute to measured aggregates.
-Measured samples that finish during drain remain in all measured counts,
-latency distributions, success rates, and the throughput denominator.
+每个样本拥有稳定的请求 ID，并记录：
 
-## Per-Level Metrics
+- 并发档位和 worker 编号；
+- 预热或测量分类；
+- 在可获得时，记录相对于该档位开始时间的单调偏移；
+- curl 退出码和 HTTP 状态；
+- curl `time_total` 表示的完整响应延迟；
+- curl `time_starttransfer` 表示的 TTFB，并且只能标注为 TTFB；
+- 语义成功布尔值和失败原因；
+- 限流、超时、传输错误和 HTTP 5xx 分类；
+- 在可获得时，记录输入、缓存读取、缓存创建和输出 Token；
+- 脱敏后的请求与响应证据；
+- 请求开始和完成时间戳。
 
-For measured samples at each concurrency level, calculate:
+预热样本保留审计证据，但不进入测量聚合。在排空阶段完成的测量样本仍计入测量数量、延迟分布、成功率和吞吐量分母。
 
-- attempted, completed, and semantically successful request counts;
-- semantic success rate;
-- successful requests per second;
-- aggregate input and output tokens;
-- successful output tokens per second;
-- P50, nearest-rank P95, nearest-rank P99, and maximum complete-response latency;
-- HTTP 429 count and rate;
-- HTTP 5xx count and rate;
-- timeout and other transport-error counts and rates; and
-- wall-clock warm-up, measurement, and drain durations.
+## 单档位指标
 
-Output-token throughput is available only when every semantically successful
-measured response has a valid output-token count. If any successful sample lacks
-that count, the level's token throughput is `not_available`; successful RPS is
-still reported.
+每个并发档位根据测量样本计算：
 
-Percentiles are calculated only from semantically successful measured samples.
-The report also shows failed-sample counts so excluding them cannot make an
-unhealthy level appear healthy.
+- 尝试请求数、完成请求数和语义成功请求数；
+- 语义成功率；
+- 每秒成功请求数；
+- 输入和输出 Token 总数；
+- 每秒成功输出 Token 数；
+- 完整响应延迟 P50、nearest-rank P95、nearest-rank P99 和最大值；
+- HTTP 429 数量和比例；
+- HTTP 5xx 数量和比例；
+- 超时及其他传输错误数量和比例；
+- 预热、测量和排空阶段的墙钟耗时。
 
-P99 from fewer than 100 successful samples is a short-run tail observation and
-can equal the maximum. The customer report states the sample count next to every
-percentile and does not describe these values as SLA estimates.
+只有每个语义成功的测量响应都包含有效输出 Token 数时，才可计算输出 Token 吞吐量。任一成功样本缺少该值时，该档位的 Token 吞吐量为 `not_available`，但仍报告成功 RPS。
 
-## Eligibility and Recommendation
+百分位数只使用语义成功的测量样本计算。报告还必须显示失败样本数，避免排除失败样本后让不健康档位看起来正常。
 
-Let `baseline_p95` be the P95 complete-response latency at concurrency `1`.
-The adaptive latency limit is:
+当成功样本少于 100 个时，P99 只是短时尾延迟观察值，可能等于最大值。客户报告必须在每个百分位数旁显示样本数，并且不得将这些值描述为 SLA 估算。
+
+## 合格条件与推荐算法
+
+设 `baseline_p95` 为并发 `1` 的完整响应延迟 P95。自适应延迟上限为：
 
 ```text
 latency_limit = 2.0 * baseline_p95
 ```
 
-A concurrency level is eligible only when:
+并发档位只有同时满足以下条件才合格：
 
-- it has at least one measured completion;
-- its semantic success rate is at least 99%;
-- when it has fewer than 100 measured attempts, it has zero failed attempts;
-- its P95 complete-response latency is at most `latency_limit`;
-- it has no missing latency values among semantic successes; and
-- it did not trigger a severe overload stop.
+- 至少有一个测量请求完成；
+- 语义成功率至少为 99%；
+- 当测量尝试数少于 100 时，失败数必须为零；
+- 完整响应延迟 P95 不超过 `latency_limit`；
+- 语义成功样本中不存在缺失的延迟值；
+- 没有触发严重过载停止条件。
 
-The primary score is successful output tokens per second. When token throughput
-is unavailable for every otherwise eligible level, the run falls back to
-successful requests per second and states that fallback prominently. Mixed
-token-throughput availability does not permit comparing token-scored and
-RPS-scored levels in one recommendation; it produces `UNDETERMINED` unless all
-eligible candidates share the same score type.
+主要评分指标为每秒成功输出 Token 数。当所有其他方面合格的档位都无法获得 Token 吞吐量时，测试退化为使用每秒成功请求数，并在报告中醒目标注该退化。
 
-Find the highest primary score among eligible levels. Any eligible level within
-3% of that score belongs to the performance plateau. Recommend the lowest
-concurrency in the plateau to avoid spending concurrency for noise-level gains.
+不得在同一次推荐中比较以 Token 评分和以 RPS 评分的档位。若不同合格候选档位的 Token 吞吐量可用性不一致，则结果为 `UNDETERMINED`，除非全部合格候选使用同一种评分类型。
 
-The stable interval is the maximal contiguous sequence, in ascending order of
-measured concurrency, that contains the recommendation and whose levels are
-eligible with primary scores at least 97% of the maximum. If only the
-recommended level qualifies, the stable interval is that single measured level.
+先找出合格档位中的最高主要评分。评分处于最高值 3% 以内的所有合格档位构成性能平台。推荐平台中并发最低的档位，避免为噪声级收益浪费并发资源。
 
-## Severe Overload Stops
+稳定区间为按实测并发升序排列、包含推荐档位的最大连续序列；序列中的档位必须合格，且主要评分至少达到最高值的 97%。若只有推荐档位符合要求，则稳定区间就是该单一实测档位。
 
-Do not start a higher concurrency level when the latest completed level meets
-any of these conditions:
+## 严重过载停止条件
 
-- semantic success rate is below 90%;
-- combined 429, 5xx, timeout, and transport-error rate is at least 10%;
-- P95 complete-response latency exceeds four times `baseline_p95`; or
-- three consecutively completed samples at the level are request timeouts before
-  the measurement window ends.
+当最近完成的档位满足任一条件时，不得启动更高并发档位：
 
-The current level is retained in the evidence and marked ineligible. Untested
-higher levels are reported as stopped for endpoint protection, not as failed or
-unsupported. Refinement never tests a value above the severe-stop level.
+- 语义成功率低于 90%；
+- 429、5xx、超时和传输错误的合计比例至少为 10%；
+- 完整响应延迟 P95 超过 `baseline_p95` 的四倍；
+- 测量窗口结束前，该档位连续完成的三个样本都是请求超时。
 
-## Result Status
+当前档位保留在证据中并标记为不合格。未测试的更高档位应说明“为保护端点而停止”，不得标记为失败或不支持。细化阶段不得测试高于严重停止档位的值。
 
-Test `057` uses the following reviewed outcome semantics:
+## 结果状态
 
-- `PASS`: a recommendation is available, all evidence required for its score is
-  complete, and at least one level above concurrency `1` is eligible.
-- `FAIL`: measured evidence confirms overload or contract failure at all tested
-  levels above concurrency `1`.
-- `UNDETERMINED`: baseline evidence, score comparability, sample completion, or
-  recommendation evidence is insufficient or ambiguous.
-- `SKIPPED`: stress mode is `off`.
-- `ERROR`: the runner or transport fails in a way that prevents a meaningful
-  measured ladder.
+检测项 `057` 使用以下审核后状态语义：
 
-An overload at a higher level does not by itself fail the test when a lower
-eligible recommendation is available. Finding the boundary is expected behavior
-for a stress test.
+- `PASS`：存在推荐值、评分所需证据完整，并且并发 `1` 以上至少有一个合格档位。
+- `FAIL`：实测证据确认所有高于并发 `1` 的已测档位都过载或违反契约。
+- `UNDETERMINED`：基线证据、评分可比性、样本完成情况或推荐证据不足或含糊。
+- `SKIPPED`：压测模式为 `off`。
+- `ERROR`：runner 或传输失败，无法形成有意义的测量阶梯。
 
-## Log Contract
+较高档位过载本身不会使较低的有效推荐失败。寻找容量边界是压测的预期行为。
 
-The raw log adds a structured stress summary after the request audits. It
-contains versioned, parseable key-value records for:
+## 日志契约
 
-- stress configuration and workload profile;
-- baseline and adaptive latency limit;
-- every measured level and all aggregate metrics;
-- score type and any fallback reason;
-- coarse and refinement level identities;
-- severe-stop reason, when present;
-- recommended concurrency and stable interval; and
-- explicit limitations.
+原始日志在请求审计记录之后增加结构化压测摘要，包含带版本、可解析的键值记录：
 
-Every request remains linked to test `057`. Request bodies, response bodies, and
-credentials continue through the existing redaction and audit path. The source
-log remains the evidence of record; the report generator must not reconstruct
-missing metrics from conclusions.
+- 压测配置和负载规格；
+- 基线和自适应延迟上限；
+- 每个实测档位及其全部聚合指标；
+- 评分类型及退化原因；
+- 粗测和细化档位身份；
+- 严重停止原因（若存在）；
+- 推荐并发和稳定区间；
+- 明确限制。
 
-## Customer Report
+每个请求都必须继续关联到检测项 `057`。请求正文、响应正文和凭证继续使用现有脱敏与审计路径。源日志是证据记录，报告生成器不得从脚本结论中重建缺失指标。
 
-The category summary must no longer say only `8/8 通过`. It must surface:
+## 客户报告
 
-- recommended concurrency;
-- stable interval;
-- peak successful output tokens per second or RPS fallback;
-- success rate and P95 at the recommendation;
-- adaptive P95 limit;
-- maximum tested concurrency and any safety stop; and
-- the standardized-workload and non-SLA limitation.
+能力域摘要不能再只显示 `8/8 通过`，必须醒目展示：
 
-Test `057` renders a compact level table with columns for concurrency, measured
-requests, success rate, successful RPS, output tokens/s, P50, P95, P99, 429,
-errors, and eligibility. The recommendation row is visibly identified without
-hiding other measured levels.
+- 推荐并发；
+- 稳定区间；
+- 峰值成功输出 Token/s，或退化后的 RPS；
+- 推荐档位的成功率和 P95；
+- 自适应 P95 上限；
+- 最大已测并发及安全停止情况；
+- 标准负载和非 SLA 限制。
 
-Customer wording must say that the recommendation is the best measured
-client-observed concurrency for this endpoint, region, network path, workload,
-and time window. It must not claim upstream fleet capacity or a durable SLA.
+检测项 `057` 显示紧凑档位表，列包括并发、测量请求数、成功率、成功 RPS、输出 Token/s、P50、P95、P99、429、错误数和合格状态。推荐行必须明显可识别，同时不能隐藏其他实测档位。
 
-## Components and Boundaries
+客户措辞必须说明：推荐值是当前端点、区域、网络路径、负载和时间窗口下，客户端观测到的最佳实测并发。不得声称它代表上游集群容量或持久 SLA。
 
-The implementation should keep the following responsibilities separate:
+## 组件与边界
 
-1. Workload builder: creates the standardized request and nonce-specific marker.
-2. Stress scheduler: manages workers, warm-up, fixed measurement windows, drain,
-   ascending levels, refinement, and safety stops.
-3. Sample validator: classifies protocol completion and semantic success and
-   extracts usage without making aggregate decisions.
-4. Metrics reducer: converts sample records into level distributions and rates.
-5. Recommendation engine: applies eligibility, plateau, refinement, and fallback
-   rules to complete level metrics.
-6. Log renderer: writes auditable request records and the versioned stress
-   summary.
-7. Report parser and renderer: validates the summary and presents the final
-   recommendation without reinterpreting raw performance data incorrectly.
+实现应保持以下职责分离：
 
-The customer-facing entry point remains the Bash script. Small embedded or
-companion logic is acceptable only when it does not add a customer-site runtime
-dependency beyond tools already required by the repository.
+1. 负载构造器：创建标准请求和 nonce 专属结束标记。
+2. 压测调度器：管理 worker、预热、固定测量窗口、排空、升序档位、细化和安全停止。
+3. 样本校验器：判断协议完成和语义成功，并提取 usage，不做聚合决策。
+4. 指标归并器：将样本记录转换为单档位分布和速率。
+5. 推荐引擎：对完整档位指标应用合格条件、性能平台、细化和退化规则。
+6. 日志渲染器：写入可审计请求记录和带版本的压测摘要。
+7. 报告解析器与渲染器：校验摘要并展示最终推荐，不错误重解释原始性能数据。
 
-## Error Handling
+客户侧入口仍为 Bash 脚本。只有在不增加仓库现有要求之外的客户现场运行时依赖时，才允许使用小型内嵌或伴随逻辑。
 
-- A failed sample is recorded and classified; it never disappears from the
-  denominator.
-- A worker failure must not terminate other workers or corrupt the level summary.
-- Missing or malformed curl metrics make that sample unsuccessful.
-- Missing token usage disables token throughput for that level but does not
-  discard valid latency and RPS evidence.
-- Interrupted runs retain completed request audits and clearly mark the active
-  level incomplete.
-- Temporary worker files remain inside the secure run directory and use the
-  existing cleanup path.
-- Unknown protocols cannot run the standardized semantic validator and produce
-  `UNDETERMINED`, not a successful performance recommendation.
+## 错误处理
 
-## Testing Strategy
+- 失败样本必须记录和分类，不能从分母中消失。
+- 单个 worker 失败不得终止其他 worker 或破坏档位摘要。
+- 缺失或格式错误的 curl 指标会使该样本失败。
+- Token usage 缺失会禁用该档位的 Token 吞吐量，但不能丢弃有效延迟和 RPS 证据。
+- 中断运行仍保留已完成请求的审计记录，并明确标记当前档位未完成。
+- 临时 worker 文件保留在安全运行目录内，并沿用现有清理路径。
+- 未知协议无法运行标准语义校验器，应返回 `UNDETERMINED`，不得生成成功的性能推荐。
 
-Focused automated tests must use a deterministic fake endpoint or fake curl and
-short configurable windows; the test suite must never wait 8-12 minutes.
+## 测试策略
 
-Coverage must verify:
+聚焦自动化测试必须使用确定性的假端点或 fake curl，并使用较短的可配置窗口；测试套件绝不能实际等待 8-12 分钟。
 
-- stress mode defaults to `off` and `057` reports `SKIPPED` with rerun guidance;
-- option validation rejects concurrency outside `1-64`;
-- closed-loop workers continue issuing requests during a measurement window;
-- warm-up samples are audited but excluded from measured aggregates, while
-  measured requests completed during drain remain included;
-- semantic failures and malformed metrics remain in the attempt denominator;
-- output-token throughput and RPS use the measured wall-clock window;
-- P50, nearest-rank P95, nearest-rank P99, and maximum are correct;
-- eligibility enforces zero failures below 100 attempts and 99% thereafter;
-- the adaptive limit is exactly twice the measured concurrency-1 P95;
-- severe-stop conditions prevent higher levels from starting;
-- refinement chooses the correct midpoints and never invents an unmeasured
-  recommendation;
-- the 3% plateau chooses the lower concurrency;
-- token-metric fallback and mixed-availability ambiguity are handled exactly;
-- every sample is linked to test `057` and credentials remain redacted;
-- the parser rejects inconsistent aggregate counts or recommendation fields;
-- the HTML summary and level table show the same recommendation and metrics as
-  the assessment artifact; and
-- shell syntax checks and the complete report parser/renderer tests pass.
+覆盖范围必须验证：
 
-## Acceptance Criteria
+- 压测模式默认 `off`，检测项 `057` 返回 `SKIPPED` 和复测指引；
+- 选项校验拒绝 `1-64` 之外的并发；
+- 闭环 worker 在测量窗口内持续发出请求；
+- 预热样本保留审计但不进入聚合，在排空阶段完成的测量请求仍被计入；
+- 语义失败和格式错误指标仍留在尝试分母中；
+- 输出 Token 吞吐量和 RPS 使用实测墙钟窗口；
+- P50、nearest-rank P95、nearest-rank P99 和最大值计算正确；
+- 少于 100 个尝试时要求零失败，达到 100 后要求至少 99%；
+- 自适应上限严格等于并发 `1` 的 P95 两倍；
+- 严重停止条件可阻止更高档位启动；
+- 细化阶段选择正确中点，绝不生成未测推荐值；
+- 3% 性能平台选择更低并发；
+- Token 指标退化和可用性混合时的歧义处理准确；
+- 每个样本都关联到检测项 `057`，凭证保持脱敏；
+- 解析器拒绝不一致的聚合计数或推荐字段；
+- HTML 摘要和档位表与 assessment 中的推荐和指标一致；
+- Shell 语法检查和完整报告解析/渲染测试通过。
 
-The feature is complete when a standard `--only 057 --stress-mode standard` run:
+## 验收条件
 
-- executes the standardized workload through the coarse and applicable
-  refinement levels without exceeding concurrency `64`;
-- runs sustained closed-loop measurement windows rather than one finite wave;
-- produces auditable per-sample and per-level evidence;
-- applies endpoint-protection stops exactly as specified;
-- reports successful RPS, output tokens/s when available, semantic success,
-  latency distributions, throttling, and errors;
-- recommends a measured concurrency using the eligibility and plateau rules;
-- reports a stable measured interval and the adaptive P95 limit;
-- renders the result prominently in the customer report; and
-- states the workload, environment, sample, and SLA limitations without
-  overstating the conclusion.
+标准命令 `--only 057 --stress-mode standard` 满足以下条件时，功能才算完成：
+
+- 在不超过并发 `64` 的前提下，执行标准负载的粗测和适用细化档位；
+- 运行持续闭环测量窗口，而不是一波有限请求；
+- 生成可审计的单样本和单档位证据；
+- 严格应用端点保护停止条件；
+- 报告成功 RPS、可用时的输出 Token/s、语义成功、延迟分布、限流和错误；
+- 使用合格条件和性能平台规则推荐一个实测并发；
+- 报告稳定实测区间和自适应 P95 上限；
+- 在客户报告中醒目展示结果；
+- 明确说明负载、环境、样本和 SLA 限制，不夸大结论。
