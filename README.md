@@ -30,20 +30,22 @@
 | **结果分级清晰** | 区分核心必过检测项与次要优化检查项，重点突出。 |
 | **报告证据完整** | 清晰呈现每项检测的逻辑说明、输入参数与实际输出结果，确保结论客观、可追溯。 |
 
-## v0.5.0 检测契约
+## 如何执行模型doctor检测
 
-当前脚本保留 `001-062` 共 62 个连续检测项。v0.5.0 修正了 `029`、`035`、`036`、`038`、`053`、`058`、`060` 的提示词、证据采集与判定条件；报告 Skill 按日志中的实际请求和响应复核，不把脚本的 `expected`、`detected` 或结论当作事实。
-
-定向复测这七项：
-
+1.将model-capability-doctor.sh这个脚本传入客户服务器，执行下面的命令：
 ```bash
 ./model-capability-doctor.sh \
   --url 'https://model.example/v1/chat/completions' \
   --model 'your-model-name' \
-  --only '029,035,036,038,053,058,060' \
-  --log-file './contract-retest.log'
+  --api-key 'xxxxxxxxxx' \
+  --log-file './contract-test.log'
 ```
-
-- `053` 记录 curl `time_starttransfer`，即流式 TTFB，不是首 Token 时间（TTFT）。
-- `058` 执行 10 次连续请求后再发送独立恢复探针；并发能力由 `057` 单独检测。
-- 完整证据与要求冲突时判为 `FAIL`；证据缺失、矛盾、截断或无法安全解释时判为 `UNDETERMINED`。
+2.执行完成后将客户现场的contract-test.log拷贝出来
+3.在自己电脑安装model doctor的skill，将下面这句话复制给codex执行
+```bash
+帮我安装https://github.com/relaxcloud-cn/llm-capability-doctor/tree/main/skills/creating-model-doctor-reports到本地
+```
+4.在codex输入这句话，使用skill分析日志得到模型体检的html报告
+```
+使用model doctor report技能分析下 contract-test.log
+```
