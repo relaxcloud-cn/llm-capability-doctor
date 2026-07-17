@@ -225,6 +225,9 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         )
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         overall = schema["properties"]["overall"]
+        category_counts = schema["properties"]["categories"]["items"][
+            "properties"
+        ]["counts"]
         test_schema = schema["properties"]["tests"]["items"]
 
         self.assertEqual(schema["$id"], "llm-capability-doctor.assessment.v3")
@@ -237,6 +240,10 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         self.assertIn("blockers", overall["required"])
         self.assertNotIn("conditions", overall["required"])
         self.assertNotIn("conditions", overall.get("properties", {}))
+        self.assertEqual(
+            set(category_counts["properties"]),
+            {"PASS", "FAIL"},
+        )
 
     def test_validate_assessment_detects_tampered_counts(self):
         assessment = assemble_assessment(self.parsed, {"001": valid_review()})
@@ -246,6 +253,17 @@ class ModelDoctorAssessmentTests(unittest.TestCase):
         errors = validate_assessment(tampered)
 
         self.assertTrue(any("counts" in error for error in errors))
+
+    def test_validate_assessment_detects_tampered_category_status(self):
+        assessment = assemble_assessment(
+            self.parsed,
+            {"001": valid_review(status="FAIL")},
+        )
+        assessment["categories"][0]["status"] = "PASS"
+
+        errors = validate_assessment(assessment)
+
+        self.assertTrue(any("categor" in error.lower() for error in errors))
 
 
 class ModelDoctorCliAssessmentTests(unittest.TestCase):

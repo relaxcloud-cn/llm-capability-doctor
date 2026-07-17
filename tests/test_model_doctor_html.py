@@ -100,6 +100,16 @@ def binary_assessment_fixture():
 
 
 class ModelDoctorHtmlTests(unittest.TestCase):
+    def test_report_displays_only_binary_overall_verdicts(self):
+        ready_html = render_report(minimal_assessment("PASS"), ASSET_DIR)
+        blocked_html = render_report(minimal_assessment("FAIL"), ASSET_DIR)
+
+        self.assertIn("总体结论", ready_html)
+        self.assertIn("READY", ready_html)
+        self.assertIn("总体结论", blocked_html)
+        self.assertIn("BLOCKED", blocked_html)
+        self.assertNotIn("CONDITIONAL", ready_html + blocked_html)
+
     def test_report_is_binary_and_contains_manifest_requests(self):
         html = render_report(binary_assessment_fixture(), ASSET_DIR)
 
@@ -192,6 +202,18 @@ class ModelDoctorHtmlTests(unittest.TestCase):
             self.assertIn(expected, html)
         self.assertIn("Reply only OK", html)
         self.assertIn('content&quot;:&quot;OK', html)
+
+    def test_failed_row_displays_nonempty_limitations_and_rerun_guidance(self):
+        value = minimal_assessment("FAIL")
+        value["tests"][0]["limitations"] = ["本次只采集了一次请求。"]
+        value["tests"][0]["retestInstructions"] = ["重新运行检测项 001。"]
+
+        html = render_report(value, ASSET_DIR)
+
+        self.assertIn("限制", html)
+        self.assertIn("本次只采集了一次请求。", html)
+        self.assertIn("重跑建议", html)
+        self.assertIn("重新运行检测项 001。", html)
 
     def test_render_report_is_offline_and_renders_hostile_output_as_text(self):
         value = minimal_assessment()

@@ -59,6 +59,10 @@
           "counts": {
             "type": "object",
             "required": ["PASS", "FAIL"],
+            "properties": {
+              "PASS": {"type": "integer", "minimum": 0},
+              "FAIL": {"type": "integer", "minimum": 0}
+            },
             "additionalProperties": false
           },
           "failures": {

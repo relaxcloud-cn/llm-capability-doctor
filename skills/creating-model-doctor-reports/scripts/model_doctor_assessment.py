@@ -192,6 +192,25 @@ def _overall(items: List[dict]) -> dict:
     }
 
 
+def _categories(items: List[dict]) -> List[dict]:
+    category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
+    for item in items:
+        category_items.setdefault(item["category"], []).append(item)
+    return [
+        {
+            "name": name,
+            "status": _category_status(group),
+            "counts": _status_counts(group),
+            "failures": [
+                item["testId"]
+                for item in group
+                if item["reviewedStatus"] == "FAIL"
+            ],
+        }
+        for name, group in category_items.items()
+    ]
+
+
 def assemble_assessment(parsed: dict, reviews: dict) -> dict:
     """Merge strict parsed evidence with validated binary reviews."""
 
@@ -224,23 +243,6 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
             }
         )
 
-    category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
-    for item in items:
-        category_items.setdefault(item["category"], []).append(item)
-    categories = [
-        {
-            "name": name,
-            "status": _category_status(group),
-            "counts": _status_counts(group),
-            "failures": [
-                item["testId"]
-                for item in group
-                if item["reviewedStatus"] == "FAIL"
-            ],
-        }
-        for name, group in category_items.items()
-    ]
-
     return {
         "schemaVersion": ASSESSMENT_SCHEMA_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -249,7 +251,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "overall": _overall(items),
-        "categories": categories,
+        "categories": _categories(items),
         "tests": items,
     }
 
@@ -273,6 +275,8 @@ def validate_assessment(assessment: dict) -> List[str]:
         errors.append("overall verdict does not match gate results")
     if actual_overall.get("blockers") != expected_overall["blockers"]:
         errors.append("overall blockers do not match gate results")
+    if assessment.get("categories") != _categories(items):
+        errors.append("categories do not match test results")
     if "conditions" in actual_overall:
         errors.append("overall must not contain conditions")
     if "path" in assessment.get("source", {}):

@@ -29,6 +29,17 @@ def _list(items: Iterable[object], empty: str = "无") -> str:
     return "<ul>" + "".join(f"<li>{_e(item)}</li>" for item in values) + "</ul>"
 
 
+def _optional_detail_list(title: str, items: Iterable[object]) -> str:
+    values = list(items or [])
+    if not values:
+        return ""
+    return (
+        '<section class="logic-item">'
+        f'<h4>{_e(title)}</h4>{_list(values)}'
+        "</section>"
+    )
+
+
 def _status_text(status: str) -> str:
     label = STATUS_LABELS.get(status, status)
     return f'<span class="status status-{_e(status)}">{_e(label)}</span>'
@@ -66,8 +77,9 @@ def _category_rows(categories: List[dict]) -> str:
     return "".join(rows)
 
 
-def _run_metadata(run: dict) -> str:
+def _run_metadata(run: dict, overall: dict) -> str:
     fields = (
+        ("总体结论", overall.get("verdict") or "BLOCKED"),
         ("检测 URL", run.get("url") or "未知"),
         ("模型名称", run.get("model") or "未知"),
         ("API Key", run.get("api_key") or "未知"),
@@ -144,6 +156,8 @@ def _test_row_group(item: dict) -> str:
         f'<p>{_e(logic.get("method"))}</p></section>'
         '<section class="logic-item pass-criteria"><h4>通过条件</h4>'
         f'{_list(logic.get("passCriteria", []))}</section>'
+        f'{_optional_detail_list("限制", item.get("limitations", []))}'
+        f'{_optional_detail_list("重跑建议", item.get("retestInstructions", []))}'
         f'{_request_evidence(item.get("requests", []))}'
         "</div></td></tr></tbody>"
     )
@@ -209,7 +223,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 </head>
 <body>
 <main class="report-shell" aria-label="{_e(model)} 模型能力检测结论与逐项结果">
-  {_run_metadata(run)}
+  {_run_metadata(run, assessment.get('overall', {}))}
 
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>
