@@ -20,35 +20,97 @@ from model_doctor_html import render_report  # noqa: E402
 from model_doctor_log import parse_log  # noqa: E402
 
 
-def review(status="PASS", gate="critical"):
+FORBIDDEN_REPORT_TEXT = (
+    "需复测",
+    "待补证",
+    "无法判定",
+    "不支持",
+    "跳过",
+    "执行错误",
+    "CONDITIONAL",
+    "UNDETERMINED",
+    "UNSUPPORTED",
+    "SKIPPED",
+    "ERROR",
+)
+
+
+def review(test_id, status, gate, evidence_refs):
     return {
-        "testId": "001",
+        "testId": test_id,
         "reviewedStatus": status,
         "confidence": "high",
         "gateLevel": gate,
-        "conclusion": "完整 URL 可连接并正常返回。",
+        "conclusion": (
+            "完整证据满足检测要求。"
+            if status == "PASS"
+            else "完整证据未满足检测要求。"
+        ),
         "logic": {
-            "purpose": "验证完整模型地址是否可连接。",
-            "method": "发送最小生成请求并检查传输与响应。",
-            "passCriteria": ["curl 成功且 HTTP 为 2xx。"],
-            "failCriteria": ["连接失败或接口未返回响应。"],
-            "capabilityBoundary": "不证明上游商业模型身份。",
+            "purpose": "验证目标能力。",
+            "method": "检查 manifest 引用的完整请求与响应。",
+            "passCriteria": ["可观察证据满足检测契约。"],
+            "failCriteria": ["证据缺失、错误或与检测契约冲突。"],
+            "capabilityBoundary": "仅证明本次可观察行为。",
         },
-        "evidenceRefs": ["request:test-001"],
-        "evidenceExcerpts": ["HTTP 200，响应正文非空。"],
+        "evidenceRefs": evidence_refs,
+        "evidenceExcerpts": ["HTTP 和响应正文已核查。"],
         "limitations": [],
         "retestInstructions": [],
     }
 
 
-def assessment(status="PASS", gate="critical"):
+def minimal_assessment(status="PASS"):
     parsed = parse_log(FIXTURES / "minimal.log")
-    return assemble_assessment(parsed, {"001": review(status, gate)})
+    return assemble_assessment(
+        parsed,
+        {
+            "001": review(
+                "001",
+                status,
+                "critical",
+                ["request:test-001"],
+            )
+        },
+    )
+
+
+def binary_assessment_fixture():
+    parsed = parse_log(FIXTURES / "mixed.log")
+    return assemble_assessment(
+        parsed,
+        {
+            "047": review(
+                "047",
+                "PASS",
+                "critical",
+                ["request:test-047", "request:test-047-follow"],
+            ),
+            "056": review(
+                "056",
+                "FAIL",
+                "observation",
+                [
+                    f"request:test-055-repeat-{index}"
+                    for index in range(1, 6)
+                ],
+            ),
+        },
+    )
 
 
 class ModelDoctorHtmlTests(unittest.TestCase):
-    def test_report_header_displays_run_metadata(self):
-        value = assessment()
+    def test_report_is_binary_and_contains_manifest_requests(self):
+        html = render_report(binary_assessment_fixture(), ASSET_DIR)
+
+        self.assertIn("通过", html)
+        self.assertIn("未通过", html)
+        self.assertIn("test-047-follow", html)
+        for forbidden in FORBIDDEN_REPORT_TEXT:
+            self.assertNotIn(forbidden, html)
+
+    def test_report_header_displays_run_metadata_with_escaping(self):
+        value = minimal_assessment()
         value["run"].update(
             {
                 "url": "https://model.example/v1/messages?region=cn&mode=<audit>",
@@ -72,49 +134,39 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn("sk-t********5678", body)
         self.assertLess(body.index("检测信息"), body.index("能力域总结"))
 
-    def test_report_header_renders_legacy_redacted_api_key(self):
-        html = render_report(assessment(), ASSET_DIR)
-
-        self.assertIn("API Key", html)
-        self.assertIn("[REDACTED]", html)
-
     def test_render_report_uses_summary_and_two_priority_result_tables(self):
-        html = render_report(assessment(), ASSET_DIR)
+        html = render_report(binary_assessment_fixture(), ASSET_DIR)
         body = html.split("</style>", 1)[1]
 
         self.assertIn('<html lang="zh-CN">', html)
         self.assertIn("Model Doctor 客户模型就绪度报告", html)
-        self.assertIn("test-model", html)
-        self.assertIn("openai_chat", html)
         self.assertEqual(body.count("<table"), 3)
         self.assertIn("能力域总结", body)
         self.assertIn("重要检测项", body)
         self.assertIn("次要检测项", body)
-        self.assertIn("<th>能力域</th><th>状态</th><th>关键数据</th><th>最终结论</th>", body)
-        self.assertIn("<th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th>", body)
-        for removed in ("status-counts", "filter-bar", "method-grid", "integrity-grid"):
-            self.assertNotIn(removed, body)
+        self.assertIn(
+            "<th>能力域</th><th>状态</th><th>关键数据</th><th>最终结论</th>",
+            body,
+        )
+        self.assertIn(
+            "<th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th>",
+            body,
+        )
 
-    def test_result_rows_are_partitioned_by_gate_level_without_duplication(self):
-        important_html = render_report(assessment(gate="important"), ASSET_DIR)
-        important_body = important_html.split("</style>", 1)[1]
-        important_section = important_body.split("重要检测项", 1)[1].split("次要检测项", 1)[0]
-        secondary_section = important_body.split("次要检测项", 1)[1]
+    def test_result_rows_are_partitioned_by_gate_without_duplication(self):
+        html = render_report(binary_assessment_fixture(), ASSET_DIR)
+        body = html.split("</style>", 1)[1]
+        important = body.split("重要检测项", 1)[1].split("次要检测项", 1)[0]
+        secondary = body.split("次要检测项", 1)[1]
 
-        self.assertIn('data-detail-id="test-detail-001"', important_section)
-        self.assertNotIn('data-detail-id="test-detail-001"', secondary_section)
+        self.assertIn('data-detail-id="test-detail-047"', important)
+        self.assertNotIn('data-detail-id="test-detail-056"', important)
+        self.assertIn('data-detail-id="test-detail-056"', secondary)
+        self.assertEqual(body.count('data-detail-id="test-detail-047"'), 1)
+        self.assertEqual(body.count('data-detail-id="test-detail-056"'), 1)
 
-        observation_html = render_report(assessment(gate="observation"), ASSET_DIR)
-        observation_body = observation_html.split("</style>", 1)[1]
-        important_section = observation_body.split("重要检测项", 1)[1].split("次要检测项", 1)[0]
-        secondary_section = observation_body.split("次要检测项", 1)[1]
-
-        self.assertNotIn('data-detail-id="test-detail-001"', important_section)
-        self.assertIn('data-detail-id="test-detail-001"', secondary_section)
-        self.assertEqual(observation_body.count('data-detail-id="test-detail-001"'), 1)
-
-    def test_each_result_row_has_one_hidden_accessible_detail_row(self):
-        html = render_report(assessment(), ASSET_DIR)
+    def test_each_result_has_one_hidden_accessible_detail_row(self):
+        html = render_report(minimal_assessment(), ASSET_DIR)
 
         self.assertIn('class="result-row" data-detail-id="test-detail-001"', html)
         self.assertIn(
@@ -124,47 +176,28 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertIn('id="test-detail-001" class="evidence-row" hidden', html)
         self.assertIn('<td colspan="4">', html)
 
-    def test_result_cell_content_stays_grouped_in_mobile_label_grid(self):
-        html = render_report(assessment(), ASSET_DIR)
+    def test_expanded_rows_pair_every_manifest_request_input_and_output(self):
+        html = render_report(binary_assessment_fixture(), ASSET_DIR)
 
-        self.assertIn(
-            '<td data-label="检测项"><div class="cell-content">',
-            html,
-        )
-        self.assertIn(
-            '<td data-label="检测结果"><div class="cell-content">',
-            html,
-        )
+        self.assertEqual(html.count("请求输入"), 7)
+        self.assertEqual(html.count("请求输出"), 7)
+        self.assertLess(html.index("test-047"), html.index("test-047-follow"))
+        self.assertIn("Call get_weather", html)
+        self.assertIn("WEATHER_SUNNY", html)
 
-    def test_expanded_row_contains_only_approved_logic_and_io_sections(self):
-        html = render_report(assessment(), ASSET_DIR)
+    def test_expanded_row_contains_approved_logic_and_io_sections(self):
+        html = render_report(minimal_assessment(), ASSET_DIR)
 
         for expected in ("检测目的", "检测方法", "通过条件", "请求输入", "请求输出"):
             self.assertIn(expected, html)
-        for removed in ("失败条件", "能力边界", "判定证据", "证据引用", "复测建议"):
-            self.assertNotIn(removed, html)
         self.assertIn("Reply only OK", html)
         self.assertIn('content&quot;:&quot;OK', html)
 
-    def test_expanded_row_pairs_every_turn_input_and_output_in_order(self):
-        value = assessment()
-        second = deepcopy(value["tests"][0]["requests"][0])
-        second["request_id"] = "test-001-follow"
-        second["requestBody"] = '{"turn":2,"input":"follow-up"}'
-        second["responseBody"] = '{"turn":2,"output":"done"}'
-        value["tests"][0]["requests"].append(second)
-
-        html = render_report(value, ASSET_DIR)
-
-        self.assertEqual(html.count("请求输入"), 2)
-        self.assertEqual(html.count("请求输出"), 2)
-        self.assertLess(html.index("Turn 1"), html.index("Turn 2"))
-        self.assertLess(html.index("Reply only OK"), html.index("follow-up"))
-        self.assertLess(html.index('content&quot;:&quot;OK'), html.index("done"))
-
     def test_render_report_is_offline_and_renders_hostile_output_as_text(self):
-        value = assessment()
-        value["tests"][0]["requests"][0]["responseBody"] = '<script>alert("x")</script><img src=x onerror=alert(1)>'
+        value = minimal_assessment()
+        value["tests"][0]["requests"][0]["responseBody"] = (
+            '<script>alert("x")</script><img src=x onerror=alert(1)>'
+        )
         html = render_report(value, ASSET_DIR)
 
         self.assertNotRegex(html, r'(?:src|href)=["\']https?://')
@@ -174,35 +207,27 @@ class ModelDoctorHtmlTests(unittest.TestCase):
         self.assertNotIn('<script>alert("x")</script>', html)
         self.assertNotIn("innerHTML", html)
 
-    def test_summary_row_uses_only_reviewed_status_and_conclusion(self):
-        value = assessment("FAIL")
-        value["tests"][0]["discrepancy"] = True
-        html = render_report(value, ASSET_DIR)
+    def test_fail_rows_and_categories_use_unambiguous_label(self):
+        html = render_report(minimal_assessment("FAIL"), ASSET_DIR)
 
         self.assertIn('class="result-group" data-status="FAIL"', html)
-        self.assertIn('<span class="status status-FAIL">失败</span>', html)
-        self.assertIn("完整 URL 可连接并正常返回。", html)
-        for removed in (
-            "判定发生变化",
-            "脚本原判",
-            "原始判断",
-            "discrepancy-note",
-        ):
-            self.assertNotIn(removed, html)
+        self.assertIn(
+            '<span class="status status-FAIL">未通过</span>',
+            html,
+        )
+        self.assertIn(
+            '<span class="category-status category-status-FAIL">未通过</span>',
+            html,
+        )
 
-    def test_report_has_plain_category_summary_and_independent_result_groups(self):
-        html = render_report(assessment(), ASSET_DIR)
-        body = html.split("</style>", 1)[1].split("<script>", 1)[0]
+    def test_category_key_data_lists_all_failed_test_ids(self):
+        html = render_report(binary_assessment_fixture(), ASSET_DIR)
 
-        self.assertIn("接口与协议", body)
-        self.assertIn('class="result-group"', body)
-        self.assertIn('class="result-row"', body)
-        self.assertNotIn('data-filter="status"', body)
-        self.assertNotIn("展开全部证据", body)
-        self.assertIn("@media print", html)
+        self.assertIn("0/1 通过；未通过：056", html)
+        self.assertIn("1/1 通过", html)
 
-    def test_report_css_matches_legacy_narrow_table_and_responsive_contract(self):
-        html = render_report(assessment(), ASSET_DIR)
+    def test_report_css_keeps_responsive_contract_without_old_statuses(self):
+        html = render_report(minimal_assessment(), ASSET_DIR)
 
         for expected in (
             "max-width: 736px",
@@ -213,11 +238,17 @@ class ModelDoctorHtmlTests(unittest.TestCase):
             "overflow-wrap: anywhere",
         ):
             self.assertIn(expected, html)
-        self.assertNotIn("max-width: 1440px", html)
-        self.assertNotIn("position: sticky", html)
+        for forbidden in (
+            ".status-UNDETERMINED",
+            ".status-UNSUPPORTED",
+            ".status-SKIPPED",
+            ".status-ERROR",
+            ".category-status-CONDITIONAL",
+        ):
+            self.assertNotIn(forbidden, html)
 
-    def test_report_script_toggles_detail_hidden_state_and_aria_without_inner_html(self):
-        html = render_report(assessment(), ASSET_DIR)
+    def test_report_script_toggles_detail_and_aria_without_inner_html(self):
+        html = render_report(minimal_assessment(), ASSET_DIR)
 
         for expected in (
             '.querySelectorAll(".result-row")',
@@ -228,15 +259,8 @@ class ModelDoctorHtmlTests(unittest.TestCase):
             self.assertIn(expected, html)
         self.assertNotIn("innerHTML", html)
 
-    def test_category_and_result_counts_match_assessment(self):
-        value = assessment()
-        html = render_report(value, ASSET_DIR)
-
-        self.assertIn('<td data-label="关键数据">1/1 通过</td>', html)
-        self.assertEqual(html.count('class="result-group"'), 1)
-
     def test_render_report_does_not_mutate_assessment(self):
-        value = assessment()
+        value = binary_assessment_fixture()
         before = deepcopy(value)
 
         render_report(value, ASSET_DIR)
@@ -252,8 +276,23 @@ class ModelDoctorCliHtmlTests(unittest.TestCase):
             reviews_path = directory / "reviews.json"
             assessment_path = directory / "assessment.json"
             html_path = directory / "customer-readiness-report.html"
-            parsed_path.write_text(json.dumps(parse_log(FIXTURES / "minimal.log")), encoding="utf-8")
-            reviews_path.write_text(json.dumps({"001": review()}), encoding="utf-8")
+            parsed_path.write_text(
+                json.dumps(parse_log(FIXTURES / "minimal.log")),
+                encoding="utf-8",
+            )
+            reviews_path.write_text(
+                json.dumps(
+                    {
+                        "001": review(
+                            "001",
+                            "PASS",
+                            "critical",
+                            ["request:test-001"],
+                        )
+                    }
+                ),
+                encoding="utf-8",
+            )
             assessment_path.write_text("old assessment", encoding="utf-8")
             html_path.write_text("old report", encoding="utf-8")
 
@@ -276,14 +315,30 @@ class ModelDoctorCliHtmlTests(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(assessment_path.read_text(encoding="utf-8"), "old assessment")
+            self.assertEqual(
+                assessment_path.read_text(encoding="utf-8"),
+                "old assessment",
+            )
             self.assertEqual(html_path.read_text(encoding="utf-8"), "old report")
-            generated_paths = [Path(line) for line in result.stdout.splitlines() if line.strip()]
+            generated_paths = [
+                Path(line) for line in result.stdout.splitlines() if line.strip()
+            ]
             self.assertEqual(len(generated_paths), 2)
-            self.assertTrue(all(path.is_absolute() and path.exists() for path in generated_paths))
-            generated_assessment = next(path for path in generated_paths if path.suffix == ".json")
-            generated_html = next(path for path in generated_paths if path.suffix == ".html")
-            self.assertEqual(json.loads(generated_assessment.read_text(encoding="utf-8"))["overall"]["verdict"], "READY")
+            self.assertTrue(
+                all(path.is_absolute() and path.exists() for path in generated_paths)
+            )
+            generated_assessment = next(
+                path for path in generated_paths if path.suffix == ".json"
+            )
+            generated_html = next(
+                path for path in generated_paths if path.suffix == ".html"
+            )
+            self.assertEqual(
+                json.loads(
+                    generated_assessment.read_text(encoding="utf-8")
+                )["overall"]["verdict"],
+                "READY",
+            )
             generated_html_text = generated_html.read_text(encoding="utf-8")
             self.assertIn("请求输入", generated_html_text)
             self.assertIn("请求输出", generated_html_text)

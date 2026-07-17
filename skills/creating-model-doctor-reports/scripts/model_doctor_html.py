@@ -13,17 +13,9 @@ from model_doctor_assessment import validate_assessment
 CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
 STATUS_LABELS = {
     "PASS": "通过",
-    "FAIL": "失败",
-    "UNDETERMINED": "无法判定",
-    "UNSUPPORTED": "不支持",
-    "SKIPPED": "跳过",
-    "ERROR": "执行错误",
-}
-CATEGORY_STATUS_LABELS = {
-    "PASS": "通过",
     "FAIL": "未通过",
-    "CONDITIONAL": "需复测",
 }
+CATEGORY_STATUS_LABELS = STATUS_LABELS
 
 
 def _e(value: object) -> str:
@@ -46,26 +38,22 @@ def _category_key_data(category: dict) -> str:
     counts = category.get("counts", {})
     total = sum(int(value) for value in counts.values())
     parts = [f"{int(counts.get('PASS', 0))}/{total} 通过"]
-    if category.get("criticalFailures"):
-        parts.append("硬门禁失败：" + ", ".join(category["criticalFailures"]))
-    if category.get("unknowns"):
-        parts.append("待补证：" + ", ".join(category["unknowns"]))
+    if category.get("failures"):
+        parts.append("未通过：" + ", ".join(category["failures"]))
     return "；".join(parts)
 
 
 def _category_conclusion(category: dict) -> str:
     status = category.get("status")
     if status == "PASS":
-        return "本次证据未发现该能力域的已确认问题。"
-    if category.get("criticalFailures"):
-        return "存在硬门禁失败，需先处理对应检测项。"
-    return "存在失败、错误或证据不足项，请查看逐项检测证据。"
+        return "本次证据满足该能力域全部检测要求。"
+    return "存在未通过检测项，请查看逐项检测证据。"
 
 
 def _category_rows(categories: List[dict]) -> str:
     rows = []
     for category in categories:
-        status = category.get("status", "CONDITIONAL")
+        status = category.get("status", "FAIL")
         rows.append(
             "<tr>"
             f'<th scope="row" data-label="能力域">{_e(category.get("name"))}</th>'
@@ -132,7 +120,7 @@ def _test_row_group(item: dict) -> str:
     logic = item.get("logic", {})
     test_id = str(item.get("testId", "unknown"))
     detail_id = f"test-detail-{test_id}"
-    reviewed = item.get("reviewedStatus", "UNDETERMINED")
+    reviewed = item.get("reviewedStatus", "FAIL")
     return (
         f'<tbody class="result-group" data-status="{_e(reviewed)}">'
         f'<tr class="result-row" data-detail-id="{_e(detail_id)}">'
