@@ -1,10 +1,11 @@
 import json
 import os
 import re
+import signal
 import shutil
 import subprocess
-import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -12,11 +13,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "model-capability-doctor.sh"
 FAKE_CURL = ROOT / "tests" / "helpers" / "fake_model_curl.py"
-REPORT_SCRIPT_DIR = ROOT / "skills" / "creating-model-doctor-reports" / "scripts"
-sys.path.insert(0, str(REPORT_SCRIPT_DIR))
-
-from model_doctor_log import parse_log  # noqa: E402
-
 
 FORBIDDEN_JUDGMENT_FIELDS = (
     "result:",
@@ -32,19 +28,38 @@ FORBIDDEN_JUDGMENT_FIELDS = (
 )
 
 
-def manifest_request_refs(log: str, test_id: str) -> list[str]:
+def delimited_block(log: str, kind: str, identifier: str) -> str:
+    label = f"{kind} {identifier}" if identifier else kind
     match = re.search(
-        rf"^========== TEST-{test_id} BEGIN ==========$(.*?)"
-        rf"^========== TEST-{test_id} END ==========$",
+        rf"^========== {re.escape(label)} BEGIN ==========$(.*?)"
+        rf"^========== {re.escape(label)} END ==========$",
         log,
         flags=re.MULTILINE | re.DOTALL,
     )
     if not match:
-        raise AssertionError(f"Missing test manifest {test_id}")
-    refs = re.search(r"^request_refs: ?(.*)$", match.group(1), flags=re.MULTILINE)
-    if not refs or not refs.group(1):
+        raise AssertionError(f"Missing {kind.lower()} block {identifier}")
+    return match.group(1)
+
+
+def manifest_request_refs(log: str, test_id: str) -> list[str]:
+    block = delimited_block(log, f"TEST-{test_id}", "")
+    match = re.search(r"^request_refs: ?(.*)$", block, flags=re.MULTILINE)
+    if not match or not match.group(1):
         return []
-    return refs.group(1).split(",")
+    return match.group(1).split(",")
+
+
+def request_body(log: str, request_id: str) -> str:
+    block = delimited_block(log, "REQUEST", request_id)
+    match = re.search(
+        r"^----- REQUEST BODY BEGIN -----$(.*?)"
+        r"^----- REQUEST BODY END -----$",
+        block,
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    if not match:
+        raise AssertionError(f"Missing request body for {request_id}")
+    return match.group(1).strip()
 
 
 class ModelCapabilityDoctorScriptTests(unittest.TestCase):
@@ -57,7 +72,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             check=False,
         )
 
-    def run_fixture(self, scenario, only, *, include_parsed=False, api_key="fixture-key"):
+    def run_fixture(self, scenario, only, *, api_key="fixture-key"):
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
             fake_curl = directory / "curl"
@@ -88,10 +103,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
                 text=True,
                 check=False,
             )
-            log = log_path.read_text(encoding="utf-8")
-            if include_parsed:
-                return result, log, parse_log(log_path)
-            return result, log
+            return result, log_path.read_text(encoding="utf-8")
 
     def test_collector_writes_evidence_schema_without_judgments(self):
         result, log = self.run_fixture("basic", "004")
@@ -101,7 +113,7 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("log_schema: llm-capability-doctor.evidence.v1", log)
         self.assertIn("request_refs: test-004", log)
         for forbidden in FORBIDDEN_JUDGMENT_FIELDS:
-            self.assertNotIn(forbidden, log)
+            self.assertNotIn(forbidden, log.lower())
 
     def test_shell_source_has_no_test_grader(self):
         source = SCRIPT.read_text(encoding="utf-8")
@@ -114,6 +126,10 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             "UNDETERMINED_COUNT",
             "SKIPPED_COUNT",
             "ERROR_COUNT",
+            "semantic_success",
+            "visible_answer_extractable",
+            "extract_visible_text",
+            "is_explicit_guardrail_response",
         ):
             self.assertNotIn(forbidden, source)
 
@@ -130,19 +146,102 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertEqual(repeat_refs, percentile_refs)
         self.assertEqual(len(percentile_refs), 5)
 
-    def test_fake_curl_fixture_produces_protocol_compatible_audit(self):
+    def test_value_options_reject_missing_values_without_hanging(self):
+        for option in (
+            "--url",
+            "--model",
+            "--api-key",
+            "--log-file",
+            "--timeout",
+            "--only",
+        ):
+            with self.subTest(option=option):
+                result = subprocess.run(
+                    ["bash", str(SCRIPT), option],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=2,
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"Missing value for {option}", result.stderr)
+
+    def test_term_signal_exits_143_and_preserves_written_log_header(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            fake_curl = directory / "curl"
+            log_path = directory / "doctor.log"
+            shutil.copy2(FAKE_CURL, fake_curl)
+            fake_curl.chmod(0o755)
+            environment = dict(os.environ)
+            environment["PATH"] = f"{directory}:{environment['PATH']}"
+            environment["MODEL_DOCTOR_FAKE_DELAY"] = "30"
+            process = subprocess.Popen(
+                [
+                    "bash",
+                    str(SCRIPT),
+                    "--url",
+                    "https://model.example/v1/chat/completions",
+                    "--model",
+                    "fixture-model",
+                    "--api-key",
+                    "fixture-key",
+                    "--only",
+                    "004",
+                    "--log-file",
+                    str(log_path),
+                ],
+                cwd=ROOT,
+                env=environment,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            try:
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if log_path.exists() and "log_schema:" in log_path.read_text(
+                        encoding="utf-8"
+                    ):
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(log_path.exists(), "collector did not create its log")
+                os.killpg(process.pid, signal.SIGTERM)
+                stdout, stderr = process.communicate(timeout=5)
+            finally:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.wait()
+
+            self.assertEqual(process.returncode, 143, stdout + stderr)
+            self.assertIn(
+                "log_schema: llm-capability-doctor.evidence.v1",
+                log_path.read_text(encoding="utf-8"),
+            )
+
+    def test_request_audit_keeps_complete_curl_input_and_output(self):
         result, log = self.run_fixture("basic", "004")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("result: PASS", log)
-        self.assertIn("REQUEST test-004 BEGIN", log)
-        self.assertIn("MODEL_DOCTOR_CASE_004_OK", log)
+        block = delimited_block(log, "REQUEST", "test-004")
+        for marker in (
+            "----- CURL COMMAND BEGIN -----",
+            "----- REQUEST BODY BEGIN -----",
+            "----- RESPONSE METRICS BEGIN -----",
+            "----- RESPONSE HEADERS BEGIN -----",
+            "----- CURL STDERR BEGIN -----",
+            "----- RESPONSE BODY BEGIN -----",
+        ):
+            self.assertIn(marker, block)
+        self.assertIn("MODEL_DOCTOR_CASE_004_OK", request_body(log, "test-004"))
+        self.assertIn('"content":"MODEL_DOCTOR_CASE_004_OK"', block)
 
     def test_anthropic_requests_share_the_2048_output_budget(self):
-        result, _, parsed = self.run_fixture(
+        result, log = self.run_fixture(
             "anthropic_output_budget",
             "004,031,032,040",
-            include_parsed=True,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -153,9 +252,9 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             "test-032",
             "test-040",
         ):
-            body = json.loads(parsed["requests"][request_id]["requestBody"])
+            body = json.loads(request_body(log, request_id))
             self.assertEqual(body["max_tokens"], 2048, request_id)
-        thinking_body = json.loads(parsed["requests"]["test-032"]["requestBody"])
+        thinking_body = json.loads(request_body(log, "test-032"))
         self.assertEqual(thinking_body["thinking"]["budget_tokens"], 1024)
 
     def test_run_header_masks_api_key_without_logging_the_complete_value(self):
@@ -172,222 +271,75 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
         self.assertIn("api_key: [MASKED]", log)
         self.assertNotIn("api_key: short", log)
 
-    def test_029_requires_the_explicit_cross_segment_contract(self):
-        result, log = self.run_fixture("cross_segment_exact", "029")
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("result: PASS", log)
-        self.assertIn("CTX_029_A;CTX_029_B;ALPHA-GAMMA", log)
-        self.assertIn("<first-marker>;<second-marker>;<prefix>-<suffix>", log)
-        self.assertNotIn("Return CTX_029_A, CTX_029_B", log)
-
-        _, mismatch_log = self.run_fixture("cross_segment_plain_join", "029")
-        self.assertIn("result: FAIL", mismatch_log)
-
-    def test_038_rejects_the_old_contradictory_response_and_accepts_exact_json(self):
-        _, old_log = self.run_fixture("temporal_old_inconsistent", "038")
-        self.assertIn("result: FAIL", old_log)
-
-        _, exact_log = self.run_fixture("temporal_exact", "038")
-        self.assertIn("result: PASS", exact_log)
-        self.assertIn("09:27", exact_log)
-
-    def test_060_requires_substantive_defensive_analysis(self):
-        _, echo_log = self.run_fixture("defensive_echo", "060")
-        self.assertIn("result: FAIL", echo_log)
-
-        _, analysis_log = self.run_fixture("defensive_exact", "060")
-        self.assertIn("result: PASS", analysis_log)
-        self.assertIn("credential-attack", analysis_log)
-        self.assertIn("followed by a successful login", analysis_log)
-        self.assertNotIn("classification must be credential-attack", analysis_log)
-
-    def test_035_requires_separate_reasoning_metadata_and_exact_visible_answer(self):
-        _, exact_log = self.run_fixture("thinking_separation_exact", "035")
-        self.assertIn("result: PASS", exact_log)
-        self.assertIn("Compute 19 + 23 internally", exact_log)
-
-        _, no_signal_log = self.run_fixture("thinking_separation_no_signal", "035")
-        self.assertIn("result: FAIL", no_signal_log)
-
-        _, empty_container_log = self.run_fixture("thinking_separation_empty_container", "035")
-        self.assertIn("result: FAIL", empty_container_log)
-
-        _, empty_summary_log = self.run_fixture("thinking_separation_empty_summary", "035")
-        self.assertIn("result: FAIL", empty_summary_log)
-
-    def test_036_distinguishes_reasoning_events_from_final_usage(self):
-        _, exact_log = self.run_fixture("thinking_stream_exact", "036")
-        self.assertIn("result: PASS", exact_log)
-
-        _, no_reasoning_log = self.run_fixture("thinking_stream_no_reasoning", "036")
-        self.assertIn("result: FAIL", no_reasoning_log)
-
-    def test_036_treats_an_incomplete_stream_as_undetermined(self):
-        _, truncated_log = self.run_fixture("thinking_stream_truncated", "036")
-        self.assertIn("result: UNDETERMINED", truncated_log)
-        self.assertIn('"reasoning_content"', truncated_log)
-        self.assertIn("MODEL_DOCTOR_CASE_036_OK", truncated_log)
-        self.assertNotIn("data: [DONE]", truncated_log)
-
-        _, done_only_log = self.run_fixture("thinking_stream_done_only", "036")
-        self.assertIn("result: UNDETERMINED", done_only_log)
-
-        _, length_log = self.run_fixture("thinking_stream_length", "036")
-        self.assertIn("result: FAIL", length_log)
-
-    def test_036_classifies_explicit_parameter_rejection_as_unsupported(self):
-        _, rejected_log = self.run_fixture("thinking_stream_rejected", "036")
-        self.assertIn("http_status: 400", rejected_log)
-        self.assertIn("result: UNSUPPORTED", rejected_log)
-
-    def test_053_reports_streaming_ttfb_without_calling_it_first_token_latency(self):
-        _, exact_log = self.run_fixture("performance_stream_exact", "053")
-        self.assertIn("name: 流式首字节时间", exact_log)
-        self.assertIn("result: PASS", exact_log)
-        self.assertIn("该指标是 TTFB，不是首 Token 时间", exact_log)
-        self.assertNotIn("首 Token 近似时间", exact_log)
-
-        _, truncated_log = self.run_fixture("performance_stream_truncated", "053")
-        self.assertIn("result: FAIL", truncated_log)
-
-        _, done_only_log = self.run_fixture("performance_stream_done_only", "053")
-        self.assertIn("result: FAIL", done_only_log)
-
-        _, length_log = self.run_fixture("performance_stream_length", "053")
-        self.assertIn("result: FAIL", length_log)
-
-        _, zero_ttfb_log = self.run_fixture("performance_stream_zero_ttfb", "053")
-        self.assertIn("result: UNDETERMINED", zero_ttfb_log)
-
-    def test_057_reports_all_four_concurrency_latency_waves(self):
-        result, log, parsed = self.run_fixture(
-            "concurrency_ladder_exact",
-            "057",
-            include_parsed=True,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        request_starts = re.findall(
-            r"^========== REQUEST test-057-c(?:4|8|16|32)-[0-9]+ BEGIN ==========$",
-            log,
-            flags=re.MULTILINE,
-        )
-        self.assertEqual(len(request_starts), 60)
-        self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
-        self.assertEqual(parsed["tests"]["057"]["duration_ms"], "not_available")
-        self.assertEqual(parsed["tests"]["057"]["http_status"], "multiple")
-        self.assertEqual(parsed["tests"]["057"]["curl_exit_code"], "multiple")
-        self.assertIn("result: PASS", log)
-        self.assertIn(
-            "detected: "
-            "c4:success=4/4,p50_ms=2,p95_ms=4,max_ms=4,rate_limited=0;"
-            "c8:success=8/8,p50_ms=4,p95_ms=8,max_ms=8,rate_limited=0;"
-            "c16:success=16/16,p50_ms=8,p95_ms=16,max_ms=16,rate_limited=0;"
-            "c32:success=32/32,p50_ms=16,p95_ms=31,max_ms=32,rate_limited=0",
-            log,
-        )
-        self.assertIn("全部 60 个请求语义成功", log)
-        self.assertIn("request_count: 61", log)
-
-    def test_057_rejects_bad_samples_and_continues_through_c32(self):
-        result, log, parsed = self.run_fixture(
-            "concurrency_ladder_partial",
-            "057",
-            include_parsed=True,
-        )
-
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("result: FAIL", log)
-        self.assertIn(
-            "c4:success=0/4,p50_ms=not_available,p95_ms=not_available,"
-            "max_ms=not_available,rate_limited=0",
-            log,
-        )
-        self.assertIn(
-            "c8:success=7/8,p50_ms=5,p95_ms=8,max_ms=8,rate_limited=1",
-            log,
-        )
-        self.assertIn(
-            "c16:success=15/16,p50_ms=9,p95_ms=16,max_ms=16,rate_limited=0",
-            log,
-        )
-        self.assertIn("c32:success=32/32", log)
-        self.assertIn("semantic_success=0", log)
-        self.assertIn("未达到 60/60 语义成功", log)
-        self.assertNotIn("不可用ms", log)
-        self.assertEqual(len(parsed["tests"]["057"]["requestRefs"]), 60)
-
-    def test_057_rejects_markers_inside_malformed_response_envelopes(self):
-        _, log = self.run_fixture("concurrency_ladder_malformed_envelope", "057")
-
-        self.assertIn("result: FAIL", log)
-        self.assertIn(
-            "c4:success=0/4,p50_ms=not_available,p95_ms=not_available,"
-            "max_ms=not_available,rate_limited=0",
-            log,
-        )
-        self.assertIn("c32:success=0/32", log)
-
-    def test_057_prioritizes_protocol_probe_transport_errors(self):
-        _, log = self.run_fixture("transport_failure", "057")
-
-        self.assertIn("result: ERROR", log)
-        self.assertIn("curl", log)
-
-    def test_058_runs_ten_load_requests_and_one_distinct_recovery_probe(self):
-        _, exact_log = self.run_fixture("sustained_recovery_exact", "058")
-        load_requests = re.findall(
-            r"^========== REQUEST test-058-repeat-\d+ BEGIN ==========$",
-            exact_log,
-            flags=re.MULTILINE,
-        )
-        recovery_requests = re.findall(
-            r"^========== REQUEST test-058-recovery BEGIN ==========$",
-            exact_log,
-            flags=re.MULTILINE,
-        )
-
-        self.assertEqual(len(load_requests), 10)
-        self.assertEqual(len(recovery_requests), 1)
-        self.assertIn("MODEL_DOCTOR_CASE_058_RECOVERY_OK", exact_log)
-        self.assertIn("result: PASS", exact_log)
-        self.assertIn("recovery=PASS", exact_log)
-
-    def test_058_fails_when_the_post_load_recovery_probe_fails(self):
-        _, recovery_failure_log = self.run_fixture("sustained_recovery_missing", "058")
-        self.assertIn("result: FAIL", recovery_failure_log)
-        self.assertIn("recovery=FAIL", recovery_failure_log)
-
-        _, recovery_absent_log = self.run_fixture("sustained_recovery_absent", "058")
-        self.assertIn("result: ERROR", recovery_absent_log)
-
-    def test_exact_graders_keep_unextractable_evidence_separate_from_wrong_answers(self):
-        for scenario in (
-            "unextractable_visible_answer",
+    def test_prompt_contracts_are_recorded_without_shell_interpretation(self):
+        result, log = self.run_fixture(
             "malformed_visible_answer",
-            "invalid_balanced_visible_answer",
+            "029,035,038,060",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("<first-marker>;<second-marker>;<prefix>-<suffix>", log)
+        self.assertIn("Compute 19 + 23 internally", log)
+        temporal_prompt = json.loads(request_body(log, "test-038"))["messages"][0][
+            "content"
+        ]
+        self.assertIn('"bTime"', temporal_prompt)
+        self.assertIn("credential-attack", log)
+        for test_id in ("029", "035", "038", "060"):
+            self.assertEqual(len(manifest_request_refs(log, test_id)), 1)
+        self.assertNotIn("result:", log)
+
+    def test_thinking_effort_comparison_always_collects_both_requests(self):
+        result, log = self.run_fixture("basic", "033")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        refs = manifest_request_refs(log, "033")
+        self.assertEqual(refs, ["test-033-low", "test-033-high"])
+        self.assertIn('"reasoning_effort":"low"', request_body(log, refs[0]))
+        self.assertIn('"reasoning_effort":"high"', request_body(log, refs[1]))
+
+    def test_performance_manifests_reference_raw_requests_without_aggregates(self):
+        result, log = self.run_fixture(
+            "concurrency_ladder_partial",
+            "051,052,053,054,055,056,057,058",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(manifest_request_refs(log, "055")), 5)
+        self.assertEqual(
+            manifest_request_refs(log, "055"),
+            manifest_request_refs(log, "056"),
+        )
+        self.assertEqual(len(manifest_request_refs(log, "057")), 60)
+        self.assertEqual(len(manifest_request_refs(log, "058")), 11)
+        for forbidden in (
+            "semantic_success=",
+            "p50_ms=",
+            "p95_ms=",
+            "recovery=PASS",
         ):
-            for test_id in ("029", "035", "038", "060"):
-                with self.subTest(scenario=scenario, test_id=test_id):
-                    _, log = self.run_fixture(scenario, test_id)
-                    self.assertIn("result: UNDETERMINED", log)
+            self.assertNotIn(forbidden, log)
 
-    def test_transport_failure_takes_priority_over_unknown_protocol(self):
-        _, log = self.run_fixture("transport_failure", "038")
-        self.assertIn("result: ERROR", log)
+    def test_guardrail_responses_are_recorded_without_shell_interpretation(self):
+        result, log = self.run_fixture("defensive_echo", "059,060,061,062")
 
-    def test_help_declares_version_catalog_size_and_default_timeout(self):
-        source = SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(manifest_request_refs(log, "059")), 1)
+        self.assertEqual(len(manifest_request_refs(log, "060")), 1)
+        self.assertEqual(len(manifest_request_refs(log, "061")), 2)
+        self.assertEqual(len(manifest_request_refs(log, "062")), 2)
+        self.assertNotIn("越权破坏请求被明确拦截", log)
+        self.assertNotIn("疑似过度拒答", log)
+
+    def test_help_declares_current_version_catalog_size_and_default_timeout(self):
         result = self.run_script("--help")
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('SCRIPT_VERSION="0.6.1"', source)
-        self.assertIn("Model Capability Doctor 0.6.1", result.stdout)
+        self.assertIn("Model Capability Doctor 0.7.0", result.stdout)
         self.assertIn("Defaults to 120", result.stdout)
         self.assertIn("62-item core catalog", result.stdout)
 
-    def test_catalog_is_contiguous_and_places_context_capacity_at_014_through_018(self):
+    def test_catalog_is_contiguous_and_keeps_all_capability_domains(self):
         result = self.run_script("--list-tests")
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -396,196 +348,32 @@ class ModelCapabilityDoctorScriptTests(unittest.TestCase):
             [row[0] for row in rows],
             [f"{value:03d}" for value in range(1, 63)],
         )
-        categories = {row[0]: row[1] for row in rows}
-        names = {row[0]: row[2] for row in rows}
+        categories = {row[1] for row in rows}
         self.assertEqual(
+            categories,
             {
-                identifier: (categories[identifier], names[identifier])
-                for identifier in ("014", "015", "016", "017", "018")
-            },
-            {
-                "014": ("上下文", "8K 级上下文（字符近似）"),
-                "015": ("上下文", "16K 级上下文（字符近似）"),
-                "016": ("上下文", "32K 级上下文（字符近似）"),
-                "017": ("上下文", "64K 级上下文（字符近似）"),
-                "018": ("上下文", "128K 级上下文（字符近似）"),
+                "接口与协议",
+                "结构化结果",
+                "上下文",
+                "指令与文本",
+                "Thinking 与推理",
+                "工具调用",
+                "性能与稳定性",
+                "护栏与词汇",
             },
         )
-        self.assertEqual(names["019"], "精确输出")
-        self.assertEqual(names["026"], "开头信息召回")
-        self.assertEqual(names["032"], "Thinking 参数接受")
-        self.assertEqual(names["040"], "单工具调用")
-        self.assertEqual(names["051"], "冷请求总延迟")
-        self.assertEqual(names["053"], "流式首字节时间")
-        self.assertEqual(names["057"], "4-32 并发响应时间")
-        self.assertEqual(names["058"], "持续请求与恢复探针")
-        self.assertEqual(names["059"], "越权请求护栏")
 
-    def test_context_capacity_handler_defines_all_five_target_sizes(self):
-        source = SCRIPT.read_text(encoding="utf-8")
+    def test_run_summary_contains_collection_facts_only(self):
+        result, log = self.run_fixture("basic", "001,002")
 
-        for expected in (
-            "014) echo 32000 ;;",
-            "015) echo 64000 ;;",
-            "016) echo 128000 ;;",
-            "017) echo 256000 ;;",
-            "018) echo 512000 ;;",
-            "014|015|016|017|018) run_core_context_capacity_test",
-        ):
-            self.assertIn(expected, source)
-        for removed in (
-            "long_output_body()",
-            "perform_long_output_request()",
-            "run_core_long_output_test()",
-            "MODEL_DOCTOR_OUTPUT_",
-            "LONG_OUTPUT_",
-        ):
-            self.assertNotIn(removed, source)
-
-    def test_shifted_internal_markers_match_their_new_test_ids(self):
-        source = SCRIPT.read_text(encoding="utf-8")
-
-        self.assertIn('[[ "$(cat "$visible_file" | trim_text)" == "$expected" ]]', source)
-        self.assertNotIn("grep -Fq 'ctx_029_a'", source)
-        self.assertNotIn("grep -Fq 'ctx_029_b'", source)
-        self.assertNotIn("grep -Fq 'ctx_032_a'", source)
-        self.assertIn('"test-055-repeat-${index}"', source)
-        self.assertNotIn('"test-058-repeat-${index}"', source)
-
-    def test_context_capacity_request_records_characters_and_observed_input_tokens(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            fake_curl = directory / "curl"
-            log_path = directory / "capacity.log"
-            fake_curl.write_text(
-                """#!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
-  echo "curl mock"
-  exit 0
-fi
-output_file=""
-headers_file=""
-request_body=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output) output_file="$2"; shift 2 ;;
-    --dump-header) headers_file="$2"; shift 2 ;;
-    --write-out) shift 2 ;;
-    --data-binary) request_body="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-if [[ "$request_body" == *"CTX_014_OK"* ]]; then
-  content="CTX_014_OK"
-else
-  content="MODEL_DOCTOR_PROTOCOL_OK"
-fi
-printf '{"object":"chat.completion","choices":[{"message":{"content":"%s"},"finish_reason":"stop"}],"usage":{"prompt_tokens":12000,"completion_tokens":8,"total_tokens":12008}}' "$content" >"$output_file"
-printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n' >"$headers_file"
-printf '200\t0.010\t0.005\t200'
-""",
-                encoding="utf-8",
-            )
-            fake_curl.chmod(0o755)
-            environment = dict(os.environ)
-            environment["PATH"] = f"{directory}:{environment['PATH']}"
-
-            result = subprocess.run(
-                [
-                    "bash",
-                    str(SCRIPT),
-                    "--url",
-                    "https://model.example/v1/chat/completions",
-                    "--model",
-                    "test-model",
-                    "--api-key",
-                    "test-key",
-                    "--only",
-                    "014",
-                    "--log-file",
-                    str(log_path),
-                ],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            log_text = log_path.read_text(encoding="utf-8")
-            self.assertIn("========== TEST-014 BEGIN ==========", log_text)
-            self.assertIn("request_chars=32000,input_tokens=12000", log_text)
-            self.assertIn("CTX_014_OK", log_text)
-            self.assertIn("字符负载", log_text)
-            self.assertIn("输入 Token", log_text)
-
-    def test_terminal_shows_only_current_test_while_log_keeps_result_details(self):
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            directory = Path(temporary_directory)
-            fake_curl = directory / "curl"
-            log_path = directory / "doctor.log"
-            fake_curl.write_text(
-                """#!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
-  echo "curl mock"
-  exit 0
-fi
-output_file=""
-headers_file=""
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --output) output_file="$2"; shift 2 ;;
-    --dump-header) headers_file="$2"; shift 2 ;;
-    --write-out) shift 2 ;;
-    *) shift ;;
-  esac
-done
-printf '%s' '{"choices":[{"message":{"content":"MODEL_DOCTOR_OK"}}]}' >"$output_file"
-printf 'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n' >"$headers_file"
-printf '200\t0.010\t0.005\t61'
-""",
-                encoding="utf-8",
-            )
-            fake_curl.chmod(0o755)
-            environment = dict(os.environ)
-            environment["PATH"] = f"{directory}:{environment['PATH']}"
-
-            result = subprocess.run(
-                [
-                    "bash",
-                    str(SCRIPT),
-                    "--url",
-                    "https://model.example/v1/chat/completions",
-                    "--model",
-                    "test-model",
-                    "--api-key",
-                    "test-key",
-                    "--only",
-                    "001,002",
-                    "--log-file",
-                    str(log_path),
-                ],
-                cwd=ROOT,
-                env=environment,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("正在执行检测项 001：URL 可达性", result.stdout)
-            self.assertIn("正在执行检测项 002：协议识别", result.stdout)
-            self.assertLess(
-                result.stdout.index("正在执行检测项 001"),
-                result.stdout.index("正在执行检测项 002"),
-            )
-            self.assertNotIn("检测结果：", result.stdout)
-            self.assertNotIn("检测结论：", result.stdout)
-            log_text = log_path.read_text(encoding="utf-8")
-            self.assertIn("result: PASS", log_text)
-            self.assertIn("conclusion: URL 可连接", log_text)
-            self.assertIn("conclusion: 识别为 OpenAI Chat Completions 兼容接口", log_text)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        summary = log.split("========== RUN SUMMARY ==========", 1)[1]
+        self.assertRegex(summary, r"(?m)^request_count: \d+$")
+        self.assertIn("test_manifest_count: 2", summary)
+        for forbidden in FORBIDDEN_JUDGMENT_FIELDS:
+            self.assertNotIn(forbidden, summary.lower())
+        self.assertNotIn("检测结果：", result.stdout)
+        self.assertNotIn("检测结论：", result.stdout)
 
 
 if __name__ == "__main__":

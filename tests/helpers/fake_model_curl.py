@@ -5,6 +5,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 
@@ -121,6 +122,9 @@ output_path = Path(argument_value(arguments, "--output"))
 headers_path = Path(argument_value(arguments, "--dump-header"))
 request_body = argument_value(arguments, "--data-binary")
 scenario = os.environ.get("MODEL_DOCTOR_FAKE_SCENARIO", "basic")
+delay = float(os.environ.get("MODEL_DOCTOR_FAKE_DELAY", "0"))
+if delay:
+    time.sleep(delay)
 http_status = "200"
 time_total = "0.020"
 
