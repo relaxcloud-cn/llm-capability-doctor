@@ -1,0 +1,125 @@
+========== MODEL DOCTOR RUN ==========
+run_id: MD-20260715-TEST-MIXED
+script_version: 0.2.0
+started_at: 2026-07-15T11:00:00+0800
+url: https://model.example/v1/chat/completions?api_key=query-secret
+model: mixed-model
+api_key: [REDACTED]
+test_count: 2
+
+========== REQUEST test-047 BEGIN ==========
+request_id: test-047
+protocol: openai_chat
+auth_mode: bearer
+stream: 0
+
+----- REQUEST BODY BEGIN -----
+{"model":"mixed-model","messages":[{"role":"user","content":"Call get_weather"}],"api_key":"json-secret"}
+----- REQUEST BODY END -----
+
+----- RESPONSE METRICS BEGIN -----
+curl_exit_code: 0
+http_status: 200
+time_total: 1.000000
+time_starttransfer: 0.500000
+size_download: 100
+----- RESPONSE METRICS END -----
+
+----- RESPONSE HEADERS BEGIN -----
+Authorization: Bearer header-secret
+Set-Cookie: session=cookie-secret
+----- RESPONSE HEADERS END -----
+
+----- CURL STDERR BEGIN -----
+----- CURL STDERR END -----
+
+----- RESPONSE BODY BEGIN -----
+{"choices":[{"message":{"tool_calls":[{"id":"call_1","function":{"name":"get_weather","arguments":"{\"city\":\"Beijing\"}"}}]}}]}
+----- RESPONSE BODY END -----
+========== REQUEST test-047 END ==========
+
+========== REQUEST test-047-follow BEGIN ==========
+request_id: test-047-follow
+protocol: openai_chat
+auth_mode: bearer
+stream: 0
+
+----- REQUEST BODY BEGIN -----
+{"messages":[{"role":"tool","tool_call_id":"call_1","content":"WEATHER_SUNNY"}]}
+----- REQUEST BODY END -----
+
+----- RESPONSE METRICS BEGIN -----
+curl_exit_code: 0
+http_status: 200
+time_total: 0.800000
+time_starttransfer: 0.400000
+size_download: 80
+----- RESPONSE METRICS END -----
+
+----- RESPONSE HEADERS BEGIN -----
+content-type: application/json
+----- RESPONSE HEADERS END -----
+
+----- CURL STDERR BEGIN -----
+----- CURL STDERR END -----
+
+----- RESPONSE BODY BEGIN -----
+{"choices":[{"message":{"content":"Tool said json-secret but final answer is WEATHER_SUNNY"}}]}
+----- RESPONSE BODY END -----
+========== REQUEST test-047-follow END ==========
+
+========== TEST-047 BEGIN ==========
+name: 串行工具调用
+category: 工具调用
+result: FAIL
+expected: get_weather then get_time
+detected: get_weather only
+conclusion: 原脚本未检测到后续调用
+
+----- RAW RESPONSE BEGIN -----
+{"choices":[{"message":{"content":"WEATHER_SUNNY"}}]}
+----- RAW RESPONSE END -----
+========== TEST-047 END ==========
+
+========== REQUEST test-999 BEGIN ==========
+request_id: test-999
+protocol: unknown
+auth_mode: bearer
+stream: 0
+
+----- REQUEST BODY BEGIN -----
+{"prompt":"future test"}
+----- REQUEST BODY END -----
+
+----- RESPONSE METRICS BEGIN -----
+curl_exit_code: 0
+http_status: 200
+time_total: 0.100000
+time_starttransfer: 0.050000
+size_download: 16
+----- RESPONSE METRICS END -----
+
+----- RESPONSE HEADERS BEGIN -----
+content-type: application/json
+----- RESPONSE HEADERS END -----
+
+----- CURL STDERR BEGIN -----
+----- CURL STDERR END -----
+
+----- RESPONSE BODY BEGIN -----
+{"answer":"future"}
+----- RESPONSE BODY END -----
+========== REQUEST test-999 END ==========
+
+========== TEST-999 BEGIN ==========
+name: 未来检测项
+category: 未来能力
+result: PASS
+expected: future
+detected: future
+conclusion: 未知版本检测项
+
+----- RAW RESPONSE BEGIN -----
+{"answer":"future"}
+----- RAW RESPONSE END -----
+========== TEST-999 END ==========
