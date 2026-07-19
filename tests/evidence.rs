@@ -2,12 +2,16 @@ use std::fs;
 use std::time::Duration;
 
 use chrono::{Local, TimeZone};
+use httpmock::Method::POST;
+use httpmock::MockServer;
 use model_capability_doctor::audit::{
     AuditWriter, RequestEvidence, ResponseMetrics, RunMetadata, TestManifest,
 };
+use model_capability_doctor::http::{HttpExecutor, RequestInput};
 use model_capability_doctor::protocol::{AuthMode, Protocol};
 use model_capability_doctor::redaction::{Redactor, mask_api_key};
 use tempfile::tempdir;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 fn timestamp(second: u32) -> chrono::DateTime<Local> {
@@ -145,6 +149,233 @@ fn audit_writer_emits_compatible_blocks_without_secrets() {
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+    }
+}
+
+fn request_input(server: &MockServer, path: &str, auth_mode: AuthMode) -> RequestInput {
+    RequestInput {
+        request_id: format!("native-{}", auth_mode),
+        url: Url::parse(&server.url(path)).unwrap(),
+        protocol: Protocol::OpenAiChat,
+        auth_mode,
+        body: br#"{"model":"fixture-model","messages":[]}"#.to_vec(),
+        stream: false,
+        api_key: "fixture-key".into(),
+    }
+}
+
+#[tokio::test]
+async fn native_http_collects_success_status_headers_body_and_metrics() {
+    let server = MockServer::start_async().await;
+    let endpoint = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/bearer")
+                .header("accept", "application/json, text/event-stream")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer fixture-key")
+                .body(r#"{"model":"fixture-model","messages":[]}"#);
+            then.status(200)
+                .header("content-type", "application/json")
+                .header("x-fixture", "present")
+                .body(r#"{"choices":[{"message":{"content":"ok"}}]}"#);
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+    let evidence = executor
+        .execute(
+            request_input(&server, "/bearer", AuthMode::Bearer),
+            CancellationToken::new(),
+        )
+        .await;
+
+    endpoint.assert_async().await;
+    assert_eq!(evidence.metrics.transport_exit_code, 0);
+    assert_eq!(evidence.metrics.http_status, Some(200));
+    assert_eq!(evidence.metrics.size_download, evidence.response_body.len());
+    assert!(evidence.metrics.time_total >= evidence.metrics.time_starttransfer);
+    assert_eq!(
+        String::from_utf8(evidence.response_body).unwrap(),
+        r#"{"choices":[{"message":{"content":"ok"}}]}"#
+    );
+    assert!(evidence.error.is_empty());
+    assert!(
+        evidence
+            .headers
+            .iter()
+            .any(|(name, value)| name == "x-fixture" && value == "present")
+    );
+}
+
+#[tokio::test]
+async fn native_http_sends_each_supported_authentication_header() {
+    let server = MockServer::start_async().await;
+    let bearer = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/bearer")
+                .header("authorization", "Bearer fixture-key");
+            then.status(200).body("{}");
+        })
+        .await;
+    let api_key = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/api-key")
+                .header("api-key", "fixture-key");
+            then.status(200).body("{}");
+        })
+        .await;
+    let anthropic = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/anthropic")
+                .header("x-api-key", "fixture-key")
+                .header("anthropic-version", "2023-06-01");
+            then.status(200).body("{}");
+        })
+        .await;
+    let google = server
+        .mock_async(|when, then| {
+            when.method(POST)
+                .path("/google")
+                .header("x-goog-api-key", "fixture-key");
+            then.status(200).body("{}");
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+    for (path, mode) in [
+        ("/bearer", AuthMode::Bearer),
+        ("/api-key", AuthMode::ApiKey),
+        ("/anthropic", AuthMode::XApiKey),
+        ("/google", AuthMode::XGoogApiKey),
+    ] {
+        let evidence = executor
+            .execute(request_input(&server, path, mode), CancellationToken::new())
+            .await;
+        assert_eq!(evidence.metrics.http_status, Some(200), "{mode}");
+    }
+
+    bearer.assert_async().await;
+    api_key.assert_async().await;
+    anthropic.assert_async().await;
+    google.assert_async().await;
+}
+
+#[tokio::test]
+async fn native_http_preserves_non_success_responses_as_evidence() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(POST).path("/unauthorized");
+            then.status(401)
+                .header("www-authenticate", "Bearer")
+                .body(r#"{"error":"invalid key"}"#);
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+    let evidence = executor
+        .execute(
+            request_input(&server, "/unauthorized", AuthMode::Bearer),
+            CancellationToken::new(),
+        )
+        .await;
+
+    assert_eq!(evidence.metrics.transport_exit_code, 0);
+    assert_eq!(evidence.metrics.http_status, Some(401));
+    assert_eq!(evidence.response_body, br#"{"error":"invalid key"}"#);
+    assert!(evidence.error.is_empty());
+}
+
+#[tokio::test]
+async fn native_http_records_timeouts_without_panicking() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(POST).path("/slow");
+            then.status(200)
+                .delay(Duration::from_millis(200))
+                .body("late");
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_millis(30), false).unwrap();
+
+    let evidence = executor
+        .execute(
+            request_input(&server, "/slow", AuthMode::Bearer),
+            CancellationToken::new(),
+        )
+        .await;
+
+    assert_ne!(evidence.metrics.transport_exit_code, 0);
+    assert_eq!(evidence.metrics.http_status, None);
+    assert!(!evidence.error.is_empty());
+    assert!(evidence.metrics.time_total >= Duration::from_millis(20));
+}
+
+#[tokio::test]
+async fn native_http_cancellation_stops_an_inflight_request() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(POST).path("/cancel");
+            then.status(200).delay(Duration::from_secs(2)).body("late");
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(5), false).unwrap();
+    let cancellation = CancellationToken::new();
+    let started = std::time::Instant::now();
+    let task = tokio::spawn({
+        let cancellation = cancellation.clone();
+        async move {
+            executor
+                .execute(
+                    request_input(&server, "/cancel", AuthMode::Bearer),
+                    cancellation,
+                )
+                .await
+        }
+    });
+
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    cancellation.cancel();
+    let evidence = task.await.unwrap();
+
+    assert!(started.elapsed() < Duration::from_millis(500));
+    assert_ne!(evidence.metrics.transport_exit_code, 0);
+    assert!(evidence.error.to_ascii_lowercase().contains("cancel"));
+}
+
+#[test]
+fn production_source_never_spawns_curl_or_bash() {
+    fn source_files(path: &std::path::Path, output: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                source_files(&path, output);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                output.push(path);
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    source_files(std::path::Path::new("src"), &mut files);
+    for path in files {
+        let source = fs::read_to_string(&path).unwrap();
+        assert!(
+            !source.contains("Command::new(\"curl\")"),
+            "{}",
+            path.display()
+        );
+        assert!(
+            !source.contains("Command::new(\"bash\")"),
+            "{}",
+            path.display()
         );
     }
 }
