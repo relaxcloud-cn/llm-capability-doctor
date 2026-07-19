@@ -91,6 +91,7 @@ struct Runner {
 impl Runner {
     async fn execute(&mut self) -> Result<(), RunnerError> {
         for test in self.selected.clone() {
+            self.ensure_not_cancelled()?;
             println!("正在执行检测项 {}：{}", test.id, test.name);
             if test.id != "001" && !self.protocol_checked {
                 self.protocol_checked = true;
@@ -118,6 +119,7 @@ impl Runner {
             };
             let evidence = self.execute_one(request).await?;
             self.protocol_probe_refs.push(evidence.request_id.clone());
+            self.ensure_not_cancelled()?;
             if evidence.metrics.transport_exit_code == 0
                 && matches_response(candidate.protocol, &evidence.response_body)
             {
@@ -213,14 +215,24 @@ impl Runner {
                 RequestGroup::Sequential(requests) => {
                     for request in requests {
                         evidence.push(self.execute_one(request).await?);
+                        self.ensure_not_cancelled()?;
                     }
                 }
                 RequestGroup::Concurrent(requests) => {
                     evidence.extend(self.execute_concurrent(requests).await?);
+                    self.ensure_not_cancelled()?;
                 }
             }
         }
         Ok(evidence)
+    }
+
+    fn ensure_not_cancelled(&self) -> Result<(), RunnerError> {
+        if self.cancellation.is_cancelled() {
+            Err(RunnerError::Interrupted)
+        } else {
+            Ok(())
+        }
     }
 
     async fn execute_one(
@@ -302,6 +314,8 @@ fn resolve_log_path(
 
 #[derive(Debug, Error)]
 pub enum RunnerError {
+    #[error("collection interrupted")]
+    Interrupted,
     #[error(transparent)]
     Catalog(#[from] CatalogError),
     #[error(transparent)]

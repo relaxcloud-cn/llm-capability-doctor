@@ -8,6 +8,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use model_capability_doctor::protocol::Protocol;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_rustls::TlsAcceptor;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug)]
 pub struct RecordedRequest {
@@ -24,6 +27,10 @@ pub struct FixtureServer {
 
 impl FixtureServer {
     pub fn start(protocol: Protocol) -> Self {
+        Self::start_delayed(protocol, Duration::ZERO)
+    }
+
+    pub fn start_delayed(protocol: Protocol, response_delay: Duration) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
@@ -37,7 +44,9 @@ impl FixtureServer {
                     match listener.accept() {
                         Ok((stream, _)) => {
                             let requests = requests.clone();
-                            thread::spawn(move || handle_connection(stream, protocol, requests));
+                            thread::spawn(move || {
+                                handle_connection(stream, protocol, response_delay, requests)
+                            });
                         }
                         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(1));
@@ -74,9 +83,108 @@ impl Drop for FixtureServer {
     }
 }
 
+pub struct TlsFixtureServer {
+    address: SocketAddr,
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl TlsFixtureServer {
+    pub async fn start(protocol: Protocol) -> Self {
+        use rcgen::{CertifiedKey, generate_simple_self_signed};
+        use tokio_rustls::rustls::ServerConfig;
+        use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let CertifiedKey { cert, signing_key } =
+            generate_simple_self_signed(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+        let certificate = CertificateDer::from(cert.der().to_vec());
+        let private_key =
+            PrivateKeyDer::from(PrivatePkcs8KeyDer::from(signing_key.serialize_der()));
+        let config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], private_key)
+            .unwrap();
+        let acceptor = TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let shutdown = CancellationToken::new();
+        let task = {
+            let shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                loop {
+                    let accepted = tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        accepted = listener.accept() => accepted,
+                    };
+                    let Ok((stream, _)) = accepted else {
+                        break;
+                    };
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move {
+                        let Ok(mut stream) = acceptor.accept(stream).await else {
+                            return;
+                        };
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 4096];
+                        loop {
+                            let Ok(read) = stream.read(&mut buffer).await else {
+                                return;
+                            };
+                            if read == 0 {
+                                return;
+                            }
+                            request.extend_from_slice(&buffer[..read]);
+                            if let Some(header_position) = find_bytes(&request, b"\r\n\r\n") {
+                                let header_end = header_position + 4;
+                                let headers = String::from_utf8_lossy(&request[..header_end]);
+                                let length = content_length(&headers);
+                                while request.len() - header_end < length {
+                                    let Ok(read) = stream.read(&mut buffer).await else {
+                                        return;
+                                    };
+                                    if read == 0 {
+                                        break;
+                                    }
+                                    request.extend_from_slice(&buffer[..read]);
+                                }
+                                break;
+                            }
+                        }
+                        let response = normal_response(protocol);
+                        let headers = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            response.len()
+                        );
+                        let _ = stream.write_all(headers.as_bytes()).await;
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.shutdown().await;
+                    });
+                }
+            })
+        };
+        Self {
+            address,
+            shutdown,
+            task,
+        }
+    }
+
+    pub fn url(&self) -> String {
+        format!("https://localhost:{}/v1/model", self.address.port())
+    }
+}
+
+impl Drop for TlsFixtureServer {
+    fn drop(&mut self) {
+        self.shutdown.cancel();
+        self.task.abort();
+    }
+}
+
 fn handle_connection(
     mut stream: TcpStream,
     protocol: Protocol,
+    response_delay: Duration,
     requests: Arc<Mutex<Vec<RecordedRequest>>>,
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -88,6 +196,7 @@ fn handle_connection(
         body: body.clone(),
         accepted_at: Instant::now(),
     });
+    thread::sleep(response_delay);
     let response = response_for(protocol, &body);
     let bytes = response.as_bytes();
     let headers = format!(
@@ -116,14 +225,7 @@ fn read_request_body(stream: &mut TcpStream) -> Option<String> {
         }
     };
     let headers = String::from_utf8_lossy(&bytes[..header_end]);
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse::<usize>().ok())?
-        })
-        .unwrap_or(0);
+    let content_length = content_length(&headers);
     while bytes.len() - header_end < content_length {
         let read = stream.read(&mut buffer).ok()?;
         if read == 0 {
@@ -132,6 +234,17 @@ fn read_request_body(stream: &mut TcpStream) -> Option<String> {
         bytes.extend_from_slice(&buffer[..read]);
     }
     Some(String::from_utf8_lossy(&bytes[header_end..]).into_owned())
+}
+
+fn content_length(headers: &str) -> usize {
+    headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .unwrap_or(0)
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {

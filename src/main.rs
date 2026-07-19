@@ -16,7 +16,20 @@ async fn main() -> ExitCode {
     let environment_api_key = std::env::var("MODEL_API_KEY").ok();
     match cli.into_config(environment_api_key) {
         Ok(config) => {
-            match model_capability_doctor::runner::run(config, CancellationToken::new()).await {
+            let cancellation = CancellationToken::new();
+            let shutdown = shutdown_signal();
+            tokio::pin!(shutdown);
+            let run = model_capability_doctor::runner::run(config, cancellation.clone());
+            tokio::pin!(run);
+            let result = tokio::select! {
+                result = &mut run => Some(result),
+                exit_code = &mut shutdown => {
+                    cancellation.cancel();
+                    let _ = (&mut run).await;
+                    return ExitCode::from(exit_code);
+                }
+            };
+            match result.expect("runner branch always returns a result") {
                 Ok(outcome) => {
                     println!("================ 检测完成 ================");
                     println!("总耗时：{}秒", outcome.duration.as_secs());
@@ -36,5 +49,27 @@ async fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(unix)]
+fn shutdown_signal() -> impl std::future::Future<Output = u8> {
+    use tokio::signal::unix::{SignalKind, signal};
+
+    let mut interrupt = signal(SignalKind::interrupt()).expect("unable to install SIGINT handler");
+    let mut terminate = signal(SignalKind::terminate()).expect("unable to install SIGTERM handler");
+    async move {
+        tokio::select! {
+            _ = interrupt.recv() => 130,
+            _ = terminate.recv() => 143,
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn shutdown_signal() -> impl std::future::Future<Output = u8> {
+    async {
+        let _ = tokio::signal::ctrl_c().await;
+        130
     }
 }

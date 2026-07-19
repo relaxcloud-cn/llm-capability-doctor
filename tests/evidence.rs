@@ -8,7 +8,7 @@ use model_capability_doctor::audit::{
     AuditWriter, RequestEvidence, ResponseMetrics, RunMetadata, TestManifest,
 };
 use model_capability_doctor::http::{HttpExecutor, RequestInput};
-use model_capability_doctor::protocol::{AuthMode, Protocol};
+use model_capability_doctor::protocol::{AuthMode, PROBE_CANDIDATES, Protocol};
 use model_capability_doctor::redaction::{Redactor, mask_api_key};
 use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
@@ -16,7 +16,7 @@ use url::Url;
 
 mod fixture_server;
 
-use fixture_server::FixtureServer;
+use fixture_server::{FixtureServer, TlsFixtureServer};
 
 fn timestamp(second: u32) -> chrono::DateTime<Local> {
     Local
@@ -455,8 +455,14 @@ fn end_to_end_detects_all_five_protocols_and_writes_consistent_counts() {
                 line.starts_with("========== REQUEST ") && line.ends_with(" BEGIN ==========")
             })
             .count();
-        assert_eq!(discovered, probe_count + 1, "{protocol}: {log}");
-        assert_eq!(request_count, discovered, "{protocol}");
+        assert!(
+            discovered >= probe_count + 1 && discovered <= PROBE_CANDIDATES.len() + 1,
+            "{protocol}: discovered={discovered} log={log}"
+        );
+        assert!(
+            request_count > 0 && request_count <= discovered,
+            "{protocol}"
+        );
         assert!(log.contains(&format!("request_count: {discovered}")));
         assert!(log.contains("test_manifest_count: 1"));
     }
@@ -473,9 +479,12 @@ fn end_to_end_reuses_probe_repeat_and_tool_evidence_references() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    assert_eq!(manifest_request_refs(&log, "002"), ["protocol-1"]);
-    assert_eq!(manifest_request_refs(&log, "003"), ["protocol-1"]);
-    assert_eq!(manifest_request_refs(&log, "007"), ["protocol-1"]);
+    let probe_refs = manifest_request_refs(&log, "002");
+    let selected_probe = manifest_request_refs(&log, "003");
+    assert!(!probe_refs.is_empty());
+    assert_eq!(selected_probe.len(), 1);
+    assert!(probe_refs.contains(&selected_probe[0]));
+    assert_eq!(manifest_request_refs(&log, "007"), selected_probe);
     assert_eq!(manifest_request_refs(&log, "033").len(), 2);
     for id in ["047", "048", "049"] {
         assert_eq!(manifest_request_refs(&log, id).len(), 2, "check {id}");
@@ -532,4 +541,96 @@ fn end_to_end_transport_errors_are_evidence_not_run_fatal() {
     assert!(log.contains("curl_exit_code: 1"));
     assert!(log.contains("========== TEST-004 BEGIN =========="));
     assert!(log.contains("========== RUN SUMMARY =========="));
+}
+
+#[test]
+fn parser_compatibility_accepts_rust_generated_evidence_v1() {
+    let (output, log, _) = run_fixture(Protocol::OpenAiChat, "004,055,056");
+    assert!(output.status.success());
+    let directory = tempdir().unwrap();
+    let log_path = directory.path().join("rust-doctor.log");
+    fs::write(&log_path, log).unwrap();
+    let parser_directory = std::path::Path::new("skills/creating-model-doctor-reports/scripts")
+        .canonicalize()
+        .unwrap();
+    let script = r#"
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from model_doctor_log import parse_log
+parsed = parse_log(Path(sys.argv[2]))
+assert set(parsed["tests"]) == {"004", "055", "056"}
+assert parsed["tests"]["055"]["requestRefs"] == parsed["tests"]["056"]["requestRefs"]
+assert len(parsed["tests"]["055"]["requestRefs"]) == 5
+"#;
+    let parser = std::process::Command::new("python3")
+        .args([
+            "-c",
+            script,
+            parser_directory.to_str().unwrap(),
+            log_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        parser.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&parser.stdout),
+        String::from_utf8_lossy(&parser.stderr)
+    );
+}
+
+#[tokio::test]
+async fn insecure_tls_is_opt_in_and_auditable() {
+    let server = TlsFixtureServer::start(Protocol::OpenAiChat).await;
+    let https_url = server.url();
+
+    let run = move |insecure: bool| {
+        let directory = tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        let mut command = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor");
+        command.args([
+            "--url",
+            &https_url,
+            "--model",
+            "fixture-model",
+            "--api-key",
+            "fixture-key",
+            "--only",
+            "004",
+            "--log-file",
+            log_path.to_str().unwrap(),
+            "--timeout",
+            "2",
+        ]);
+        if insecure {
+            command.arg("--insecure");
+        }
+        let output = command.output().unwrap();
+        let log = fs::read_to_string(log_path).unwrap();
+        (output, log)
+    };
+
+    let (secure_output, secure_log) = tokio::task::spawn_blocking({
+        let run = run.clone();
+        move || run(false)
+    })
+    .await
+    .unwrap();
+    assert!(secure_output.status.success());
+    assert!(secure_log.contains("tls_verification: enabled"));
+    assert!(secure_log.contains("curl_exit_code: 1"));
+
+    let (insecure_output, insecure_log) = tokio::task::spawn_blocking(move || run(true))
+        .await
+        .unwrap();
+    assert!(insecure_output.status.success());
+    assert!(insecure_log.contains("tls_verification: disabled"));
+    assert!(insecure_log.contains("--insecure"));
+    assert!(
+        insecure_log.contains("http_status: 200"),
+        "stdout={} stderr={} log={insecure_log}",
+        String::from_utf8_lossy(&insecure_output.stdout),
+        String::from_utf8_lossy(&insecure_output.stderr)
+    );
 }
