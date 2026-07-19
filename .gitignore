@@ -1,2 +1,6 @@
 docs/superpowers/
 target/
+.DS_Store
+*.log
+*-assessment.json
+*-customer-readiness-report.html

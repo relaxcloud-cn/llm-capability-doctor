@@ -409,23 +409,22 @@ fn run_fixture(protocol: Protocol, only: &str) -> (std::process::Output, String,
     let server = FixtureServer::start(protocol);
     let directory = tempdir().unwrap();
     let log_path = directory.path().join("doctor.log");
-    let output = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor")
-        .args([
-            "--url",
-            &server.url(),
-            "--model",
-            "fixture-model",
-            "--api-key",
-            "fixture-key",
-            "--only",
-            only,
-            "--log-file",
-            log_path.to_str().unwrap(),
-            "--timeout",
-            "2",
-        ])
-        .output()
-        .unwrap();
+    let mut command = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor");
+    command.env("NO_PROXY", "*").env("no_proxy", "*").args([
+        "--url",
+        &server.url(),
+        "--model",
+        "fixture-model",
+        "--api-key",
+        "fixture-key",
+        "--only",
+        only,
+        "--log-file",
+        log_path.to_str().unwrap(),
+        "--timeout",
+        "2",
+    ]);
+    let output = command.output().unwrap();
     let log = fs::read_to_string(log_path).unwrap_or_default();
     let request_count = server.requests().len();
     (output, log, request_count)
@@ -456,7 +455,7 @@ fn end_to_end_detects_all_five_protocols_and_writes_consistent_counts() {
             })
             .count();
         assert!(
-            discovered >= probe_count + 1 && discovered <= PROBE_CANDIDATES.len() + 1,
+            discovered > probe_count && discovered <= PROBE_CANDIDATES.len() + 1,
             "{protocol}: discovered={discovered} log={log}"
         );
         assert!(
@@ -514,23 +513,22 @@ fn end_to_end_concurrency_manifest_references_sixty_unique_requests() {
 fn end_to_end_transport_errors_are_evidence_not_run_fatal() {
     let directory = tempdir().unwrap();
     let log_path = directory.path().join("doctor.log");
-    let output = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor")
-        .args([
-            "--url",
-            "http://127.0.0.1:9/v1/model",
-            "--model",
-            "fixture-model",
-            "--api-key",
-            "fixture-key",
-            "--only",
-            "004",
-            "--log-file",
-            log_path.to_str().unwrap(),
-            "--timeout",
-            "1",
-        ])
-        .output()
-        .unwrap();
+    let mut command = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor");
+    command.env("NO_PROXY", "*").env("no_proxy", "*").args([
+        "--url",
+        "http://127.0.0.1:9/v1/model",
+        "--model",
+        "fixture-model",
+        "--api-key",
+        "fixture-key",
+        "--only",
+        "004",
+        "--log-file",
+        log_path.to_str().unwrap(),
+        "--timeout",
+        "1",
+    ]);
+    let output = command.output().unwrap();
 
     assert!(
         output.status.success(),
@@ -589,7 +587,7 @@ async fn insecure_tls_is_opt_in_and_auditable() {
         let directory = tempdir().unwrap();
         let log_path = directory.path().join("doctor.log");
         let mut command = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor");
-        command.args([
+        command.env("NO_PROXY", "*").env("no_proxy", "*").args([
             "--url",
             &https_url,
             "--model",

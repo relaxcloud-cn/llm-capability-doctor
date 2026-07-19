@@ -29,6 +29,8 @@ fn assert_signal_exit(signal: Signal, expected_code: i32) {
     let directory = tempdir().unwrap();
     let log_path = directory.path().join("doctor.log");
     let mut child = Command::new(assert_cmd::cargo::cargo_bin!("model-capability-doctor"))
+        .env("NO_PROXY", "*")
+        .env("no_proxy", "*")
         .args([
             "--url",
             &server.url(),

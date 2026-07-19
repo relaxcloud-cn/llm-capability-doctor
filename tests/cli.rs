@@ -111,3 +111,43 @@ fn list_tests_matches_the_shell_catalog_byte_for_byte() {
 
     assert_eq!(rust, shell);
 }
+
+#[test]
+fn documentation_publishes_the_rust_cli_workflow_and_security_warning() {
+    let readme = std::fs::read_to_string("README.md").unwrap();
+    for expected in [
+        "cargo build --release",
+        "MODEL_API_KEY",
+        "model-capability-doctor",
+        "--only",
+        "--list-tests",
+        "--insecure",
+        "危险",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "Shell 参考实现",
+    ] {
+        assert!(readme.contains(expected), "README is missing {expected:?}");
+    }
+}
+
+#[test]
+fn workflow_verifies_macos_and_builds_both_linux_targets() {
+    let workflow = std::fs::read_to_string(".github/workflows/rust-cli.yml").unwrap();
+    for expected in [
+        "macos-latest",
+        "cargo fmt --check",
+        "cargo clippy --all-targets --all-features -- -D warnings",
+        "cargo test --all-targets --all-features --locked",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "de0fac2e4500dabe0009e67214ff5f5447ce83dd",
+        "21b0f18dc621b25bfae556ff2791fca4173121e8",
+        "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    ] {
+        assert!(
+            workflow.contains(expected),
+            "workflow is missing {expected:?}"
+        );
+    }
+}
