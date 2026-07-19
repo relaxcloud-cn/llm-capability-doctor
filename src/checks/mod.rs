@@ -1,5 +1,7 @@
 mod content;
+mod guardrails;
 mod interface;
+mod performance;
 mod tools;
 
 use serde_json::Value;
@@ -112,6 +114,10 @@ pub fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError
         "040" | "041" | "042" | "043" | "044" | "045" | "046" | "047" | "048" | "049" | "050" => {
             tools::plan(id, context)
         }
+        "051" | "052" | "053" | "054" | "055" | "056" | "057" | "058" => {
+            performance::plan(id, context)
+        }
+        "059" | "060" | "061" | "062" => guardrails::plan(id, context),
         _ => Err(CheckError::UnsupportedId(id.to_owned())),
     }
 }

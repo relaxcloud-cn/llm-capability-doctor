@@ -439,3 +439,103 @@ fn malformed_tool_response_skips_followup() {
         .is_err()
     );
 }
+
+#[test]
+fn performance_checks_preserve_request_counts_streaming_and_shared_samples() {
+    for id in ["051", "052", "054"] {
+        let planned = requests(id, Protocol::OpenAiChat);
+        assert_eq!(planned.len(), 1, "check {id}");
+        assert!(!planned[0].stream);
+        assert!(body_text(&planned[0].body).contains(&format!("MODEL_DOCTOR_CASE_{id}_OK")));
+    }
+
+    let stream = requests("053", Protocol::OpenAiChat);
+    assert_eq!(stream.len(), 1);
+    assert!(stream[0].stream);
+    assert_eq!(stream[0].body.json()["stream"], true);
+
+    let repeat_055 = plan("055", &context(Protocol::OpenAiChat)).unwrap();
+    let repeat_056 = plan("056", &context(Protocol::OpenAiChat)).unwrap();
+    assert_eq!(repeat_055.manifest_refs, ManifestRefs::SharedRepeatSamples);
+    assert_eq!(repeat_056.manifest_refs, ManifestRefs::SharedRepeatSamples);
+    let ids_055: Vec<&str> = repeat_055
+        .groups
+        .iter()
+        .flat_map(RequestGroup::requests)
+        .map(|request| request.id.as_str())
+        .collect();
+    let ids_056: Vec<&str> = repeat_056
+        .groups
+        .iter()
+        .flat_map(RequestGroup::requests)
+        .map(|request| request.id.as_str())
+        .collect();
+    assert_eq!(ids_055, ids_056);
+    assert_eq!(ids_055.len(), 5);
+    assert_eq!(ids_055[0], "test-055-repeat-1");
+    assert_eq!(ids_055[4], "test-055-repeat-5");
+}
+
+#[test]
+fn concurrency_check_has_four_simultaneous_batches_and_sixty_unique_ids() {
+    let plan = plan("057", &context(Protocol::OpenAiChat)).unwrap();
+    assert_eq!(plan.groups.len(), 4);
+    let expected_sizes = [4, 8, 16, 32];
+    let mut ids = std::collections::BTreeSet::new();
+    for (group, expected_size) in plan.groups.iter().zip(expected_sizes) {
+        let RequestGroup::Concurrent(requests) = group else {
+            panic!("check 057 batch was not concurrent");
+        };
+        assert_eq!(requests.len(), expected_size);
+        for request in requests {
+            assert!(ids.insert(request.id.clone()), "duplicate {}", request.id);
+            assert!(
+                body_text(&request.body).contains(&format!("MODEL_DOCTOR_057_C{expected_size}_OK"))
+            );
+        }
+    }
+    assert_eq!(ids.len(), 60);
+    assert!(ids.contains("test-057-c4-1"));
+    assert!(ids.contains("test-057-c32-32"));
+}
+
+#[test]
+fn sustained_check_has_ten_requests_followed_by_recovery() {
+    let planned = requests("058", Protocol::OpenAiChat);
+    assert_eq!(planned.len(), 11);
+    for (index, request) in planned[..10].iter().enumerate() {
+        assert_eq!(request.id, format!("test-058-repeat-{}", index + 1));
+        assert!(body_text(&request.body).contains("MODEL_DOCTOR_CASE_058_OK"));
+    }
+    assert_eq!(planned[10].id, "test-058-recovery");
+    assert!(body_text(&planned[10].body).contains("MODEL_DOCTOR_CASE_058_RECOVERY_OK"));
+}
+
+#[test]
+fn guardrail_checks_preserve_control_experiment_and_authorization_prompts() {
+    let unauthorized = requests("059", Protocol::OpenAiChat);
+    assert_eq!(unauthorized.len(), 1);
+    assert!(
+        body_text(&unauthorized[0].body)
+            .contains("damage a third-party system without authorization")
+    );
+
+    let defensive = requests("060", Protocol::OpenAiChat);
+    let defensive_body = body_text(&defensive[0].body);
+    assert!(defensive_body.contains("authorized defensive analysis"));
+    assert!(defensive_body.contains("203.0.113.7"));
+    assert!(defensive_body.contains("lock-account-and-review-auth-logs"));
+
+    let chinese = requests("061", Protocol::OpenAiChat);
+    assert_eq!(chinese.len(), 2);
+    assert_eq!(chinese[0].id, "test-061-control");
+    assert_eq!(chinese[1].id, "test-061-experiment");
+    assert!(body_text(&chinese[1].body).contains("恶意分析、漏洞、告警、木马、攻击、威胁"));
+
+    let english = requests("062", Protocol::OpenAiChat);
+    assert_eq!(english.len(), 2);
+    assert!(
+        body_text(&english[1].body)
+            .contains("malware, threat, payload, exploit, alert, vulnerability")
+    );
+}
