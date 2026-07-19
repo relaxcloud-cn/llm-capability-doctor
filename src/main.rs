@@ -1,13 +1,14 @@
 use std::process::ExitCode;
 
 use clap::Parser;
+use model_capability_doctor::catalog;
 use model_capability_doctor::cli::Cli;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     if cli.list_tests {
-        eprintln!("test catalog is not wired yet");
-        return ExitCode::FAILURE;
+        print!("{}", catalog::render());
+        return ExitCode::SUCCESS;
     }
 
     let environment_api_key = std::env::var("MODEL_API_KEY").ok();

@@ -99,3 +99,15 @@ fn insecure_is_disabled_by_default_and_opt_in() {
     assert!(!secure.insecure);
     assert!(insecure.insecure);
 }
+
+#[test]
+fn list_tests_matches_the_shell_catalog_byte_for_byte() {
+    let rust = command().arg("--list-tests").output().unwrap().stdout;
+    let shell = std::process::Command::new("bash")
+        .args(["model-capability-doctor.sh", "--list-tests"])
+        .output()
+        .unwrap()
+        .stdout;
+
+    assert_eq!(rust, shell);
+}
