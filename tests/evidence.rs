@@ -14,6 +14,10 @@ use tempfile::tempdir;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
+mod fixture_server;
+
+use fixture_server::FixtureServer;
+
 fn timestamp(second: u32) -> chrono::DateTime<Local> {
     Local
         .with_ymd_and_hms(2026, 7, 19, 10, 11, second)
@@ -378,4 +382,154 @@ fn production_source_never_spawns_curl_or_bash() {
             path.display()
         );
     }
+}
+
+fn manifest_request_refs(log: &str, id: &str) -> Vec<String> {
+    let start = format!("========== TEST-{id} BEGIN ==========");
+    let end = format!("========== TEST-{id} END ==========");
+    let block = log
+        .split_once(&start)
+        .unwrap_or_else(|| panic!("missing {start}"))
+        .1
+        .split_once(&end)
+        .unwrap_or_else(|| panic!("missing {end}"))
+        .0;
+    let refs = block
+        .lines()
+        .find_map(|line| line.strip_prefix("request_refs: "))
+        .expect("missing request_refs");
+    if refs.is_empty() {
+        Vec::new()
+    } else {
+        refs.split(',').map(str::to_owned).collect()
+    }
+}
+
+fn run_fixture(protocol: Protocol, only: &str) -> (std::process::Output, String, usize) {
+    let server = FixtureServer::start(protocol);
+    let directory = tempdir().unwrap();
+    let log_path = directory.path().join("doctor.log");
+    let output = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor")
+        .args([
+            "--url",
+            &server.url(),
+            "--model",
+            "fixture-model",
+            "--api-key",
+            "fixture-key",
+            "--only",
+            only,
+            "--log-file",
+            log_path.to_str().unwrap(),
+            "--timeout",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    let log = fs::read_to_string(log_path).unwrap_or_default();
+    let request_count = server.requests().len();
+    (output, log, request_count)
+}
+
+#[test]
+fn end_to_end_detects_all_five_protocols_and_writes_consistent_counts() {
+    for (protocol, probe_count) in [
+        (Protocol::OpenAiChat, 1),
+        (Protocol::OpenAiResponses, 2),
+        (Protocol::AnthropicMessages, 3),
+        (Protocol::GeminiGenerateContent, 4),
+        (Protocol::OllamaChat, 5),
+    ] {
+        let (output, log, request_count) = run_fixture(protocol, "004");
+        assert!(
+            output.status.success(),
+            "{protocol}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(log.contains(&format!("protocol: {protocol}")), "{protocol}");
+        assert_eq!(manifest_request_refs(&log, "004"), ["test-004"]);
+        let discovered = log
+            .lines()
+            .filter(|line| {
+                line.starts_with("========== REQUEST ") && line.ends_with(" BEGIN ==========")
+            })
+            .count();
+        assert_eq!(discovered, probe_count + 1, "{protocol}: {log}");
+        assert_eq!(request_count, discovered, "{protocol}");
+        assert!(log.contains(&format!("request_count: {discovered}")));
+        assert!(log.contains("test_manifest_count: 1"));
+    }
+}
+
+#[test]
+fn end_to_end_reuses_probe_repeat_and_tool_evidence_references() {
+    let only = "002,003,007,033,047,048,049,055,056,061,062";
+    let (output, log, _) = run_fixture(Protocol::OpenAiChat, only);
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(manifest_request_refs(&log, "002"), ["protocol-1"]);
+    assert_eq!(manifest_request_refs(&log, "003"), ["protocol-1"]);
+    assert_eq!(manifest_request_refs(&log, "007"), ["protocol-1"]);
+    assert_eq!(manifest_request_refs(&log, "033").len(), 2);
+    for id in ["047", "048", "049"] {
+        assert_eq!(manifest_request_refs(&log, id).len(), 2, "check {id}");
+    }
+    assert_eq!(manifest_request_refs(&log, "055").len(), 5);
+    assert_eq!(
+        manifest_request_refs(&log, "055"),
+        manifest_request_refs(&log, "056")
+    );
+    assert_eq!(manifest_request_refs(&log, "061").len(), 2);
+    assert_eq!(manifest_request_refs(&log, "062").len(), 2);
+}
+
+#[test]
+fn end_to_end_concurrency_manifest_references_sixty_unique_requests() {
+    let (output, log, _) = run_fixture(Protocol::OpenAiChat, "057");
+    assert!(output.status.success());
+    let refs = manifest_request_refs(&log, "057");
+    let unique: std::collections::BTreeSet<&str> = refs.iter().map(String::as_str).collect();
+    assert_eq!(refs.len(), 60);
+    assert_eq!(unique.len(), 60);
+    assert!(refs.contains(&"test-057-c4-1".into()));
+    assert!(refs.contains(&"test-057-c32-32".into()));
+}
+
+#[test]
+fn end_to_end_transport_errors_are_evidence_not_run_fatal() {
+    let directory = tempdir().unwrap();
+    let log_path = directory.path().join("doctor.log");
+    let output = assert_cmd::cargo::cargo_bin_cmd!("model-capability-doctor")
+        .args([
+            "--url",
+            "http://127.0.0.1:9/v1/model",
+            "--model",
+            "fixture-model",
+            "--api-key",
+            "fixture-key",
+            "--only",
+            "004",
+            "--log-file",
+            log_path.to_str().unwrap(),
+            "--timeout",
+            "1",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let log = fs::read_to_string(log_path).unwrap();
+    assert!(log.contains("curl_exit_code: 1"));
+    assert!(log.contains("========== TEST-004 BEGIN =========="));
+    assert!(log.contains("========== RUN SUMMARY =========="));
 }

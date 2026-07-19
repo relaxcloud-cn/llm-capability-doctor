@@ -5,3 +5,4 @@ pub mod cli;
 pub mod http;
 pub mod protocol;
 pub mod redaction;
+pub mod runner;
