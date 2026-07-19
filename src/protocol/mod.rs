@@ -2,6 +2,8 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+pub mod tools;
+
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

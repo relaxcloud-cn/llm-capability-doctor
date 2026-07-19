@@ -1,5 +1,6 @@
 mod content;
 mod interface;
+mod tools;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -107,6 +108,9 @@ pub fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError
         | "020" | "021" | "022" | "023" | "024" | "025" | "026" | "027" | "028" | "029" | "030"
         | "031" | "032" | "033" | "034" | "035" | "036" | "037" | "038" | "039" => {
             content::plan(id, context)
+        }
+        "040" | "041" | "042" | "043" | "044" | "045" | "046" | "047" | "048" | "049" | "050" => {
+            tools::plan(id, context)
         }
         _ => Err(CheckError::UnsupportedId(id.to_owned())),
     }

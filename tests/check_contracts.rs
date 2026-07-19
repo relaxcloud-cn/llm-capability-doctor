@@ -1,4 +1,5 @@
 use model_capability_doctor::checks::{Body, ManifestRefs, PlanContext, RequestGroup, plan};
+use model_capability_doctor::protocol::tools::build_follow_up;
 use model_capability_doctor::protocol::{AuthMode, Protocol};
 use serde_json::Value;
 
@@ -180,4 +181,261 @@ fn every_static_json_body_is_valid_for_each_protocol() {
             }
         }
     }
+}
+
+#[test]
+fn tool_checks_have_one_initial_request_and_exact_prompt_markers() {
+    for number in 40..=50 {
+        let id = format!("{number:03}");
+        let planned = requests(&id, Protocol::OpenAiChat);
+        assert_eq!(planned.len(), 1, "check {id}");
+        assert_eq!(planned[0].id, format!("test-{id}"));
+        assert!(body_text(&planned[0].body).contains(&format!("MODEL_DOCTOR_CASE_{id}")));
+    }
+}
+
+#[test]
+fn tool_checks_preserve_required_nested_parallel_and_catalog_schemas() {
+    let required = requests("043", Protocol::OpenAiChat)[0].body.json().clone();
+    let parameters = &required["tools"][0]["function"]["parameters"];
+    assert_eq!(
+        parameters["required"],
+        serde_json::json!(["city", "unit", "days"])
+    );
+    assert_eq!(
+        parameters["properties"]["unit"]["enum"],
+        serde_json::json!(["C", "F"])
+    );
+    assert_eq!(parameters["properties"]["days"]["type"], "integer");
+
+    let nested = requests("044", Protocol::OpenAiResponses)[0]
+        .body
+        .json()
+        .clone();
+    assert_eq!(nested["tools"][0]["name"], "inspect_target");
+    assert_eq!(
+        nested["tools"][0]["parameters"]["properties"]["target"]["required"],
+        serde_json::json!(["host", "port"])
+    );
+
+    let parallel = requests("045", Protocol::OpenAiChat)[0].body.json().clone();
+    assert_eq!(parallel["parallel_tool_calls"], true);
+    assert_eq!(parallel["tools"].as_array().unwrap().len(), 2);
+
+    let catalog = requests("050", Protocol::AnthropicMessages)[0]
+        .body
+        .json()
+        .clone();
+    assert_eq!(catalog["max_tokens"], 2048);
+    assert_eq!(catalog["tools"].as_array().unwrap().len(), 10);
+    assert_eq!(catalog["tools"][9]["name"], "catalog_tool_8");
+
+    let gemini = requests("040", Protocol::GeminiGenerateContent)[0]
+        .body
+        .json()
+        .clone();
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"][0]["name"],
+        "get_weather"
+    );
+
+    let ollama = requests("040", Protocol::OllamaChat)[0].body.json().clone();
+    assert_eq!(ollama["tools"][0]["function"]["name"], "get_weather");
+}
+
+#[test]
+fn tool_catalog_keeps_protocol_specific_additional_properties_fields() {
+    let chat = requests("050", Protocol::OpenAiChat)[0].body.json().clone();
+    assert_eq!(
+        chat["tools"][1]["function"]["parameters"]["additionalProperties"],
+        false
+    );
+    assert_eq!(
+        chat["tools"][2]["function"]["parameters"]["additionalProperties"],
+        false
+    );
+
+    let anthropic = requests("050", Protocol::AnthropicMessages)[0]
+        .body
+        .json()
+        .clone();
+    assert_eq!(
+        anthropic["tools"][1]["input_schema"].get("additionalProperties"),
+        None
+    );
+    assert_eq!(
+        anthropic["tools"][2]["input_schema"].get("additionalProperties"),
+        None
+    );
+
+    let gemini = requests("050", Protocol::GeminiGenerateContent)[0]
+        .body
+        .json()
+        .clone();
+    assert_eq!(
+        gemini["tools"][0]["functionDeclarations"][1]["parameters"].get("additionalProperties"),
+        None
+    );
+}
+
+fn tool_response(protocol: Protocol) -> Value {
+    match protocol {
+        Protocol::OpenAiChat => serde_json::json!({
+            "id": "chatcmpl-fixture",
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call-chat-1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": "{\"city\":\"Beijing\"}"}
+                    }]
+                }
+            }]
+        }),
+        Protocol::OpenAiResponses => serde_json::json!({
+            "id": "resp-fixture",
+            "object": "response",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call-responses-1",
+                "name": "get_weather",
+                "arguments": "{\"city\":\"Beijing\"}"
+            }]
+        }),
+        Protocol::AnthropicMessages => serde_json::json!({
+            "id": "msg-fixture",
+            "type": "message",
+            "content": [{
+                "type": "tool_use",
+                "id": "toolu-anthropic-1",
+                "name": "get_weather",
+                "input": {"city": "Beijing"}
+            }]
+        }),
+        Protocol::GeminiGenerateContent => serde_json::json!({
+            "candidates": [{
+                "content": {
+                    "role": "model",
+                    "parts": [{
+                        "functionCall": {
+                            "id": "call-gemini-1",
+                            "name": "get_weather",
+                            "args": {"city": "Beijing"}
+                        }
+                    }]
+                }
+            }]
+        }),
+        Protocol::OllamaChat => serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "function": {"name": "get_weather", "arguments": {"city": "Beijing"}}
+                }]
+            },
+            "done": true
+        }),
+        Protocol::Unknown => unreachable!(),
+    }
+}
+
+#[test]
+fn tool_followups_round_trip_observed_assistant_turns_for_all_protocols() {
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+        Protocol::GeminiGenerateContent,
+        Protocol::OllamaChat,
+    ] {
+        let initial = requests("048", protocol)[0].body.json().clone();
+        let response = tool_response(protocol);
+        let follow = build_follow_up(protocol, "fixture-model", "048", &initial, &response)
+            .unwrap()
+            .body;
+
+        match protocol {
+            Protocol::OpenAiChat => {
+                assert_eq!(follow["messages"][1], response["choices"][0]["message"]);
+                assert_eq!(follow["messages"][2]["tool_call_id"], "call-chat-1");
+                assert_eq!(follow["messages"][2]["content"], "WEATHER_SUNNY");
+            }
+            Protocol::OpenAiResponses => {
+                assert_eq!(follow["previous_response_id"], "resp-fixture");
+                assert_eq!(follow["input"][0]["call_id"], "call-responses-1");
+            }
+            Protocol::AnthropicMessages => {
+                assert_eq!(follow["messages"][1]["content"], response["content"]);
+                assert_eq!(
+                    follow["messages"][2]["content"][0]["tool_use_id"],
+                    "toolu-anthropic-1"
+                );
+                assert_eq!(follow["max_tokens"], 2048);
+            }
+            Protocol::GeminiGenerateContent => {
+                assert_eq!(follow["contents"][1], response["candidates"][0]["content"]);
+                assert_eq!(
+                    follow["contents"][2]["parts"][0]["functionResponse"]["id"],
+                    "call-gemini-1"
+                );
+            }
+            Protocol::OllamaChat => {
+                assert_eq!(follow["messages"][1], response["message"]);
+                assert_eq!(follow["messages"][2]["tool_name"], "get_weather");
+            }
+            Protocol::Unknown => unreachable!(),
+        }
+        assert_eq!(follow["tools"], initial["tools"], "{protocol}");
+    }
+}
+
+#[test]
+fn tool_failure_followups_use_protocol_native_error_shapes() {
+    for protocol in [
+        Protocol::OpenAiChat,
+        Protocol::OpenAiResponses,
+        Protocol::AnthropicMessages,
+        Protocol::GeminiGenerateContent,
+        Protocol::OllamaChat,
+    ] {
+        let initial = requests("049", protocol)[0].body.json().clone();
+        let follow = build_follow_up(
+            protocol,
+            "fixture-model",
+            "049",
+            &initial,
+            &tool_response(protocol),
+        )
+        .unwrap()
+        .body;
+        let encoded = serde_json::to_string(&follow).unwrap();
+        assert!(encoded.contains("timeout"), "{protocol}: {encoded}");
+        if protocol == Protocol::AnthropicMessages {
+            assert_eq!(follow["messages"][2]["content"][0]["is_error"], true);
+        }
+        if protocol == Protocol::GeminiGenerateContent {
+            assert_eq!(
+                follow["contents"][2]["parts"][0]["functionResponse"]["response"]["error"],
+                "timeout"
+            );
+        }
+    }
+}
+
+#[test]
+fn malformed_tool_response_skips_followup() {
+    let initial = requests("048", Protocol::OpenAiChat)[0].body.json().clone();
+    assert!(
+        build_follow_up(
+            Protocol::OpenAiChat,
+            "fixture-model",
+            "048",
+            &initial,
+            &serde_json::json!({"choices": []}),
+        )
+        .is_err()
+    );
 }
