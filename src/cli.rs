@@ -29,7 +29,7 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub log_file: Option<PathBuf>,
 
-    /// Per-request timeout in seconds.
+    /// Per-request timeout in seconds. Defaults to 120.
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
@@ -114,17 +114,7 @@ fn parse_positive_integer(value: &str) -> Result<u64, String> {
 }
 
 fn validate_only_syntax(value: &str) -> Result<String, String> {
-    if value.is_empty() {
-        return Err("must contain at least one test ID".to_owned());
-    }
-    for id in value.split(',') {
-        let valid_shape = id.len() == 3 && id.bytes().all(|byte| byte.is_ascii_digit());
-        let valid_range = id
-            .parse::<u8>()
-            .is_ok_and(|number| (1..=62).contains(&number));
-        if !valid_shape || !valid_range {
-            return Err(format!("invalid test ID: {id}"));
-        }
-    }
-    Ok(value.to_owned())
+    crate::catalog::select(Some(value))
+        .map(|_| value.to_owned())
+        .map_err(|error| error.to_string())
 }

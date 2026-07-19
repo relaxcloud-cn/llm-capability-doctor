@@ -202,8 +202,16 @@ impl AuditWriter {
             "url: {}",
             self.redactor.redact_url(&metadata.url)
         )?;
-        writeln!(self.writer, "model: {}", metadata.model)?;
-        writeln!(self.writer, "api_key: {}", metadata.masked_api_key)?;
+        writeln!(
+            self.writer,
+            "model: {}",
+            single_line(&self.redactor.redact_text(&metadata.model))
+        )?;
+        writeln!(
+            self.writer,
+            "api_key: {}",
+            single_line(&metadata.masked_api_key)
+        )?;
         writeln!(self.writer, "curl_version: not_used (native rust reqwest)")?;
         writeln!(
             self.writer,
@@ -387,16 +395,22 @@ fn format_timestamp(value: DateTime<Local>) -> String {
     value.format("%Y-%m-%dT%H:%M:%S%z").to_string()
 }
 
+fn single_line(value: &str) -> String {
+    value.replace('\r', "\\r").replace('\n', "\\n")
+}
+
 #[cfg(unix)]
 fn open_private_file(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
-    OpenOptions::new()
+    let file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .mode(0o600)
-        .open(path)
+        .open(path)?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 #[cfg(not(unix))]

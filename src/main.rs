@@ -7,7 +7,19 @@ use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let arguments: Vec<_> = std::env::args_os().collect();
+    if let Some(option) = missing_value_option(&arguments) {
+        eprintln!("Missing value for {option}");
+        return ExitCode::from(2);
+    }
+    let cli = match Cli::try_parse_from(arguments) {
+        Ok(cli) => cli,
+        Err(error) => {
+            let exit_code = u8::try_from(error.exit_code()).unwrap_or(1);
+            let _ = error.print();
+            return ExitCode::from(exit_code);
+        }
+    };
     if cli.list_tests {
         print!("{}", catalog::render());
         return ExitCode::SUCCESS;
@@ -50,6 +62,27 @@ async fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn missing_value_option(arguments: &[std::ffi::OsString]) -> Option<&str> {
+    const OPTIONS_WITH_VALUES: [&str; 6] = [
+        "--url",
+        "--model",
+        "--api-key",
+        "--log-file",
+        "--timeout",
+        "--only",
+    ];
+    if arguments.iter().any(|argument| {
+        matches!(
+            argument.to_str(),
+            Some("-h" | "--help" | "-V" | "--version")
+        )
+    }) {
+        return None;
+    }
+    let last = arguments.last()?.to_str()?;
+    OPTIONS_WITH_VALUES.contains(&last).then_some(last)
 }
 
 #[cfg(unix)]

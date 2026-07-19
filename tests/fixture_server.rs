@@ -189,23 +189,25 @@ fn handle_connection(
 ) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-    let Some(body) = read_request_body(&mut stream) else {
-        return;
-    };
-    requests.lock().unwrap().push(RecordedRequest {
-        body: body.clone(),
-        accepted_at: Instant::now(),
-    });
-    thread::sleep(response_delay);
-    let response = response_for(protocol, &body);
-    let bytes = response.as_bytes();
-    let headers = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Fixture: rust-cli\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        bytes.len()
-    );
-    let _ = stream.write_all(headers.as_bytes());
-    let _ = stream.write_all(bytes);
-    let _ = stream.flush();
+    while let Some(body) = read_request_body(&mut stream) {
+        requests.lock().unwrap().push(RecordedRequest {
+            body: body.clone(),
+            accepted_at: Instant::now(),
+        });
+        thread::sleep(response_delay);
+        let response = response_for(protocol, &body);
+        let bytes = response.as_bytes();
+        let headers = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Fixture: rust-cli\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+            bytes.len()
+        );
+        if stream.write_all(headers.as_bytes()).is_err()
+            || stream.write_all(bytes).is_err()
+            || stream.flush().is_err()
+        {
+            break;
+        }
+    }
 }
 
 fn read_request_body(stream: &mut TcpStream) -> Option<String> {

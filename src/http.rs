@@ -30,6 +30,7 @@ impl HttpExecutor {
     pub fn new(timeout: Duration, insecure: bool) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(insecure)
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(timeout)
             .build()?;
         Ok(Self {
@@ -78,7 +79,7 @@ impl HttpExecutor {
                     input,
                     started_at,
                     started.elapsed(),
-                    error.to_string(),
+                    format_error_chain(&error),
                 );
             }
         };
@@ -182,4 +183,15 @@ impl HttpExecutor {
             response_body: Vec::new(),
         }
     }
+}
+
+fn format_error_chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    message
 }

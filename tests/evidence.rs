@@ -7,6 +7,7 @@ use httpmock::MockServer;
 use model_capability_doctor::audit::{
     AuditWriter, RequestEvidence, ResponseMetrics, RunMetadata, TestManifest,
 };
+use model_capability_doctor::catalog::CATALOG;
 use model_capability_doctor::http::{HttpExecutor, RequestInput};
 use model_capability_doctor::protocol::{AuthMode, PROBE_CANDIDATES, Protocol};
 use model_capability_doctor::redaction::{Redactor, mask_api_key};
@@ -17,6 +18,8 @@ use url::Url;
 mod fixture_server;
 
 use fixture_server::{FixtureServer, TlsFixtureServer};
+
+static FIXTURE_RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn timestamp(second: u32) -> chrono::DateTime<Local> {
     Local
@@ -71,7 +74,7 @@ fn audit_writer_emits_compatible_blocks_without_secrets() {
         run_id: "MD-20260719-101112-7".into(),
         started_at: timestamp(12),
         url: url.clone(),
-        model: "fixture-model".into(),
+        model: "prefix-fixture-key-suffix\nforged: true".into(),
         masked_api_key: mask_api_key("fixture-key"),
         selected_test_count: 1,
         insecure: true,
@@ -142,6 +145,8 @@ fn audit_writer_emits_compatible_blocks_without_secrets() {
         assert!(log.contains(marker), "missing {marker:?} in {log}");
     }
     assert!(log.contains("api_key: fixt********-key"));
+    assert!(log.contains("model: prefix-[REDACTED]-suffix\\nforged: true"));
+    assert!(!log.contains("\nforged: true\n"));
     assert!(log.contains("--insecure"));
     assert!(log.contains("Set-Cookie: [REDACTED]"));
     assert!(!log.contains("fixture-key"));
@@ -155,6 +160,35 @@ fn audit_writer_emits_compatible_blocks_without_secrets() {
             0o600
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_writer_restricts_permissions_on_an_existing_log() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("doctor.log");
+    fs::write(&path, "old contents").unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+    let url = Url::parse("https://model.example/v1/chat").unwrap();
+    let metadata = RunMetadata {
+        run_id: "MD-20260719-101112-7".into(),
+        started_at: timestamp(12),
+        url: url.clone(),
+        model: "fixture-model".into(),
+        masked_api_key: mask_api_key("fixture-key"),
+        selected_test_count: 1,
+        insecure: false,
+    };
+
+    let writer = AuditWriter::create(&path, metadata, Redactor::new("fixture-key", &url)).unwrap();
+
+    assert_eq!(
+        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    drop(writer);
 }
 
 fn request_input(server: &MockServer, path: &str, auth_mode: AuthMode) -> RequestInput {
@@ -296,6 +330,120 @@ async fn native_http_preserves_non_success_responses_as_evidence() {
 }
 
 #[tokio::test]
+async fn native_http_does_not_follow_redirects() {
+    let server = MockServer::start_async().await;
+    let redirected = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/redirected");
+            then.status(200).body("redirect followed");
+        })
+        .await;
+    let redirect = server
+        .mock_async(|when, then| {
+            when.method(POST).path("/redirect");
+            then.status(302)
+                .header("location", server.url("/redirected"));
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+    let evidence = executor
+        .execute(
+            request_input(&server, "/redirect", AuthMode::Bearer),
+            CancellationToken::new(),
+        )
+        .await;
+
+    assert_eq!(evidence.metrics.http_status, Some(302));
+    assert_eq!(redirect.calls_async().await, 1);
+    assert_eq!(redirected.calls_async().await, 0);
+}
+
+#[tokio::test]
+async fn native_http_preserves_malformed_json_as_evidence() {
+    let server = MockServer::start_async().await;
+    server
+        .mock_async(|when, then| {
+            when.method(POST).path("/malformed");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"choices":["#);
+        })
+        .await;
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+    let evidence = executor
+        .execute(
+            request_input(&server, "/malformed", AuthMode::Bearer),
+            CancellationToken::new(),
+        )
+        .await;
+
+    assert_eq!(evidence.metrics.http_status, Some(200));
+    assert_eq!(evidence.response_body, br#"{"choices":["#);
+    assert_eq!(evidence.metrics.size_download, evidence.response_body.len());
+    assert!(evidence.error.is_empty());
+}
+
+#[tokio::test]
+async fn native_http_collects_a_chunked_event_stream_to_completion() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert_ne!(read, 0);
+            request.extend_from_slice(&buffer[..read]);
+        }
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        for chunk in [
+            &b"data: {\"delta\":\"A\"}\n\n"[..],
+            &b"data: [DONE]\n\n"[..],
+        ] {
+            stream
+                .write_all(format!("{:x}\r\n", chunk.len()).as_bytes())
+                .await
+                .unwrap();
+            stream.write_all(chunk).await.unwrap();
+            stream.write_all(b"\r\n").await.unwrap();
+        }
+        stream.write_all(b"0\r\n\r\n").await.unwrap();
+        stream.shutdown().await.unwrap();
+    });
+    let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+    let input = RequestInput {
+        request_id: "native-stream".into(),
+        url: Url::parse(&format!("http://{address}/v1/model")).unwrap(),
+        protocol: Protocol::OpenAiChat,
+        auth_mode: AuthMode::Bearer,
+        body: br#"{"model":"fixture-model","stream":true}"#.to_vec(),
+        stream: true,
+        api_key: "fixture-key".into(),
+    };
+
+    let evidence = executor.execute(input, CancellationToken::new()).await;
+    server.await.unwrap();
+
+    assert_eq!(evidence.metrics.http_status, Some(200));
+    assert_eq!(
+        evidence.response_body,
+        b"data: {\"delta\":\"A\"}\n\ndata: [DONE]\n\n"
+    );
+    assert_eq!(evidence.metrics.size_download, evidence.response_body.len());
+    assert!(evidence.error.is_empty());
+}
+
+#[tokio::test]
 async fn native_http_records_timeouts_without_panicking() {
     let server = MockServer::start_async().await;
     server
@@ -406,6 +554,9 @@ fn manifest_request_refs(log: &str, id: &str) -> Vec<String> {
 }
 
 fn run_fixture(protocol: Protocol, only: &str) -> (std::process::Output, String, usize) {
+    let _guard = FIXTURE_RUN_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let server = FixtureServer::start(protocol);
     let directory = tempdir().unwrap();
     let log_path = directory.path().join("doctor.log");
@@ -543,7 +694,12 @@ fn end_to_end_transport_errors_are_evidence_not_run_fatal() {
 
 #[test]
 fn parser_compatibility_accepts_rust_generated_evidence_v1() {
-    let (output, log, _) = run_fixture(Protocol::OpenAiChat, "004,055,056");
+    let all_ids = CATALOG
+        .iter()
+        .map(|test| test.id)
+        .collect::<Vec<_>>()
+        .join(",");
+    let (output, log, _) = run_fixture(Protocol::OpenAiChat, &all_ids);
     assert!(output.status.success());
     let directory = tempdir().unwrap();
     let log_path = directory.path().join("rust-doctor.log");
@@ -557,7 +713,7 @@ from pathlib import Path
 sys.path.insert(0, sys.argv[1])
 from model_doctor_log import parse_log
 parsed = parse_log(Path(sys.argv[2]))
-assert set(parsed["tests"]) == {"004", "055", "056"}
+assert set(parsed["tests"]) == {f"{number:03d}" for number in range(1, 63)}
 assert parsed["tests"]["055"]["requestRefs"] == parsed["tests"]["056"]["requestRefs"]
 assert len(parsed["tests"]["055"]["requestRefs"]) == 5
 "#;

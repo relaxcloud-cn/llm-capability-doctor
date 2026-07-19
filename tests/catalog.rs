@@ -27,10 +27,11 @@ fn catalog_is_contiguous_and_complete() {
 }
 
 #[test]
-fn selection_preserves_requested_order_and_duplicates() {
-    let selected = select(Some("062,001,062")).unwrap();
+fn selection_preserves_requested_order_and_rejects_duplicates() {
+    let selected = select(Some("062,001")).unwrap();
     let ids: Vec<&str> = selected.iter().map(|test| test.id).collect();
-    assert_eq!(ids, ["062", "001", "062"]);
+    assert_eq!(ids, ["062", "001"]);
+    assert!(select(Some("062,001,062")).is_err());
 }
 
 #[test]

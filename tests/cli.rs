@@ -79,6 +79,71 @@ fn invalid_or_missing_values_exit_two() {
 }
 
 #[test]
+fn options_without_values_keep_the_shell_error_contract() {
+    for option in [
+        "--url",
+        "--model",
+        "--api-key",
+        "--log-file",
+        "--timeout",
+        "--only",
+    ] {
+        let output = command().arg(option).output().unwrap();
+
+        assert_eq!(output.status.code(), Some(2), "option {option}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains(&format!("Missing value for {option}")),
+            "option {option}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn help_and_version_take_priority_over_trailing_incomplete_options() {
+    let help = command().args(["--help", "--url"]).output().unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8(help.stdout).unwrap().contains("Usage:"));
+
+    let version = command().args(["--version", "--url"]).output().unwrap();
+    assert!(version.status.success());
+    assert!(
+        String::from_utf8(version.stdout)
+            .unwrap()
+            .contains("model-capability-doctor 0.8.0")
+    );
+}
+
+#[test]
+fn duplicate_only_ids_are_rejected_before_creating_a_log() {
+    let directory = tempfile::tempdir().unwrap();
+    let log_path = directory.path().join("doctor.log");
+    let output = command()
+        .args([
+            "--url",
+            "https://example.test/v1/chat/completions",
+            "--model",
+            "fixture-model",
+            "--api-key",
+            "fixture-key",
+            "--only",
+            "001,001",
+            "--log-file",
+            log_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("Duplicate --only test ID: 001")
+    );
+    assert!(!log_path.exists());
+}
+
+#[test]
 fn insecure_is_disabled_by_default_and_opt_in() {
     let base = [
         "doctor",

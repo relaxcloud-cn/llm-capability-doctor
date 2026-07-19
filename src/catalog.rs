@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -88,6 +90,8 @@ pub enum CatalogError {
     InvalidId(String),
     #[error("Unknown --only test ID: {0}")]
     UnknownId(String),
+    #[error("Duplicate --only test ID: {0}")]
+    DuplicateId(String),
 }
 
 pub fn render() -> String {
@@ -108,10 +112,14 @@ pub fn select(only: Option<&str>) -> Result<Vec<&'static TestCase>, CatalogError
         return Ok(CATALOG.iter().collect());
     };
 
+    let mut seen = HashSet::new();
     only.split(',')
         .map(|id| {
             if id.len() != 3 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
                 return Err(CatalogError::InvalidId(id.to_owned()));
+            }
+            if !seen.insert(id) {
+                return Err(CatalogError::DuplicateId(id.to_owned()));
             }
             CATALOG
                 .iter()
