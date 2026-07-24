@@ -17,7 +17,6 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
         "045" => Some(
             "MODEL_DOCTOR_CASE_045. In one response call get_weather for Beijing and get_time for UTC.",
         ),
-        "046" => Some("MODEL_DOCTOR_CASE_046. Use get_weather for Beijing."),
         "047" => Some(
             "MODEL_DOCTOR_CASE_047. First call get_weather for Beijing. After its result, call get_time for UTC.",
         ),

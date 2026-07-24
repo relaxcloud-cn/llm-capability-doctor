@@ -15,7 +15,6 @@ STATUS_LABELS = {
     "PASS": "通过",
     "FAIL": "未通过",
 }
-CATEGORY_STATUS_LABELS = STATUS_LABELS
 
 
 def _e(value: object) -> str:
@@ -45,44 +44,34 @@ def _status_text(status: str) -> str:
     return f'<span class="status status-{_e(status)}">{_e(label)}</span>'
 
 
-def _category_key_data(category: dict) -> str:
-    counts = category.get("counts", {})
-    total = sum(int(value) for value in counts.values())
-    parts = [f"{int(counts.get('PASS', 0))}/{total} 通过"]
-    if category.get("failures"):
-        parts.append("未通过：" + ", ".join(category["failures"]))
-    return "；".join(parts)
-
-
-def _category_conclusion(category: dict) -> str:
-    status = category.get("status")
-    if status == "PASS":
-        return "本次证据满足该能力域全部检测要求。"
-    return "存在未通过检测项，请查看逐项检测证据。"
-
-
 def _category_rows(categories: List[dict]) -> str:
     rows = []
     for category in categories:
-        status = category.get("status", "FAIL")
+        counts = category.get("counts", {})
+        passed = int(counts.get("PASS", 0))
+        failed = int(counts.get("FAIL", 0))
         rows.append(
             "<tr>"
             f'<th scope="row" data-label="能力域">{_e(category.get("name"))}</th>'
-            f'<td data-label="状态"><span class="category-status category-status-{_e(status)}">'
-            f'{_e(CATEGORY_STATUS_LABELS.get(status, status))}</span></td>'
-            f'<td data-label="关键数据">{_e(_category_key_data(category))}</td>'
-            f'<td data-label="最终结论">{_e(_category_conclusion(category))}</td>'
+            f'<td data-label="通过">{passed}</td>'
+            f'<td data-label="未通过">{failed}</td>'
+            f'<td data-label="总数">{passed + failed}</td>'
             "</tr>"
         )
     return "".join(rows)
 
 
-def _run_metadata(run: dict, overall: dict) -> str:
+def _run_metadata(run: dict, summary: dict) -> str:
+    counts = summary.get("counts", {})
+    passed = int(counts.get("PASS", 0))
+    failed = int(counts.get("FAIL", 0))
     fields = (
-        ("总体结论", overall.get("verdict") or "BLOCKED"),
         ("检测 URL", run.get("url") or "未知"),
         ("模型名称", run.get("model") or "未知"),
         ("API Key", run.get("api_key") or "未知"),
+        ("检测项总数", passed + failed),
+        ("通过项", passed),
+        ("未通过项", failed),
     )
     rows = "".join(
         f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
@@ -156,6 +145,10 @@ def _test_row_group(item: dict) -> str:
         f'<p>{_e(logic.get("method"))}</p></section>'
         '<section class="logic-item pass-criteria"><h4>通过条件</h4>'
         f'{_list(logic.get("passCriteria", []))}</section>'
+        '<section class="logic-item fail-criteria"><h4>未通过条件</h4>'
+        f'{_list(logic.get("failCriteria", []))}</section>'
+        '<section class="logic-item"><h4>能力边界</h4>'
+        f'<p>{_e(logic.get("capabilityBoundary"))}</p></section>'
         f'{_optional_detail_list("限制", item.get("limitations", []))}'
         f'{_optional_detail_list("重跑建议", item.get("retestInstructions", []))}'
         f'{_request_evidence(item.get("requests", []))}'
@@ -178,6 +171,22 @@ def _result_section(model: object, title: str, section_id: str, items: List[dict
         f'{_test_rows(items)}'
         '</table></section>'
     )
+
+
+def _result_sections(model: object, categories: List[dict], tests: List[dict]) -> str:
+    sections = []
+    for index, category in enumerate(categories, start=1):
+        name = str(category.get("name") or "未分类")
+        items = [item for item in tests if item.get("category") == name]
+        sections.append(
+            _result_section(
+                model,
+                name,
+                f"category-{index}-results-heading",
+                items,
+            )
+        )
+    return "".join(sections)
 
 
 def _observed_protocol(assessment: dict) -> str:
@@ -208,8 +217,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     model = run.get("model", "未知模型")
     protocol = _observed_protocol(assessment)
     tests = assessment.get("tests", [])
-    important_tests = [item for item in tests if item.get("gateLevel") in {"critical", "important"}]
-    secondary_tests = [item for item in tests if item.get("gateLevel") == "observation"]
+    categories = assessment.get("categories", [])
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -218,22 +226,21 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
   <meta http-equiv="Content-Security-Policy" content="{_e(CSP)}">
-  <title>{_e(model)} · Model Doctor 客户模型就绪度报告</title>
+  <title>{_e(model)} · Model Doctor 模型能力检测报告</title>
   <style>{css}</style>
 </head>
 <body>
 <main class="report-shell" aria-label="{_e(model)} 模型能力检测结论与逐项结果">
-  {_run_metadata(run, assessment.get('overall', {}))}
+  {_run_metadata(run, assessment.get('summary', {}))}
 
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>
     <colgroup><col><col><col><col></colgroup>
-    <thead><tr><th>能力域</th><th>状态</th><th>关键数据</th><th>最终结论</th></tr></thead>
-    <tbody>{_category_rows(assessment.get('categories', []))}</tbody>
+    <thead><tr><th>能力域</th><th>通过</th><th>未通过</th><th>总数</th></tr></thead>
+    <tbody>{_category_rows(categories)}</tbody>
   </table>
 
-  {_result_section(model, '重要检测项', 'important-results-heading', important_tests)}
-  {_result_section(model, '次要检测项', 'secondary-results-heading', secondary_tests)}
+  {_result_sections(model, categories, tests)}
 </main>
 <script>{script}</script>
 </body>

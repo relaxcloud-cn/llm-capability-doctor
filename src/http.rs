@@ -22,19 +22,24 @@ pub struct RequestInput {
 #[derive(Clone)]
 pub struct HttpExecutor {
     client: reqwest::Client,
+    direct_client: reqwest::Client,
     timeout: Duration,
     insecure: bool,
 }
 
 impl HttpExecutor {
     pub fn new(timeout: Duration, insecure: bool) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder()
-            .danger_accept_invalid_certs(insecure)
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(timeout)
-            .build()?;
+        let builder = || {
+            reqwest::Client::builder()
+                .danger_accept_invalid_certs(insecure)
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(timeout)
+        };
+        let client = builder().build()?;
+        let direct_client = builder().no_proxy().build()?;
         Ok(Self {
             client,
+            direct_client,
             timeout,
             insecure,
         })
@@ -47,8 +52,12 @@ impl HttpExecutor {
     ) -> RequestEvidence {
         let started_at = Local::now();
         let started = Instant::now();
-        let mut request = self
-            .client
+        let client = if endpoint_is_loopback(&input.url) {
+            &self.direct_client
+        } else {
+            &self.client
+        };
+        let mut request = client
             .post(input.url.clone())
             .header(ACCEPT, "application/json, text/event-stream")
             .header(CONTENT_TYPE, "application/json")
@@ -182,6 +191,15 @@ impl HttpExecutor {
             error,
             response_body: Vec::new(),
         }
+    }
+}
+
+fn endpoint_is_loopback(endpoint: &Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
     }
 }
 

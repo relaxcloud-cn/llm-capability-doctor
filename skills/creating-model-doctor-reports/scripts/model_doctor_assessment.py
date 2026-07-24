@@ -5,13 +5,11 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime, timezone
-from typing import Dict, List, Set
+from typing import Dict, List
 
 
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v3"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v4"
 STATUSES = {"PASS", "FAIL"}
-CONFIDENCES = {"high", "medium", "low"}
-GATE_LEVELS = {"critical", "important", "observation"}
 LOGIC_FIELDS = {
     "purpose",
     "method",
@@ -19,27 +17,32 @@ LOGIC_FIELDS = {
     "failCriteria",
     "capabilityBoundary",
 }
-
-
-def _catalog_gate_levels(
-    catalog_size: int,
-    critical: Set[str],
-    important: Set[str],
-) -> Dict[str, str]:
-    all_ids = {f"{test_id:03d}" for test_id in range(1, catalog_size + 1)}
-    observation = all_ids - critical - important
-    return {
-        **{test_id: "critical" for test_id in critical},
-        **{test_id: "important" for test_id in important},
-        **{test_id: "observation" for test_id in observation},
-    }
-
-
-CURRENT_CATALOG_GATE_LEVELS = _catalog_gate_levels(
-    62,
-    {f"{test_id:03d}" for test_id in (*range(1, 7), *range(40, 51))},
-    {f"{test_id:03d}" for test_id in (*range(14, 19), *range(32, 37), 57)},
-)
+ASSESSMENT_FIELDS = {
+    "schemaVersion",
+    "generatedAt",
+    "source",
+    "run",
+    "tokenTotals",
+    "warnings",
+    "summary",
+    "categories",
+    "tests",
+}
+TEST_FIELDS = {
+    "testId",
+    "category",
+    "name",
+    "reviewedStatus",
+    "conclusion",
+    "logic",
+    "rawObservation",
+    "metrics",
+    "evidenceRefs",
+    "evidenceExcerpts",
+    "limitations",
+    "retestInstructions",
+    "requests",
+}
 
 
 def _non_empty_string(value: object) -> bool:
@@ -61,6 +64,17 @@ def _evidence_ref_exists(parsed: dict, reference: str) -> bool:
         parts = reference.split(":")
         return len(parts) == 3 and parts[1] in parsed.get("tests", {})
     return False
+
+
+def _evidence_ref_belongs_to_test(
+    parsed: dict,
+    test_id: str,
+    reference: str,
+) -> bool:
+    request_refs = parsed.get("tests", {}).get(test_id, {}).get("requestRefs", [])
+    if reference.startswith("request:"):
+        return reference.split(":", 1)[1] in request_refs
+    return reference == f"test:{test_id}:manifest" and not request_refs
 
 
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
@@ -88,17 +102,13 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         if review.get("testId") != test_id:
             errors.append(f"Test {test_id} testId must match its object key")
         status = review.get("reviewedStatus")
-        confidence = review.get("confidence")
-        gate = review.get("gateLevel")
         if status not in STATUSES:
             errors.append(f"Test {test_id} reviewedStatus is invalid")
-        if confidence not in CONFIDENCES:
-            errors.append(f"Test {test_id} confidence is invalid")
-        if gate not in GATE_LEVELS:
-            errors.append(f"Test {test_id} gateLevel is invalid")
-        expected_gate = CURRENT_CATALOG_GATE_LEVELS.get(test_id)
-        if expected_gate and gate != expected_gate:
-            errors.append(f"Test {test_id} gateLevel must be {expected_gate}")
+        for obsolete_field in ("confidence", "gateLevel"):
+            if obsolete_field in review:
+                errors.append(
+                    f"Test {test_id} {obsolete_field} is not part of the v4 review contract"
+                )
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
 
@@ -106,6 +116,8 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         if not isinstance(logic, dict):
             errors.append(f"Test {test_id} logic must be an object")
         else:
+            for field in sorted(set(logic) - LOGIC_FIELDS):
+                errors.append(f"Test {test_id} logic.{field} is not allowed")
             for field in LOGIC_FIELDS:
                 value = logic.get(field)
                 if field in {"passCriteria", "failCriteria"}:
@@ -123,6 +135,11 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
                     errors.append(
                         f"Test {test_id} evidence reference does not exist: {reference}"
                     )
+                elif not _evidence_ref_belongs_to_test(parsed, test_id, reference):
+                    errors.append(
+                        f"Test {test_id} evidence reference is not referenced by "
+                        f"TEST-{test_id}: {reference}"
+                    )
 
         if not _string_list(review.get("evidenceExcerpts"), require_item=True):
             errors.append(
@@ -134,11 +151,6 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
             errors.append(
                 f"Test {test_id} retestInstructions must be a string array"
             )
-        if status == "PASS" and gate == "critical" and confidence == "low":
-            errors.append(
-                f"Test {test_id} low-confidence critical PASS is not allowed"
-            )
-
     return errors
 
 
@@ -165,33 +177,6 @@ def _status_counts(items: List[dict]) -> Dict[str, int]:
     }
 
 
-def _category_status(items: List[dict]) -> str:
-    return "PASS" if all(item["reviewedStatus"] == "PASS" for item in items) else "FAIL"
-
-
-def _summary(item: dict) -> dict:
-    return {
-        "testId": item["testId"],
-        "name": item["name"],
-        "status": item["reviewedStatus"],
-        "conclusion": item["conclusion"],
-    }
-
-
-def _overall(items: List[dict]) -> dict:
-    blockers = [
-        _summary(item)
-        for item in items
-        if item["gateLevel"] in {"critical", "important"}
-        and item["reviewedStatus"] == "FAIL"
-    ]
-    return {
-        "verdict": "BLOCKED" if blockers else "READY",
-        "counts": _status_counts(items),
-        "blockers": blockers,
-    }
-
-
 def _categories(items: List[dict]) -> List[dict]:
     category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
     for item in items:
@@ -199,13 +184,7 @@ def _categories(items: List[dict]) -> List[dict]:
     return [
         {
             "name": name,
-            "status": _category_status(group),
             "counts": _status_counts(group),
-            "failures": [
-                item["testId"]
-                for item in group
-                if item["reviewedStatus"] == "FAIL"
-            ],
         }
         for name, group in category_items.items()
     ]
@@ -228,9 +207,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
                 "testId": test_id,
                 "category": test.get("category", "Unclassified"),
                 "name": test.get("name", f"Test {test_id}"),
-                "gateLevel": review["gateLevel"],
                 "reviewedStatus": review["reviewedStatus"],
-                "confidence": review["confidence"],
                 "conclusion": review["conclusion"],
                 "logic": review["logic"],
                 "rawObservation": _raw_observation(requests),
@@ -250,7 +227,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "run": parsed.get("run", {}),
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
-        "overall": _overall(items),
+        "summary": {"counts": _status_counts(items)},
         "categories": _categories(items),
         "tests": items,
     }
@@ -262,23 +239,36 @@ def validate_assessment(assessment: dict) -> List[str]:
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
         errors.append("schemaVersion is invalid")
+    for field in sorted(set(assessment) - ASSESSMENT_FIELDS):
+        errors.append(f"Assessment field {field} is not allowed")
     items = assessment.get("tests")
     if not isinstance(items, list):
         return errors + ["tests must be an array"]
     if any(item.get("reviewedStatus") not in STATUSES for item in items):
         errors.append("tests contain a non-binary reviewedStatus")
-    expected_overall = _overall(items)
-    actual_overall = assessment.get("overall", {})
-    if actual_overall.get("counts") != expected_overall["counts"]:
-        errors.append("overall counts do not match test results")
-    if actual_overall.get("verdict") != expected_overall["verdict"]:
-        errors.append("overall verdict does not match gate results")
-    if actual_overall.get("blockers") != expected_overall["blockers"]:
-        errors.append("overall blockers do not match gate results")
+    for item in items:
+        test_id = item.get("testId", "unknown")
+        for field in sorted(set(item) - TEST_FIELDS):
+            errors.append(f"Test {test_id} field {field} is not allowed")
+        for obsolete_field in ("confidence", "gateLevel"):
+            if obsolete_field in item:
+                errors.append(
+                    f"Test {test_id} {obsolete_field} is not part of "
+                    "the per-test v4 contract"
+                )
+        logic = item.get("logic")
+        if isinstance(logic, dict):
+            for field in sorted(set(logic) - LOGIC_FIELDS):
+                errors.append(
+                    f"Test {test_id} logic.{field} is not allowed"
+                )
+    expected_counts = _status_counts(items)
+    if assessment.get("summary", {}).get("counts") != expected_counts:
+        errors.append("summary counts do not match test results")
     if assessment.get("categories") != _categories(items):
         errors.append("categories do not match test results")
-    if "conditions" in actual_overall:
-        errors.append("overall must not contain conditions")
+    if "overall" in assessment:
+        errors.append("overall is not part of the per-test v4 contract")
     if "path" in assessment.get("source", {}):
         errors.append("source must not expose an absolute path")
     return errors

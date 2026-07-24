@@ -6,7 +6,7 @@ use super::{
 
 pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError> {
     let plan = match id {
-        "051" | "052" | "054" => CheckPlan::executed(vec![basic(
+        "052" | "054" => CheckPlan::executed(vec![basic(
             &format!("test-{id}"),
             &format!("Reply only MODEL_DOCTOR_CASE_{id}_OK"),
             false,
@@ -35,8 +35,14 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
             }
         }
         "057" => {
-            let groups = [4, 8, 16, 32]
-                .into_iter()
+            let concurrency_levels: &[usize] = if context.onsite {
+                &[8]
+            } else {
+                &[4, 8, 16, 32]
+            };
+            let groups = concurrency_levels
+                .iter()
+                .copied()
                 .map(|concurrency| {
                     let requests = (1..=concurrency)
                         .map(|index| {
@@ -55,25 +61,6 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
                 groups,
                 manifest_refs: ManifestRefs::Executed,
             }
-        }
-        "058" => {
-            let mut requests: Vec<PlannedRequest> = (1..=10)
-                .map(|index| {
-                    basic(
-                        &format!("test-058-repeat-{index}"),
-                        "Reply only MODEL_DOCTOR_CASE_058_OK",
-                        false,
-                        context,
-                    )
-                })
-                .collect();
-            requests.push(basic(
-                "test-058-recovery",
-                "Recovery probe after sustained requests. Reply only MODEL_DOCTOR_CASE_058_RECOVERY_OK.",
-                false,
-                context,
-            ));
-            CheckPlan::executed(requests)
         }
         _ => return Err(CheckError::UnsupportedId(id.to_owned())),
     };

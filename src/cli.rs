@@ -1,3 +1,4 @@
+use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -9,7 +10,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = "Model Capability Doctor 0.8.0",
+    about = "Model Capability Doctor 0.9.0",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -33,11 +34,15 @@ pub struct Cli {
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
-    /// Run comma-separated test IDs, for example 001,062.
+    /// Run comma-separated test IDs, for example 001,060.
     #[arg(long, value_name = "IDS", value_parser = validate_only_syntax)]
     pub only: Option<String>,
 
-    /// Print the 62-item core catalog and exit.
+    /// Run all 46 checks instead of the compact onsite profile.
+    #[arg(long, conflicts_with = "only")]
+    pub full: bool,
+
+    /// Print the 46-item core catalog and exit.
     #[arg(long)]
     pub list_tests: bool,
 
@@ -53,7 +58,25 @@ pub struct Config {
     pub log_file: Option<PathBuf>,
     pub timeout: Duration,
     pub only: Option<String>,
+    pub profile: CollectionProfile,
     pub insecure: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollectionProfile {
+    Onsite,
+    Full,
+    Custom,
+}
+
+impl fmt::Display for CollectionProfile {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Onsite => "onsite",
+            Self::Full => "full",
+            Self::Custom => "custom",
+        })
+    }
 }
 
 pub struct SecretString(String);
@@ -90,6 +113,13 @@ impl Cli {
             .or(environment_api_key)
             .filter(|value| !value.is_empty())
             .ok_or(CliError::MissingApiKey)?;
+        let profile = if self.only.is_some() {
+            CollectionProfile::Custom
+        } else if self.full {
+            CollectionProfile::Full
+        } else {
+            CollectionProfile::Onsite
+        };
 
         Ok(Config {
             url,
@@ -98,6 +128,7 @@ impl Cli {
             log_file: self.log_file,
             timeout: Duration::from_secs(self.timeout),
             only: self.only,
+            profile,
             insecure: self.insecure,
         })
     }

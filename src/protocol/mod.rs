@@ -189,12 +189,32 @@ pub fn thinking_request(
             object.insert("reasoning_effort".into(), Value::String(effort.to_owned()));
         }
         Protocol::AnthropicMessages => {
+            let (budget_tokens, max_tokens) = if effort == "high" {
+                (4096, 6144)
+            } else {
+                (1024, ANTHROPIC_MAX_TOKENS)
+            };
+            object.insert("max_tokens".into(), Value::from(max_tokens));
             object.insert(
                 "thinking".into(),
-                json!({"type": "enabled", "budget_tokens": 1024}),
+                json!({"type": "enabled", "budget_tokens": budget_tokens}),
             );
         }
-        Protocol::GeminiGenerateContent | Protocol::Unknown => {}
+        Protocol::GeminiGenerateContent => {
+            let thinking_budget = if effort == "high" { 8192 } else { 1024 };
+            let generation_config = object
+                .get_mut("generationConfig")
+                .and_then(Value::as_object_mut)
+                .expect("Gemini requests always contain generationConfig");
+            generation_config.insert(
+                "thinkingConfig".into(),
+                json!({
+                    "thinkingBudget": thinking_budget,
+                    "includeThoughts": true
+                }),
+            );
+        }
+        Protocol::Unknown => {}
     }
     request
 }

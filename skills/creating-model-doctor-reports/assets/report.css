@@ -157,15 +157,13 @@ tbody th {
   margin-bottom: 0.2rem;
 }
 
-.status,
-.category-status {
+.status {
   display: block;
   color: var(--foreground);
   font-weight: 500;
 }
 
-.status-FAIL,
-.category-status-FAIL {
+.status-FAIL {
   color: var(--fail);
 }
 

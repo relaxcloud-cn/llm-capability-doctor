@@ -93,6 +93,7 @@ pub struct PlanContext<'a> {
     pub protocol: Protocol,
     pub auth_mode: AuthMode,
     pub model: &'a str,
+    pub onsite: bool,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -107,17 +108,14 @@ pub fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError
             interface::plan(id, context)
         }
         "009" | "010" | "011" | "012" | "013" | "014" | "015" | "016" | "017" | "018" | "019"
-        | "020" | "021" | "022" | "023" | "024" | "025" | "026" | "027" | "028" | "029" | "030"
-        | "031" | "032" | "033" | "034" | "035" | "036" | "037" | "038" | "039" => {
+        | "020" | "022" | "024" | "031" | "033" | "034" | "035" | "036" | "038" => {
             content::plan(id, context)
         }
-        "040" | "041" | "042" | "043" | "044" | "045" | "046" | "047" | "048" | "049" | "050" => {
+        "040" | "041" | "042" | "043" | "044" | "045" | "047" | "048" | "049" | "050" => {
             tools::plan(id, context)
         }
-        "051" | "052" | "053" | "054" | "055" | "056" | "057" | "058" => {
-            performance::plan(id, context)
-        }
-        "059" | "060" | "061" | "062" => guardrails::plan(id, context),
+        "052" | "053" | "054" | "055" | "056" | "057" => performance::plan(id, context),
+        "059" | "060" => guardrails::plan(id, context),
         _ => Err(CheckError::UnsupportedId(id.to_owned())),
     }
 }

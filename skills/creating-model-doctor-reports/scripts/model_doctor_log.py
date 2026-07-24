@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import re
 from pathlib import Path
@@ -12,6 +14,52 @@ from urllib.parse import parse_qsl, urlsplit
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
 EVIDENCE_LOG_SCHEMA = "llm-capability-doctor.evidence.v1"
+COLLECTOR_VERSION = "0.9.0"
+SECTION_ENCODING = "base64"
+RETAINED_TEST_IDS = {
+    *(f"{value:03d}" for value in range(1, 21)),
+    "022",
+    "024",
+    "031",
+    *(f"{value:03d}" for value in range(33, 37)),
+    "038",
+    *(f"{value:03d}" for value in range(40, 46)),
+    *(f"{value:03d}" for value in range(47, 51)),
+    *(f"{value:03d}" for value in range(52, 58)),
+    "059",
+    "060",
+}
+ONSITE_TEST_IDS = {
+    "002",
+    "003",
+    "005",
+    "007",
+    "008",
+    "009",
+    "013",
+    "014",
+    "016",
+    "018",
+    "020",
+    "022",
+    "024",
+    "031",
+    "033",
+    "035",
+    "036",
+    "038",
+    "042",
+    "043",
+    "045",
+    "047",
+    "048",
+    "049",
+    "055",
+    "056",
+    "057",
+    "059",
+    "060",
+}
 SECRET_QUERY_KEYS = {
     "api_key",
     "key",
@@ -83,7 +131,8 @@ def _discover_secrets(value: str) -> Set[str]:
 def redact_text(value: str, discovered_secrets: Optional[Set[str]] = None) -> str:
     """Redact credential-bearing fields and echoed copies of discovered values."""
 
-    secrets = set(discovered_secrets or ())
+    propagated_secrets = set(discovered_secrets or ())
+    secrets = set(propagated_secrets)
     secrets.update(_discover_secrets(value))
     redacted = value
 
@@ -108,9 +157,18 @@ def redact_text(value: str, discovered_secrets: Optional[Set[str]] = None) -> st
     )
 
     for secret in sorted(secrets, key=len, reverse=True):
-        if secret and secret != "[REDACTED]":
+        if (
+            secret != "[REDACTED]"
+            and (secret in propagated_secrets or len(secret) >= 4)
+        ):
             redacted = redacted.replace(secret, "[REDACTED]")
     return redacted
+
+
+def _credential_is_masked(value: str) -> bool:
+    return value in {"[MASKED]", "[REDACTED]"} or bool(
+        re.search(r"\*{4,}", value)
+    )
 
 
 def _key_values(value: str) -> Dict[str, str]:
@@ -136,7 +194,18 @@ def _section(block: str, name: str) -> str:
         re.MULTILINE | re.DOTALL,
     )
     match = pattern.search(block)
-    return match.group(1).rstrip("\n") if match else ""
+    if not match:
+        raise ValueError(f"Missing or malformed section {name}")
+    return match.group(1).rstrip("\n")
+
+
+def _encoded_section(block: str, name: str) -> str:
+    encoded = _section(block, name)
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        return raw.decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError) as error:
+        raise ValueError(f"Invalid base64 section {name}") from error
 
 
 def _blocks(text: str, kind: str) -> List[Tuple[str, str]]:
@@ -234,19 +303,48 @@ def parse_log(path: Path) -> Dict[str, object]:
     path = Path(path)
     raw = path.read_bytes()
     decoded = raw.decode("utf-8", errors="replace")
-    secrets = _discover_secrets(decoded)
-    text = redact_text(decoded, secrets)
-
-    run = _run_header(text)
-    if run.get("log_schema") != EVIDENCE_LOG_SCHEMA:
+    raw_run = _run_header(decoded)
+    if raw_run.get("log_schema") != EVIDENCE_LOG_SCHEMA:
         raise ValueError(
-            f"Unsupported or missing log_schema: {run.get('log_schema')!r}"
+            f"Unsupported or missing log_schema: {raw_run.get('log_schema')!r}"
+        )
+    if raw_run.get("script_version") != COLLECTOR_VERSION:
+        raise ValueError(
+            f"Unsupported or missing script_version: "
+            f"{raw_run.get('script_version')!r}; "
+            f"expected {COLLECTOR_VERSION}"
+        )
+    if raw_run.get("section_encoding") != SECTION_ENCODING:
+        raise ValueError(
+            f"Unsupported or missing section_encoding: "
+            f"{raw_run.get('section_encoding')!r}; expected {SECTION_ENCODING}"
         )
 
-    requests: Dict[str, Dict[str, object]] = {}
-    for identifier, block in _blocks(text, "REQUEST"):
-        if identifier in requests:
+    raw_request_blocks = _blocks(decoded, "REQUEST")
+    secrets = _discover_secrets(decoded)
+    decoded_request_sections = {}
+    for identifier, block in raw_request_blocks:
+        if identifier in decoded_request_sections:
             raise ValueError(f"Duplicate request block: {identifier}")
+        request_body = _encoded_section(block, "REQUEST BODY")
+        decoded_request_sections[identifier] = {
+            "requestBody": request_body,
+            "stderr": _encoded_section(block, "CURL STDERR"),
+            "responseBody": _encoded_section(block, "RESPONSE BODY"),
+        }
+        secrets.update(_discover_secrets(request_body))
+    raw_api_key = raw_run.get("api_key", "")
+    if raw_api_key and not _credential_is_masked(raw_api_key):
+        secrets.add(raw_api_key)
+    run = dict(raw_run)
+    for field in ("url", "model"):
+        if field in run:
+            run[field] = redact_text(run[field], secrets)
+    if raw_api_key and not _credential_is_masked(raw_api_key):
+        run["api_key"] = "[REDACTED]"
+
+    requests: Dict[str, Dict[str, object]] = {}
+    for identifier, block in raw_request_blocks:
         metadata_text = block.split("-----", 1)[0]
         metadata = _key_values(metadata_text)
         if metadata.get("request_id", identifier) != identifier:
@@ -257,18 +355,35 @@ def parse_log(path: Path) -> Dict[str, object]:
         requests[identifier] = {
             **metadata,
             "request_id": identifier,
-            "curlCommand": _section(block, "CURL COMMAND"),
-            "requestBody": _section(block, "REQUEST BODY"),
+            "curlCommand": redact_text(
+                _section(block, "CURL COMMAND"),
+                secrets,
+            ),
+            "requestBody": redact_text(
+                decoded_request_sections[identifier]["requestBody"],
+                secrets,
+            ),
             "metrics": _key_values(_section(block, "RESPONSE METRICS")),
-            "responseHeaders": _section(block, "RESPONSE HEADERS"),
-            "stderr": _section(block, "CURL STDERR"),
-            "responseBody": _section(block, "RESPONSE BODY"),
+            "responseHeaders": redact_text(
+                _section(block, "RESPONSE HEADERS"),
+                secrets,
+            ),
+            "stderr": redact_text(
+                decoded_request_sections[identifier]["stderr"],
+                secrets,
+            ),
+            "responseBody": redact_text(
+                decoded_request_sections[identifier]["responseBody"],
+                secrets,
+            ),
         }
 
     tests: Dict[str, Dict[str, object]] = {}
-    for identifier, block in _blocks(text, "TEST"):
+    for identifier, block in _blocks(decoded, "TEST"):
         if identifier in tests:
             raise ValueError(f"Duplicate test block: {identifier}")
+        if identifier not in RETAINED_TEST_IDS:
+            raise ValueError(f"Unsupported test ID in v0.9 log: {identifier}")
         metadata = _key_values(block)
         forbidden = FORBIDDEN_MANIFEST_FIELDS.intersection(metadata)
         if forbidden:
@@ -290,9 +405,23 @@ def parse_log(path: Path) -> Dict[str, object]:
             "requestRefs": refs,
         }
 
-    summary = _run_summary(text)
+    summary = _run_summary(decoded)
     if not summary:
         raise ValueError("Missing RUN SUMMARY")
+    profile = run.get("collection_profile")
+    discovered_test_ids = set(tests)
+    if profile == "full" and discovered_test_ids != RETAINED_TEST_IDS:
+        raise ValueError(
+            "The full collection profile must contain all 46 retained tests"
+        )
+    if profile == "onsite" and discovered_test_ids != ONSITE_TEST_IDS:
+        raise ValueError(
+            "The onsite collection profile must contain all 29 onsite tests"
+        )
+    if profile == "custom" and not discovered_test_ids:
+        raise ValueError("The custom collection profile must contain at least one test")
+    if profile not in {"full", "onsite", "custom"}:
+        raise ValueError(f"Unsupported or missing collection_profile: {profile!r}")
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))

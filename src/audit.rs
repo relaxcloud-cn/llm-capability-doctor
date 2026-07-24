@@ -4,10 +4,13 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use chrono::{DateTime, Local};
 use thiserror::Error;
 use url::Url;
 
+use crate::cli::CollectionProfile;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
@@ -18,6 +21,7 @@ pub struct RunMetadata {
     pub model: String,
     pub masked_api_key: String,
     pub selected_test_count: usize,
+    pub collection_profile: CollectionProfile,
     pub insecure: bool,
 }
 
@@ -189,8 +193,14 @@ impl AuditWriter {
     fn write_header(&mut self, metadata: &RunMetadata) -> Result<(), AuditError> {
         writeln!(self.writer, "========== MODEL DOCTOR RUN ==========")?;
         writeln!(self.writer, "run_id: {}", metadata.run_id)?;
-        writeln!(self.writer, "script_version: 0.8.0")?;
+        writeln!(self.writer, "script_version: 0.9.0")?;
         writeln!(self.writer, "collector_runtime: rust")?;
+        writeln!(
+            self.writer,
+            "collection_profile: {}",
+            metadata.collection_profile
+        )?;
+        writeln!(self.writer, "section_encoding: base64")?;
         writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v1")?;
         writeln!(
             self.writer,
@@ -286,15 +296,10 @@ impl AuditWriter {
             push_line(&mut output, "  --no-buffer \\");
         }
         push_line(&mut output, "  --data-binary @- \\");
-        push_line(
-            &mut output,
-            &format!("  {} <<'MODEL_DOCTOR_REQUEST_BODY'", shell_quote(&safe_url)),
-        );
-        push_line(&mut output, &safe_body);
-        push_line(&mut output, "MODEL_DOCTOR_REQUEST_BODY");
+        push_line(&mut output, &format!("  {}", shell_quote(&safe_url)));
         push_line(&mut output, "----- CURL COMMAND END -----");
         output.push('\n');
-        push_section(&mut output, "REQUEST BODY", &safe_body);
+        push_encoded_section(&mut output, "REQUEST BODY", &safe_body);
         push_line(&mut output, "----- RESPONSE METRICS BEGIN -----");
         push_line(
             &mut output,
@@ -336,8 +341,8 @@ impl AuditWriter {
         }
         push_line(&mut output, "----- RESPONSE HEADERS END -----");
         output.push('\n');
-        push_section(&mut output, "CURL STDERR", &safe_error);
-        push_section(&mut output, "RESPONSE BODY", &safe_response);
+        push_encoded_section(&mut output, "CURL STDERR", &safe_error);
+        push_encoded_section(&mut output, "RESPONSE BODY", &safe_response);
         push_line(
             &mut output,
             &format!("========== REQUEST {} END ==========", request.request_id),
@@ -355,11 +360,9 @@ impl AuditWriter {
     }
 }
 
-fn push_section(output: &mut String, name: &str, value: &str) {
+fn push_encoded_section(output: &mut String, name: &str, value: &str) {
     push_line(output, &format!("----- {name} BEGIN -----"));
-    if !value.is_empty() {
-        push_line(output, value);
-    }
+    push_line(output, &BASE64.encode(value.as_bytes()));
     push_line(output, &format!("----- {name} END -----"));
     output.push('\n');
 }

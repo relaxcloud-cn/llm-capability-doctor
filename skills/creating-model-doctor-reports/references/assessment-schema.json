@@ -1,38 +1,49 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v3",
-  "title": "LLM Capability Doctor Binary Assessment",
+  "$id": "llm-capability-doctor.assessment.v4",
+  "title": "LLM Capability Doctor Per-Test Binary Assessment",
   "type": "object",
   "required": [
     "schemaVersion",
     "generatedAt",
     "source",
     "run",
-    "overall",
+    "tokenTotals",
+    "warnings",
+    "summary",
     "categories",
     "tests"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v3"
+      "const": "llm-capability-doctor.assessment.v4"
     },
     "generatedAt": {
       "type": "string"
     },
     "source": {
       "type": "object",
-      "required": ["fileName", "size", "sha256"]
+      "required": ["fileName", "size", "sha256"],
+      "properties": {
+        "fileName": {"type": "string"},
+        "size": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
     },
     "run": {
       "type": "object"
     },
-    "overall": {
+    "tokenTotals": {
+      "type": "object"
+    },
+    "warnings": {
+      "type": "array"
+    },
+    "summary": {
       "type": "object",
-      "required": ["verdict", "counts", "blockers"],
+      "required": ["counts"],
       "properties": {
-        "verdict": {
-          "enum": ["READY", "BLOCKED"]
-        },
         "counts": {
           "type": "object",
           "required": ["PASS", "FAIL"],
@@ -41,9 +52,6 @@
             "FAIL": {"type": "integer", "minimum": 0}
           },
           "additionalProperties": false
-        },
-        "blockers": {
-          "type": "array"
         }
       },
       "additionalProperties": false
@@ -52,10 +60,9 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "status", "counts", "failures"],
+        "required": ["name", "counts"],
         "properties": {
           "name": {"type": "string"},
-          "status": {"enum": ["PASS", "FAIL"]},
           "counts": {
             "type": "object",
             "required": ["PASS", "FAIL"],
@@ -64,10 +71,6 @@
               "FAIL": {"type": "integer", "minimum": 0}
             },
             "additionalProperties": false
-          },
-          "failures": {
-            "type": "array",
-            "items": {"type": "string"}
           }
         },
         "additionalProperties": false
@@ -81,11 +84,11 @@
           "testId",
           "category",
           "name",
-          "gateLevel",
           "reviewedStatus",
-          "confidence",
           "conclusion",
           "logic",
+          "rawObservation",
+          "metrics",
           "evidenceRefs",
           "evidenceExcerpts",
           "limitations",
@@ -93,17 +96,70 @@
           "requests"
         ],
         "properties": {
-          "gateLevel": {
-            "enum": ["critical", "important", "observation"]
-          },
+          "testId": {"type": "string", "pattern": "^[0-9]{3}$"},
+          "category": {"type": "string"},
+          "name": {"type": "string"},
           "reviewedStatus": {
             "enum": ["PASS", "FAIL"]
           },
-          "confidence": {
-            "enum": ["high", "medium", "low"]
+          "conclusion": {"type": "string"},
+          "logic": {
+            "type": "object",
+            "required": [
+              "purpose",
+              "method",
+              "passCriteria",
+              "failCriteria",
+              "capabilityBoundary"
+            ],
+            "properties": {
+              "purpose": {"type": "string"},
+              "method": {"type": "string"},
+              "passCriteria": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+              },
+              "failCriteria": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1
+              },
+              "capabilityBoundary": {"type": "string"}
+            },
+            "additionalProperties": false
+          },
+          "rawObservation": {"type": "string"},
+          "metrics": {
+            "type": "array",
+            "items": {"type": "object"}
+          },
+          "evidenceRefs": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1
+          },
+          "evidenceExcerpts": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1
+          },
+          "limitations": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "retestInstructions": {
+            "type": "array",
+            "items": {"type": "string"}
+          },
+          "requests": {
+            "type": "array",
+            "items": {"type": "object"}
           }
-        }
+        },
+        "additionalProperties": false
       }
     }
-  }
+  },
+  "additionalProperties": false
 }
