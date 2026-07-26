@@ -1019,10 +1019,10 @@ run_core_thinking_test() {
   local id="$1" category="$2" name="$3"
   local body="" marker="MODEL_DOCTOR_THINKING_OK" request_refs=""
   if [[ "$id" == "033" ]]; then
-    body="$(core_thinking_body low "$marker" false)"
+    body="$(core_thinking_body low "Reply only ${marker}." false)"
     perform_request "$body" 0 "test-${id}-low" "$DETECTED_AUTH_MODE"
     request_refs="$LAST_REQUEST_ID"
-    body="$(core_thinking_body high "$marker" false)"
+    body="$(core_thinking_body high "Reply only ${marker}." false)"
     perform_request "$body" 0 "test-${id}-high" "$DETECTED_AUTH_MODE"
     request_refs="$(append_request_ref "$request_refs" "$LAST_REQUEST_ID")"
   elif [[ "$id" == "036" ]]; then

@@ -26,14 +26,14 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
         "033" => vec![
             thinking(
                 "test-033-low",
-                "MODEL_DOCTOR_THINKING_OK",
+                "Reply only MODEL_DOCTOR_THINKING_OK.",
                 "low",
                 false,
                 context,
             ),
             thinking(
                 "test-033-high",
-                "MODEL_DOCTOR_THINKING_OK",
+                "Reply only MODEL_DOCTOR_THINKING_OK.",
                 "high",
                 false,
                 context,
