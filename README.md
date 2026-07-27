@@ -12,29 +12,49 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 ### 1. 准备 CLI
 
-从 [Rust CLI 工作流](https://github.com/relaxcloud-cn/llm-capability-doctor/actions/workflows/rust-cli.yml)
-中选择来源为已批准 `main` 提交的成功运行记录，核对该运行记录的提交 SHA，再下载
-与客户服务器架构对应的 GitHub Actions 产物：
+从 [GitHub Releases](https://github.com/relaxcloud-cn/llm-capability-doctor/releases)
+下载与客户机器匹配的裸二进制：
 
-| 客户服务器 | Actions 产物 |
+| 客户机器 | Release 文件 |
 | --- | --- |
-| Linux x86_64 | `model-capability-doctor-x86_64-unknown-linux-gnu` |
-| Linux ARM64 | `model-capability-doctor-aarch64-unknown-linux-gnu` |
+| macOS Apple Silicon | `model-capability-doctor-v0.9.0-aarch64-apple-darwin` |
+| Linux x86_64 | `model-capability-doctor-v0.9.0-x86_64-unknown-linux-musl` |
+| Linux ARM64 | `model-capability-doctor-v0.9.0-aarch64-unknown-linux-musl` |
 
-解压后将其中的 `model-capability-doctor` 复制到客户服务器，并赋予执行权限：
+Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
+执行权限，不需要创建软链接。
+
+Linux x86_64：
 
 ```bash
+mv ./model-capability-doctor-v0.9.0-x86_64-unknown-linux-musl ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
 ```
 
-复制前记录二进制的 SHA-256，传入客户环境后重新计算并比对。报告分析应使用同一
-提交中的 `skills/creating-model-doctor-reports`，避免 CLI 与判定规则版本不匹配。
-macOS 上可以用 `shasum -a 256` 计算 SHA-256。
+Linux ARM64：
 
-这些二进制是 glibc 目标；较旧或非 glibc Linux 环境应先验证兼容性。仓库当前
-没有自动发布 GitHub Release，工作流产物从 Actions 页面下载。
+```bash
+mv ./model-capability-doctor-v0.9.0-aarch64-unknown-linux-musl ./model-capability-doctor
+chmod +x ./model-capability-doctor
+./model-capability-doctor --version
+sha256sum ./model-capability-doctor
+```
+
+macOS Apple Silicon：
+
+```bash
+mv ./model-capability-doctor-v0.9.0-aarch64-apple-darwin ./model-capability-doctor
+chmod +x ./model-capability-doctor
+./model-capability-doctor --version
+shasum -a 256 ./model-capability-doctor
+```
+
+Linux Release 文件采用静态链接的 MUSL 构建，适合带到离线客户环境直接运行。
+复制前记录二进制的 SHA-256，传入客户环境后重新计算并比对。报告分析应使用同一
+Release 对应提交中的 `skills/creating-model-doctor-reports`，避免 CLI 与判定规则
+版本不匹配。
 
 也可以在装有 Rust 1.85 或更高版本的同平台机器上构建：
 
@@ -43,6 +63,9 @@ cargo build --release --locked
 ```
 
 生成文件位于 `target/release/model-capability-doctor`。
+
+GitHub Actions 仍会构建 `x86_64-unknown-linux-gnu` 和
+`aarch64-unknown-linux-gnu` 流水线产物；现场手动发布和使用的是上表中的裸二进制。
 
 ### 2. 在客户环境执行一次检测
 
