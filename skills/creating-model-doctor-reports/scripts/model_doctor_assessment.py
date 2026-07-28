@@ -4,12 +4,57 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from copy import deepcopy
 from datetime import datetime, timezone
+import re
 from typing import Dict, List
 
 
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v4"
+REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v1"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v5"
 STATUSES = {"PASS", "FAIL"}
+FAILURE_KINDS = {
+    "DIRECT",
+    "CONTRACT_FACET",
+    "MEASUREMENT_UNAVAILABLE",
+    "EVIDENCE_GAP",
+}
+EVIDENCE_SUFFICIENCY = {"SUFFICIENT", "LIMITED", "INSUFFICIENT"}
+CAPABILITY_SCOPE_BOUNDARY = (
+    "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。"
+)
+READINESS_DECISION_PATTERN = re.compile(
+    r"(?<![A-Za-z])(?:READY|BLOCKED)(?![A-Za-z])|可上线|不可上线",
+    re.IGNORECASE,
+)
+REVIEW_FIELDS = {"schemaVersion", "tests", "capabilitySummary"}
+REVIEW_TEST_FIELDS = {
+    "testId",
+    "reviewedStatus",
+    "conclusion",
+    "logic",
+    "evidenceRefs",
+    "evidenceExcerpts",
+    "limitations",
+    "retestInstructions",
+    "failureAnalysis",
+}
+FAILURE_ANALYSIS_FIELDS = {
+    "failureKind",
+    "evidenceSufficiency",
+    "supportedClaim",
+    "unsupportedClaims",
+    "dependsOnTestIds",
+    "evidenceRefs",
+}
+CAPABILITY_SUMMARY_FIELDS = {"headline", "issues", "scopeBoundary"}
+CAPABILITY_ISSUE_FIELDS = {
+    "title",
+    "statement",
+    "testRefs",
+    "evidenceRefs",
+    "boundary",
+}
 LOGIC_FIELDS = {
     "purpose",
     "method",
@@ -25,6 +70,7 @@ ASSESSMENT_FIELDS = {
     "tokenTotals",
     "warnings",
     "summary",
+    "capabilitySummary",
     "categories",
     "tests",
 }
@@ -42,6 +88,7 @@ TEST_FIELDS = {
     "limitations",
     "retestInstructions",
     "requests",
+    "failureAnalysis",
 }
 
 
@@ -55,6 +102,41 @@ def _string_list(value: object, require_item: bool = False) -> bool:
     if require_item and not value:
         return False
     return all(_non_empty_string(item) for item in value)
+
+
+def _has_duplicate_strings(value: object) -> bool:
+    return isinstance(value, list) and len(value) != len(set(value))
+
+
+def _contains_readiness_decision(value: object) -> bool:
+    return isinstance(value, str) and bool(READINESS_DECISION_PATTERN.search(value))
+
+
+def _validate_issue_membership(
+    dependencies_by_test: Dict[str, List[str]],
+    issue_indexes_by_test: Dict[str, List[int]],
+) -> List[str]:
+    errors: List[str] = []
+    for test_id, indexes in sorted(issue_indexes_by_test.items()):
+        if len(indexes) != 1:
+            errors.append(
+                "FAIL test must appear in exactly one capabilitySummary issue: "
+                f"{test_id}"
+            )
+    for test_id, dependencies in sorted(dependencies_by_test.items()):
+        for dependency in dependencies:
+            source_indexes = issue_indexes_by_test.get(test_id, [])
+            dependency_indexes = issue_indexes_by_test.get(dependency, [])
+            if (
+                len(source_indexes) != 1
+                or len(dependency_indexes) != 1
+                or source_indexes[0] != dependency_indexes[0]
+            ):
+                errors.append(
+                    "Dependent FAIL tests must share one capabilitySummary issue: "
+                    f"{test_id} -> {dependency}"
+                )
+    return errors
 
 
 def _evidence_ref_exists(parsed: dict, reference: str) -> bool:
@@ -77,28 +159,75 @@ def _evidence_ref_belongs_to_test(
     return reference == f"test:{test_id}:manifest" and not request_refs
 
 
+def _validate_parsed_structure(parsed: object) -> List[str]:
+    if not isinstance(parsed, dict):
+        return ["Parsed evidence must be an object"]
+    tests = parsed.get("tests")
+    if not isinstance(tests, dict):
+        return ["Parsed tests must be an object keyed by test ID"]
+    requests = parsed.get("requests")
+    if not isinstance(requests, dict):
+        return ["Parsed requests must be an object keyed by request ID"]
+
+    errors: List[str] = []
+    for test_id, test in tests.items():
+        if not isinstance(test, dict):
+            errors.append(f"Parsed test {test_id} must be an object")
+            continue
+        for field in ("name", "category"):
+            if not _non_empty_string(test.get(field)):
+                errors.append(f"Parsed test {test_id} {field} must be non-empty")
+        refs = test.get("requestRefs")
+        if not _string_list(refs):
+            errors.append(f"Parsed test {test_id} requestRefs must be a string array")
+    for request_id, request in requests.items():
+        if not isinstance(request, dict):
+            errors.append(f"Parsed request {request_id} must be an object")
+    return errors
+
+
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
     """Return human-readable errors for Skill-authored binary reviews."""
 
-    errors: List[str] = []
+    errors = _validate_parsed_structure(parsed)
+    if errors:
+        return errors
     parsed_tests = parsed.get("tests", {})
     if not isinstance(reviews, dict):
-        return ["reviews must be a JSON object keyed by test ID"]
+        return [f"Reviews must use {REVIEW_SCHEMA_VERSION}"]
+
+    if reviews.get("schemaVersion") != REVIEW_SCHEMA_VERSION:
+        errors.append(f"Reviews must use {REVIEW_SCHEMA_VERSION}")
+    for field in sorted(set(reviews) - REVIEW_FIELDS):
+        errors.append(f"Reviews field {field} is not allowed")
+
+    test_reviews = reviews.get("tests")
+    if not isinstance(test_reviews, dict):
+        return errors + ["Reviews tests must be an object keyed by test ID"]
 
     for test_id in parsed_tests:
-        if test_id not in reviews:
+        if test_id not in test_reviews:
             errors.append(f"Test {test_id} review is missing")
 
-    for test_id in reviews:
+    for test_id in test_reviews:
         if test_id not in parsed_tests:
             errors.append(f"Review contains unknown test ID {test_id}")
 
-    for test_id, review in reviews.items():
+    statuses = {
+        test_id: review.get("reviewedStatus")
+        for test_id, review in test_reviews.items()
+        if test_id in parsed_tests and isinstance(review, dict)
+    }
+    dependencies_by_test: Dict[str, List[str]] = {}
+
+    for test_id, review in test_reviews.items():
         if test_id not in parsed_tests or not isinstance(review, dict):
             if not isinstance(review, dict):
                 errors.append(f"Test {test_id} review must be an object")
             continue
 
+        for field in sorted(set(review) - REVIEW_TEST_FIELDS):
+            errors.append(f"Test {test_id} review field {field} is not allowed")
         if review.get("testId") != test_id:
             errors.append(f"Test {test_id} testId must match its object key")
         status = review.get("reviewedStatus")
@@ -107,7 +236,7 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in review:
                 errors.append(
-                    f"Test {test_id} {obsolete_field} is not part of the v4 review contract"
+                    f"Test {test_id} {obsolete_field} is not part of the v5 review contract"
                 )
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
@@ -151,6 +280,181 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
             errors.append(
                 f"Test {test_id} retestInstructions must be a string array"
             )
+
+        failure_analysis = review.get("failureAnalysis")
+        if status == "FAIL" and failure_analysis is None:
+            errors.append(f"Test {test_id} failureAnalysis is required for FAIL")
+        if status == "PASS" and failure_analysis is not None:
+            errors.append(f"Test {test_id} failureAnalysis is only allowed for FAIL")
+        if failure_analysis is None:
+            continue
+        if not isinstance(failure_analysis, dict):
+            errors.append(f"Test {test_id} failureAnalysis must be an object")
+            continue
+
+        for field in sorted(set(failure_analysis) - FAILURE_ANALYSIS_FIELDS):
+            errors.append(
+                f"Test {test_id} failureAnalysis field {field} is not allowed"
+            )
+        if failure_analysis.get("failureKind") not in FAILURE_KINDS:
+            errors.append(f"Test {test_id} failureKind is invalid")
+        sufficiency = failure_analysis.get("evidenceSufficiency")
+        if sufficiency not in EVIDENCE_SUFFICIENCY:
+            errors.append(f"Test {test_id} evidenceSufficiency is invalid")
+        if not _non_empty_string(failure_analysis.get("supportedClaim")):
+            errors.append(f"Test {test_id} supportedClaim is required")
+        unsupported = failure_analysis.get("unsupportedClaims")
+        if not _string_list(unsupported):
+            errors.append(f"Test {test_id} unsupportedClaims must be a string array")
+        elif sufficiency in {"LIMITED", "INSUFFICIENT"} and not unsupported:
+            errors.append(
+                f"Test {test_id} {sufficiency} failureAnalysis requires "
+                "unsupportedClaims"
+            )
+
+        dependencies = failure_analysis.get("dependsOnTestIds")
+        if not _string_list(dependencies):
+            errors.append(f"Test {test_id} dependsOnTestIds must be a string array")
+        else:
+            if _has_duplicate_strings(dependencies):
+                errors.append(
+                    f"Test {test_id} dependsOnTestIds must contain unique values"
+                )
+            valid_dependencies = []
+            for dependency in dict.fromkeys(dependencies):
+                if dependency == test_id or statuses.get(dependency) != "FAIL":
+                    errors.append(
+                        f"Test {test_id} dependency must reference another FAIL test: "
+                        f"{dependency}"
+                    )
+                else:
+                    valid_dependencies.append(dependency)
+            if status == "FAIL":
+                dependencies_by_test[test_id] = valid_dependencies
+
+        failure_refs = failure_analysis.get("evidenceRefs")
+        if not _string_list(failure_refs, require_item=True):
+            errors.append(
+                f"Test {test_id} failureAnalysis evidenceRefs must contain evidence"
+            )
+        else:
+            if _has_duplicate_strings(failure_refs):
+                errors.append(
+                    f"Test {test_id} failureAnalysis evidenceRefs must contain "
+                    "unique values"
+                )
+            for reference in dict.fromkeys(failure_refs):
+                if not _evidence_ref_exists(parsed, reference):
+                    errors.append(
+                        f"Test {test_id} failureAnalysis evidence does not exist: "
+                        f"{reference}"
+                    )
+                elif not _evidence_ref_belongs_to_test(parsed, test_id, reference):
+                    errors.append(
+                        f"Test {test_id} failureAnalysis evidence is not referenced "
+                        f"by TEST-{test_id}: {reference}"
+                    )
+
+    summary = reviews.get("capabilitySummary")
+    if not isinstance(summary, dict):
+        return errors + ["capabilitySummary must be an object"]
+    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+        errors.append(f"capabilitySummary field {field} is not allowed")
+    if not _non_empty_string(summary.get("headline")):
+        errors.append("capabilitySummary headline is required")
+    elif _contains_readiness_decision(summary.get("headline")):
+        errors.append(
+            "capabilitySummary headline must not contain project readiness decisions"
+        )
+    if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
+        errors.append("capabilitySummary scopeBoundary is invalid")
+
+    issues = summary.get("issues")
+    if not isinstance(issues, list):
+        return errors + ["capabilitySummary issues must be an array"]
+    fail_ids = {test_id for test_id, status in statuses.items() if status == "FAIL"}
+    if fail_ids and not 1 <= len(issues) <= 5:
+        errors.append(
+            "capabilitySummary must contain 1 to 5 issues when FAIL tests exist"
+        )
+    if not fail_ids and issues:
+        errors.append("capabilitySummary issues must be empty when all tests PASS")
+
+    issue_indexes_by_test: Dict[str, List[int]] = {}
+    for index, issue in enumerate(issues, start=1):
+        if not isinstance(issue, dict):
+            errors.append(f"capabilitySummary issue {index} must be an object")
+            continue
+        for field in sorted(set(issue) - CAPABILITY_ISSUE_FIELDS):
+            errors.append(
+                f"capabilitySummary issue {index} field {field} is not allowed"
+            )
+        for field in ("title", "statement", "boundary"):
+            if not _non_empty_string(issue.get(field)):
+                errors.append(
+                    f"capabilitySummary issue {index} {field} is required"
+                )
+            elif _contains_readiness_decision(issue.get(field)):
+                errors.append(
+                    f"capabilitySummary issue {index} {field} must not contain "
+                    "project readiness decisions"
+                )
+
+        test_refs = issue.get("testRefs")
+        valid_test_refs = []
+        if not _string_list(test_refs, require_item=True):
+            errors.append(
+                f"capabilitySummary issue {index} testRefs must contain FAIL tests"
+            )
+        else:
+            if _has_duplicate_strings(test_refs):
+                errors.append(
+                    f"capabilitySummary issue {index} testRefs must contain "
+                    "unique values"
+                )
+            for test_ref in dict.fromkeys(test_refs):
+                if statuses.get(test_ref) != "FAIL":
+                    errors.append(
+                        f"capabilitySummary issue {index} must reference a FAIL test: "
+                        f"{test_ref}"
+                    )
+                else:
+                    valid_test_refs.append(test_ref)
+                    issue_indexes_by_test.setdefault(test_ref, []).append(index)
+
+        issue_refs = issue.get("evidenceRefs")
+        if not _string_list(issue_refs, require_item=True):
+            errors.append(
+                f"capabilitySummary issue {index} evidenceRefs must contain evidence"
+            )
+        else:
+            if _has_duplicate_strings(issue_refs):
+                errors.append(
+                    f"capabilitySummary issue {index} evidenceRefs must contain "
+                    "unique values"
+                )
+            for reference in dict.fromkeys(issue_refs):
+                if not any(
+                    _evidence_ref_belongs_to_test(parsed, test_ref, reference)
+                    for test_ref in valid_test_refs
+                ):
+                    errors.append(
+                        f"capabilitySummary issue {index} evidence does not belong "
+                        f"to its testRefs: {reference}"
+                    )
+
+    missing_fail_ids = sorted(fail_ids - set(issue_indexes_by_test))
+    if missing_fail_ids:
+        errors.append(
+            "capabilitySummary does not cover FAIL tests: "
+            + ", ".join(missing_fail_ids)
+        )
+    errors.extend(
+        _validate_issue_membership(
+            dependencies_by_test,
+            issue_indexes_by_test,
+        )
+    )
     return errors
 
 
@@ -171,7 +475,7 @@ def _raw_observation(requests: List[dict]) -> str:
 def _status_counts(items: List[dict]) -> Dict[str, int]:
     return {
         status: sum(
-            1 for item in items if item["reviewedStatus"] == status
+            1 for item in items if item.get("reviewedStatus") == status
         )
         for status in ("PASS", "FAIL")
     }
@@ -180,7 +484,8 @@ def _status_counts(items: List[dict]) -> Dict[str, int]:
 def _categories(items: List[dict]) -> List[dict]:
     category_items: "OrderedDict[str, List[dict]]" = OrderedDict()
     for item in items:
-        category_items.setdefault(item["category"], []).append(item)
+        category = str(item.get("category") or "未分类")
+        category_items.setdefault(category, []).append(item)
     return [
         {
             "name": name,
@@ -197,28 +502,30 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
     if errors:
         raise ValueError("Invalid reviews:\n" + "\n".join(errors))
 
+    test_reviews = reviews["tests"]
     items: List[dict] = []
     for test_id, test in parsed.get("tests", {}).items():
-        review = reviews[test_id]
+        review = test_reviews[test_id]
         request_refs = test.get("requestRefs", [])
         requests = [parsed["requests"][request_id] for request_id in request_refs]
-        items.append(
-            {
-                "testId": test_id,
-                "category": test.get("category", "Unclassified"),
-                "name": test.get("name", f"Test {test_id}"),
-                "reviewedStatus": review["reviewedStatus"],
-                "conclusion": review["conclusion"],
-                "logic": review["logic"],
-                "rawObservation": _raw_observation(requests),
-                "metrics": [request.get("metrics", {}) for request in requests],
-                "evidenceRefs": review["evidenceRefs"],
-                "evidenceExcerpts": review["evidenceExcerpts"],
-                "limitations": review["limitations"],
-                "retestInstructions": review["retestInstructions"],
-                "requests": requests,
-            }
-        )
+        item = {
+            "testId": test_id,
+            "category": test.get("category", "Unclassified"),
+            "name": test.get("name", f"Test {test_id}"),
+            "reviewedStatus": review["reviewedStatus"],
+            "conclusion": review["conclusion"],
+            "logic": review["logic"],
+            "rawObservation": _raw_observation(requests),
+            "metrics": [request.get("metrics", {}) for request in requests],
+            "evidenceRefs": review["evidenceRefs"],
+            "evidenceExcerpts": review["evidenceExcerpts"],
+            "limitations": review["limitations"],
+            "retestInstructions": review["retestInstructions"],
+            "requests": requests,
+        }
+        if review["reviewedStatus"] == "FAIL":
+            item["failureAnalysis"] = deepcopy(review["failureAnalysis"])
+        items.append(item)
 
     return {
         "schemaVersion": ASSESSMENT_SCHEMA_VERSION,
@@ -228,9 +535,214 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "summary": {"counts": _status_counts(items)},
+        "capabilitySummary": deepcopy(reviews["capabilitySummary"]),
         "categories": _categories(items),
         "tests": items,
     }
+
+
+def _assessment_evidence_ref_belongs_to_item(item: dict, reference: str) -> bool:
+    if reference.startswith("request:"):
+        request_id = reference.split(":", 1)[1]
+        return any(
+            request.get("request_id") == request_id
+            for request in item.get("requests", [])
+        )
+    return (
+        reference == f"test:{item.get('testId')}:manifest"
+        and not item.get("requests")
+    )
+
+
+def _validate_assessment_failure_analysis(
+    item: dict,
+    statuses: Dict[str, str],
+) -> List[str]:
+    errors: List[str] = []
+    test_id = item.get("testId", "unknown")
+    status = item.get("reviewedStatus")
+    analysis = item.get("failureAnalysis")
+    if status == "FAIL" and analysis is None:
+        return [f"Test {test_id} failureAnalysis is required for FAIL"]
+    if status == "PASS" and analysis is not None:
+        return [f"Test {test_id} failureAnalysis is only allowed for FAIL"]
+    if analysis is None:
+        return errors
+    if not isinstance(analysis, dict):
+        return [f"Test {test_id} failureAnalysis must be an object"]
+
+    for field in sorted(set(analysis) - FAILURE_ANALYSIS_FIELDS):
+        errors.append(f"Test {test_id} failureAnalysis field {field} is not allowed")
+    if analysis.get("failureKind") not in FAILURE_KINDS:
+        errors.append(f"Test {test_id} failureKind is invalid")
+    sufficiency = analysis.get("evidenceSufficiency")
+    if sufficiency not in EVIDENCE_SUFFICIENCY:
+        errors.append(f"Test {test_id} evidenceSufficiency is invalid")
+    if not _non_empty_string(analysis.get("supportedClaim")):
+        errors.append(f"Test {test_id} supportedClaim is required")
+    unsupported = analysis.get("unsupportedClaims")
+    if not _string_list(unsupported):
+        errors.append(f"Test {test_id} unsupportedClaims must be a string array")
+    elif sufficiency in {"LIMITED", "INSUFFICIENT"} and not unsupported:
+        errors.append(
+            f"Test {test_id} {sufficiency} failureAnalysis requires unsupportedClaims"
+        )
+
+    dependencies = analysis.get("dependsOnTestIds")
+    if not _string_list(dependencies):
+        errors.append(f"Test {test_id} dependsOnTestIds must be a string array")
+    else:
+        if _has_duplicate_strings(dependencies):
+            errors.append(
+                f"Test {test_id} dependsOnTestIds must contain unique values"
+            )
+        for dependency in dict.fromkeys(dependencies):
+            if dependency == test_id or statuses.get(dependency) != "FAIL":
+                errors.append(
+                    f"Test {test_id} dependency must reference another FAIL test: "
+                    f"{dependency}"
+                )
+
+    evidence_refs = analysis.get("evidenceRefs")
+    if not _string_list(evidence_refs, require_item=True):
+        errors.append(
+            f"Test {test_id} failureAnalysis evidenceRefs must contain evidence"
+        )
+    else:
+        if _has_duplicate_strings(evidence_refs):
+            errors.append(
+                f"Test {test_id} failureAnalysis evidenceRefs must contain unique values"
+            )
+        for reference in dict.fromkeys(evidence_refs):
+            if not _assessment_evidence_ref_belongs_to_item(item, reference):
+                errors.append(
+                    f"Test {test_id} failureAnalysis evidence does not belong "
+                    f"to the test: {reference}"
+                )
+    return errors
+
+
+def _validate_assessment_summary(items: List[dict], summary: object) -> List[str]:
+    errors: List[str] = []
+    if not isinstance(summary, dict):
+        return ["capabilitySummary must be an object"]
+    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+        errors.append(f"capabilitySummary field {field} is not allowed")
+    if not _non_empty_string(summary.get("headline")):
+        errors.append("capabilitySummary headline is required")
+    elif _contains_readiness_decision(summary.get("headline")):
+        errors.append(
+            "capabilitySummary headline must not contain project readiness decisions"
+        )
+    if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
+        errors.append("capabilitySummary scopeBoundary is invalid")
+
+    issues = summary.get("issues")
+    if not isinstance(issues, list):
+        return errors + ["capabilitySummary issues must be an array"]
+    items_by_id = {item.get("testId"): item for item in items}
+    fail_ids = {
+        test_id
+        for test_id, item in items_by_id.items()
+        if item.get("reviewedStatus") == "FAIL"
+    }
+    dependencies_by_test = {
+        test_id: [
+            dependency
+            for dependency in dict.fromkeys(
+                item.get("failureAnalysis", {}).get("dependsOnTestIds", [])
+            )
+            if dependency in fail_ids and dependency != test_id
+        ]
+        for test_id, item in items_by_id.items()
+        if test_id in fail_ids
+        and isinstance(item.get("failureAnalysis"), dict)
+        and _string_list(
+            item.get("failureAnalysis", {}).get("dependsOnTestIds")
+        )
+    }
+    if fail_ids and not 1 <= len(issues) <= 5:
+        errors.append(
+            "capabilitySummary must contain 1 to 5 issues when FAIL tests exist"
+        )
+    if not fail_ids and issues:
+        errors.append("capabilitySummary issues must be empty when all tests PASS")
+
+    issue_indexes_by_test: Dict[str, List[int]] = {}
+    for index, issue in enumerate(issues, start=1):
+        if not isinstance(issue, dict):
+            errors.append(f"capabilitySummary issue {index} must be an object")
+            continue
+        for field in sorted(set(issue) - CAPABILITY_ISSUE_FIELDS):
+            errors.append(
+                f"capabilitySummary issue {index} field {field} is not allowed"
+            )
+        for field in ("title", "statement", "boundary"):
+            if not _non_empty_string(issue.get(field)):
+                errors.append(f"capabilitySummary issue {index} {field} is required")
+            elif _contains_readiness_decision(issue.get(field)):
+                errors.append(
+                    f"capabilitySummary issue {index} {field} must not contain "
+                    "project readiness decisions"
+                )
+
+        valid_items = []
+        test_refs = issue.get("testRefs")
+        if not _string_list(test_refs, require_item=True):
+            errors.append(
+                f"capabilitySummary issue {index} testRefs must contain FAIL tests"
+            )
+        else:
+            if _has_duplicate_strings(test_refs):
+                errors.append(
+                    f"capabilitySummary issue {index} testRefs must contain "
+                    "unique values"
+                )
+            for test_ref in dict.fromkeys(test_refs):
+                item = items_by_id.get(test_ref)
+                if not item or item.get("reviewedStatus") != "FAIL":
+                    errors.append(
+                        f"capabilitySummary issue {index} must reference a FAIL test: "
+                        f"{test_ref}"
+                    )
+                else:
+                    valid_items.append(item)
+                    issue_indexes_by_test.setdefault(test_ref, []).append(index)
+
+        evidence_refs = issue.get("evidenceRefs")
+        if not _string_list(evidence_refs, require_item=True):
+            errors.append(
+                f"capabilitySummary issue {index} evidenceRefs must contain evidence"
+            )
+        else:
+            if _has_duplicate_strings(evidence_refs):
+                errors.append(
+                    f"capabilitySummary issue {index} evidenceRefs must contain "
+                    "unique values"
+                )
+            for reference in dict.fromkeys(evidence_refs):
+                if not any(
+                    _assessment_evidence_ref_belongs_to_item(item, reference)
+                    for item in valid_items
+                ):
+                    errors.append(
+                        f"capabilitySummary issue {index} evidence does not belong "
+                        f"to its testRefs: {reference}"
+                    )
+
+    missing_fail_ids = sorted(fail_ids - set(issue_indexes_by_test))
+    if missing_fail_ids:
+        errors.append(
+            "capabilitySummary does not cover FAIL tests: "
+            + ", ".join(missing_fail_ids)
+        )
+    errors.extend(
+        _validate_issue_membership(
+            dependencies_by_test,
+            issue_indexes_by_test,
+        )
+    )
+    return errors
 
 
 def validate_assessment(assessment: dict) -> List[str]:
@@ -244,17 +756,27 @@ def validate_assessment(assessment: dict) -> List[str]:
     items = assessment.get("tests")
     if not isinstance(items, list):
         return errors + ["tests must be an array"]
-    if any(item.get("reviewedStatus") not in STATUSES for item in items):
+    object_items = [item for item in items if isinstance(item, dict)]
+    if len(object_items) != len(items):
+        errors.append("tests contain a non-object item")
+    if any(item.get("reviewedStatus") not in STATUSES for item in object_items):
         errors.append("tests contain a non-binary reviewedStatus")
-    for item in items:
+    statuses = {
+        item.get("testId"): item.get("reviewedStatus")
+        for item in object_items
+    }
+    for item in object_items:
         test_id = item.get("testId", "unknown")
         for field in sorted(set(item) - TEST_FIELDS):
             errors.append(f"Test {test_id} field {field} is not allowed")
+        for field in ("testId", "category", "name", "conclusion", "rawObservation"):
+            if not _non_empty_string(item.get(field)):
+                errors.append(f"Test {test_id} {field} is required")
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test v4 contract"
+                    "the per-test v5 contract"
                 )
         logic = item.get("logic")
         if isinstance(logic, dict):
@@ -262,13 +784,20 @@ def validate_assessment(assessment: dict) -> List[str]:
                 errors.append(
                     f"Test {test_id} logic.{field} is not allowed"
                 )
-    expected_counts = _status_counts(items)
+        errors.extend(_validate_assessment_failure_analysis(item, statuses))
+    expected_counts = _status_counts(object_items)
     if assessment.get("summary", {}).get("counts") != expected_counts:
         errors.append("summary counts do not match test results")
-    if assessment.get("categories") != _categories(items):
+    if assessment.get("categories") != _categories(object_items):
         errors.append("categories do not match test results")
+    errors.extend(
+        _validate_assessment_summary(
+            object_items,
+            assessment.get("capabilitySummary"),
+        )
+    )
     if "overall" in assessment:
-        errors.append("overall is not part of the per-test v4 contract")
+        errors.append("overall is not part of the assessment v5 contract")
     if "path" in assessment.get("source", {}):
         errors.append("source must not expose an absolute path")
     return errors

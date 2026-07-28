@@ -11,7 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Sequence
 
-from model_doctor_assessment import assemble_assessment, validate_reviews
+from model_doctor_assessment import (
+    REVIEW_SCHEMA_VERSION,
+    assemble_assessment,
+    validate_reviews,
+)
 from model_doctor_html import render_report
 from model_doctor_log import PARSED_SCHEMA_VERSION, parse_log, test_packet
 
@@ -120,7 +124,7 @@ def _validated_inputs(parsed_path: Path, reviews_path: Path) -> tuple[dict, dict
         raise CliUsageError("Parsed evidence must be a JSON object")
     _require_parsed_schema(parsed)
     if not isinstance(reviews, dict):
-        raise CliUsageError("Reviews must be a JSON object keyed by test ID")
+        raise CliUsageError(f"Reviews must use {REVIEW_SCHEMA_VERSION}")
     return parsed, reviews, validate_reviews(parsed, reviews)
 
 

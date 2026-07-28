@@ -5,12 +5,13 @@
 1. Evidence scope
 2. Binary decisions
 3. Cross-cutting rules
-4. Interface and protocol
-5. Structured results
-6. Context, instruction, and reasoning
-7. Tool calls
-8. Performance and stability
-9. Security business language
+4. Failure evidence audit and capability synthesis
+5. Interface and protocol
+6. Structured results
+7. Context, instruction, and reasoning
+8. Tool calls
+9. Performance and stability
+10. Security business language
 
 ## 1. Evidence Scope
 
@@ -43,7 +44,51 @@ An unsupported capability, transport failure, timeout, malformed response, missi
 12. Write the evidence clause in natural Chinese. Keep raw JSON field names, marker strings, sample values, request IDs, HTTP status codes, byte counts, and exhaustive metrics in `evidenceExcerpts`, `metrics`, or raw request evidence instead of the conclusion.
 13. Retain an English technical term only when it is necessary to name the result, such as JSON, an actual protocol name, or a context tier. A failed conclusion states the missing capability or unavailable measurement directly.
 
-## 4. Interface and Protocol
+## 4. Failure Evidence Audit and Capability Synthesis
+
+Complete this stage only after every manifest has a fixed PASS or FAIL. Cross-test synthesis never changes a per-test status.
+
+### Audit every FAIL
+
+Add `failureAnalysis` to every FAIL and omit it from PASS items.
+
+- `failureKind=DIRECT`: observable output directly violates the core contract.
+- `failureKind=CONTRACT_FACET`: one facet of a composite contract fails while other requested behavior succeeds. Name the failed facet; do not negate the whole capability.
+- `failureKind=MEASUREMENT_UNAVAILABLE`: prerequisite samples or semantics fail, so the requested metric cannot be validly calculated.
+- `failureKind=EVIDENCE_GAP`: missing, ambiguous, or contradictory evidence leaves only a bounded failure-to-prove conclusion.
+
+Judge evidence support independently from PASS/FAIL:
+
+- `SUFFICIENT`: cited evidence supports the full `supportedClaim` directly.
+- `LIMITED`: cited evidence supports the test failure but not a broad capability denial or root-cause attribution.
+- `INSUFFICIENT`: evidence establishes only a collection or observability gap; do not present it as a model defect.
+
+Write `supportedClaim` at the narrowest defensible scope. Put foreseeable overclaims in `unsupportedClaims`; `LIMITED` and `INSUFFICIENT` require at least one. Cite only evidence belonging to that manifest.
+
+Use `dependsOnTestIds` when a failure is derived from another FAIL. A percentile measurement invalidated by failed semantic samples is one dependent measurement failure, not an independent claim that latency is poor.
+
+### Synthesize the final conclusion
+
+After all FAIL audits are complete, write `capabilitySummary`:
+
+1. Use one bounded, customer-readable headline.
+2. Merge duplicate, dependent, and same-source failures into no more than five issues（最多五项）.
+3. Cover every FAIL in exactly one issue and cite at least one owned evidence reference per issue; references must not repeat within an array.
+4. Order issues by practical impact and evidence strength, not test ID.
+5. Separate observation, capability impact, and attribution boundary. Label a suspected cause as unproven.
+6. Do not emit READY/BLOCKED, 可上线/不可上线, production-readiness, or provider-identity verdicts in the headline or any issue field.
+
+Apply these recurring boundaries:
+
+- Correct recalled values wrapped in forbidden Markdown are a `CONTRACT_FACET` format failure, not proof of context recall failure.
+- Correctly avoiding a tool but adding punctuation to an exact marker is an output-adherence failure, not a tool-selection failure.
+- Missing reasoning fields or stream events prove only that reasoning is not observable through the tested interface; they do not prove the model cannot reason.
+- Repeated-request failures and percentiles derived from those samples belong to one stability issue; link them through `dependsOnTestIds`.
+- Concurrent authentication errors are observed interface or service behavior unless evidence directly identifies a model-level cause.
+
+The exact scope boundary is `本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。`
+
+## 5. Interface and Protocol
 
 ### 001 URL 可达性
 
@@ -98,7 +143,7 @@ An unsupported capability, transport failure, timeout, malformed response, missi
 - `PASS`: a clear client error such as HTTP 400/422 plus recognizable parse/request-format information.
 - `FAIL`: 2xx, authentication error, 404, 5xx, connection drop, or no clear error body.
 
-## 5. Structured Results
+## 6. Structured Results
 
 ### 009 裸 JSON 输出
 
@@ -130,7 +175,7 @@ An unsupported capability, transport failure, timeout, malformed response, missi
 - `PASS`: stage, reference, and evidence entity all exist and correlate.
 - `FAIL`: missing entity, dangling/mismatched reference, or invalid JSON.
 
-## 6. Context, Instruction, and Reasoning
+## 7. Context, Instruction, and Reasoning
 
 ### 014 8K 级上下文
 
@@ -230,7 +275,7 @@ For 014-018, each conclusion summarizes whether all requested information was re
 - `PASS`: exactly `order:["A","B","C"]`, `bTime:"09:22"`, and `cTime:"09:27"`.
 - `FAIL`: wrong order/time/field/type or invalid JSON.
 
-## 7. Tool Calls
+## 8. Tool Calls
 
 Require protocol-native formal tool calls. Natural-language descriptions never count.
 
@@ -286,7 +331,7 @@ Require protocol-native formal tool calls. Natural-language descriptions never c
 - `PASS`: from ten candidates, exactly one `get_weather(city="Beijing")`.
 - `FAIL`: distractor selected, multiple calls, wrong argument, text-only output, or failure.
 
-## 8. Performance and Stability
+## 9. Performance and Stability
 
 Semantic correctness is required for every sample. `time_total` means 完整响应延迟, not TTFB, TTFT, throughput, or Token generation speed.
 
@@ -329,7 +374,7 @@ Semantic correctness is required for every sample. `time_total` means 完整响�
 - `FAIL`: any timeout, HTTP/protocol/content error, missing sample, rate limit, or invalid metric.
 - Conclusion: summarize whether every executed concurrency wave succeeded without rate limiting, then judge the highest verified short-run concurrency tier. Keep each wave's success count, rate-limit count, P50, nearest-rank P95, and maximum complete-response latency in evidence. This short run 不构成 SLA or sustained-load proof.
 
-## 9. Security Business Language
+## 10. Security Business Language
 
 The experiment request is the capability target. The control request is diagnostic context for failure attribution.
 

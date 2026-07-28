@@ -72,6 +72,8 @@ SECRET_JSON_KEYS = SECRET_QUERY_KEYS | {
     "apiKey",
     "clientSecret",
     "authorization",
+    "cookie",
+    "set-cookie",
 }
 SECRET_HEADER_NAMES = {
     "authorization",
@@ -89,6 +91,39 @@ FORBIDDEN_MANIFEST_FIELDS = {
     "conclusion",
     "status",
 }
+
+CURL_HEADER_PATTERN = re.compile(
+    r"(?P<option>(?:^|\s)(?:-H|--header)(?:\s+|=))"
+    r"(?P<quote>['\"])(?P<name>[A-Za-z0-9-]+)"
+    r"(?P<separator>:[ \t]*)(?P<value>[^\r\n]*?)(?P=quote)",
+    re.IGNORECASE,
+)
+
+
+def _record_secret(secrets: Set[str], name: str, value: str) -> None:
+    item = value.strip()
+    if not item or item == "[REDACTED]":
+        return
+    secrets.add(item)
+    if item.lower().startswith("bearer ") and len(item) > 7:
+        secrets.add(item[7:].strip())
+    if name.lower() in {"cookie", "set-cookie"}:
+        for part in item.split(";"):
+            if "=" in part:
+                cookie_value = part.split("=", 1)[1].strip()
+                if cookie_value:
+                    secrets.add(cookie_value)
+
+
+def _secret_is_distinctive(value: str) -> bool:
+    if len(value) < 8 or value.lower() in {"true", "false", "null", "none"}:
+        return False
+    if len(value) >= 16:
+        return True
+    has_alpha = bool(re.search(r"[A-Za-z]", value))
+    has_digit = bool(re.search(r"[0-9]", value))
+    has_symbol = bool(re.search(r"[^A-Za-z0-9\s]", value))
+    return (has_alpha and has_digit) or has_symbol
 
 
 def _discover_secrets(value: str) -> Set[str]:
@@ -108,11 +143,15 @@ def _discover_secrets(value: str) -> Set[str]:
     header_pattern = re.compile(r"(?im)^([A-Za-z0-9-]+):[ \t]*(.+)$")
     for match in header_pattern.finditer(value):
         if match.group(1).lower() in SECRET_HEADER_NAMES:
-            item = match.group(2).strip()
-            if item and item != "[REDACTED]":
-                secrets.add(item)
-                if item.lower().startswith("bearer ") and len(item) > 7:
-                    secrets.add(item[7:].strip())
+            _record_secret(secrets, match.group(1), match.group(2))
+
+    for match in CURL_HEADER_PATTERN.finditer(value):
+        if match.group("name").lower() in SECRET_HEADER_NAMES:
+            _record_secret(
+                secrets,
+                match.group("name"),
+                match.group("value"),
+            )
 
     json_key_pattern = re.compile(
         r'"('
@@ -121,9 +160,7 @@ def _discover_secrets(value: str) -> Set[str]:
         re.IGNORECASE,
     )
     for match in json_key_pattern.finditer(value):
-        item = match.group(2)
-        if item and item != "[REDACTED]":
-            secrets.add(item)
+        _record_secret(secrets, match.group(1), match.group(2))
 
     return secrets
 
@@ -145,8 +182,18 @@ def redact_text(value: str, discovered_secrets: Optional[Set[str]] = None) -> st
         ),
         redacted,
     )
+    redacted = CURL_HEADER_PATTERN.sub(
+        lambda match: (
+            f'{match.group("option")}{match.group("quote")}'
+            f'{match.group("name")}{match.group("separator")}[REDACTED]'
+            f'{match.group("quote")}'
+            if match.group("name").lower() in SECRET_HEADER_NAMES
+            else match.group(0)
+        ),
+        redacted,
+    )
     redacted = re.sub(
-        r'(?i)("(?:api_key|apiKey|access_token|token|client_secret|clientSecret|password|authorization)"\s*:\s*)"(?:[^"\\]|\\.)*"',
+        r'(?i)("(?:api_key|apiKey|access_token|token|client_secret|clientSecret|password|authorization|cookie|set-cookie)"\s*:\s*)"(?:[^"\\]|\\.)*"',
         r'\1"[REDACTED]"',
         redacted,
     )
@@ -157,17 +204,14 @@ def redact_text(value: str, discovered_secrets: Optional[Set[str]] = None) -> st
     )
 
     for secret in sorted(secrets, key=len, reverse=True):
-        if (
-            secret != "[REDACTED]"
-            and (secret in propagated_secrets or len(secret) >= 4)
-        ):
+        if secret != "[REDACTED]" and _secret_is_distinctive(secret):
             redacted = redacted.replace(secret, "[REDACTED]")
     return redacted
 
 
 def _credential_is_masked(value: str) -> bool:
     return value in {"[MASKED]", "[REDACTED]"} or bool(
-        re.search(r"\*{4,}", value)
+        re.fullmatch(r"\*{4,}", value)
     )
 
 
@@ -391,6 +435,11 @@ def parse_log(path: Path) -> Dict[str, object]:
                 f"TEST-{identifier} contains forbidden judgment fields: "
                 f"{', '.join(sorted(forbidden))}"
             )
+        for field in ("name", "category"):
+            if not metadata.get(field, "").strip():
+                raise ValueError(
+                    f"TEST-{identifier} {field} must be non-empty"
+                )
         if "request_refs" not in metadata:
             raise ValueError(f"TEST-{identifier} is missing request_refs")
         refs = _parse_request_refs(metadata.pop("request_refs"), identifier)

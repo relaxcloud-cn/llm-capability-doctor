@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v4",
-  "title": "LLM Capability Doctor Per-Test Binary Assessment",
+  "$id": "llm-capability-doctor.assessment.v5",
+  "title": "LLM Capability Doctor Evidence-Bound Assessment",
   "type": "object",
   "required": [
     "schemaVersion",
@@ -11,12 +11,13 @@
     "tokenTotals",
     "warnings",
     "summary",
+    "capabilitySummary",
     "categories",
     "tests"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v4"
+      "const": "llm-capability-doctor.assessment.v5"
     },
     "generatedAt": {
       "type": "string"
@@ -55,6 +56,9 @@
         }
       },
       "additionalProperties": false
+    },
+    "capabilitySummary": {
+      "$ref": "#/$defs/capabilitySummary"
     },
     "categories": {
       "type": "array",
@@ -97,12 +101,12 @@
         ],
         "properties": {
           "testId": {"type": "string", "pattern": "^[0-9]{3}$"},
-          "category": {"type": "string"},
-          "name": {"type": "string"},
+          "category": {"type": "string", "minLength": 1},
+          "name": {"type": "string", "minLength": 1},
           "reviewedStatus": {
             "enum": ["PASS", "FAIL"]
           },
-          "conclusion": {"type": "string"},
+          "conclusion": {"type": "string", "minLength": 1},
           "logic": {
             "type": "object",
             "required": [
@@ -129,36 +133,154 @@
             },
             "additionalProperties": false
           },
-          "rawObservation": {"type": "string"},
+          "rawObservation": {"type": "string", "minLength": 1},
           "metrics": {
             "type": "array",
             "items": {"type": "object"}
           },
           "evidenceRefs": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {"type": "string", "minLength": 1},
             "minItems": 1
           },
           "evidenceExcerpts": {
             "type": "array",
-            "items": {"type": "string"},
+            "items": {"type": "string", "minLength": 1},
             "minItems": 1
           },
           "limitations": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {"type": "string", "minLength": 1}
           },
           "retestInstructions": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {"type": "string", "minLength": 1}
           },
           "requests": {
             "type": "array",
             "items": {"type": "object"}
+          },
+          "failureAnalysis": {
+            "$ref": "#/$defs/failureAnalysis"
           }
         },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "reviewedStatus": {"const": "FAIL"}
+              },
+              "required": ["reviewedStatus"]
+            },
+            "then": {"required": ["failureAnalysis"]},
+            "else": {"not": {"required": ["failureAnalysis"]}}
+          }
+        ],
         "additionalProperties": false
       }
+    }
+  },
+  "$defs": {
+    "failureAnalysis": {
+      "type": "object",
+      "required": [
+        "failureKind",
+        "evidenceSufficiency",
+        "supportedClaim",
+        "unsupportedClaims",
+        "dependsOnTestIds",
+        "evidenceRefs"
+      ],
+      "properties": {
+        "failureKind": {
+          "enum": [
+            "DIRECT",
+            "CONTRACT_FACET",
+            "MEASUREMENT_UNAVAILABLE",
+            "EVIDENCE_GAP"
+          ]
+        },
+        "evidenceSufficiency": {
+          "enum": ["SUFFICIENT", "LIMITED", "INSUFFICIENT"]
+        },
+        "supportedClaim": {"type": "string", "minLength": 1},
+        "unsupportedClaims": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1}
+        },
+        "dependsOnTestIds": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9]{3}$"},
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilityIssue": {
+      "type": "object",
+      "required": [
+        "title",
+        "statement",
+        "testRefs",
+        "evidenceRefs",
+        "boundary"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\s\\S]*(?:(?:^|[^A-Za-z])(?:[Rr][Ee][Aa][Dd][Yy]|[Bb][Ll][Oo][Cc][Kk][Ee][Dd])(?![A-Za-z])|可上线|不可上线))[\\s\\S]+$"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\s\\S]*(?:(?:^|[^A-Za-z])(?:[Rr][Ee][Aa][Dd][Yy]|[Bb][Ll][Oo][Cc][Kk][Ee][Dd])(?![A-Za-z])|可上线|不可上线))[\\s\\S]+$"
+        },
+        "testRefs": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[0-9]{3}$"},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "boundary": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\s\\S]*(?:(?:^|[^A-Za-z])(?:[Rr][Ee][Aa][Dd][Yy]|[Bb][Ll][Oo][Cc][Kk][Ee][Dd])(?![A-Za-z])|可上线|不可上线))[\\s\\S]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "capabilitySummary": {
+      "type": "object",
+      "required": ["headline", "issues", "scopeBoundary"],
+      "properties": {
+        "headline": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\s\\S]*(?:(?:^|[^A-Za-z])(?:[Rr][Ee][Aa][Dd][Yy]|[Bb][Ll][Oo][Cc][Kk][Ee][Dd])(?![A-Za-z])|可上线|不可上线))[\\s\\S]+$"
+        },
+        "issues": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/capabilityIssue"},
+          "maxItems": 5
+        },
+        "scopeBoundary": {
+          "const": "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。"
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

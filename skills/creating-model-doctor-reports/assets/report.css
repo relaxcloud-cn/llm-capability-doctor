@@ -79,6 +79,63 @@ button {
   overflow-wrap: anywhere;
 }
 
+.final-conclusion {
+  margin: 0 0 24px;
+  padding: 0 0 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.final-conclusion-heading {
+  margin: 0 0 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.final-conclusion-lead {
+  margin: 0 0 0.75rem;
+  font-weight: 500;
+}
+
+.final-conclusion-list {
+  margin: 0;
+  padding-left: 1.35rem;
+}
+
+.final-conclusion-list li {
+  padding-left: 0.15rem;
+}
+
+.final-conclusion-list li + li {
+  margin-top: 0.65rem;
+}
+
+.final-conclusion-list p {
+  margin: 0;
+}
+
+.final-conclusion-list strong {
+  font-weight: 600;
+}
+
+.final-conclusion-boundary,
+.final-conclusion-refs,
+.final-conclusion-scope {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.final-conclusion-list .final-conclusion-boundary,
+.final-conclusion-list .final-conclusion-refs {
+  margin-top: 0.2rem;
+}
+
+.final-conclusion-scope {
+  margin: 0.75rem 0 0;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -257,6 +314,27 @@ tbody th {
   padding-left: 1.2rem;
 }
 
+.failure-analysis-details {
+  margin: 0.35rem 0 0;
+}
+
+.failure-analysis-details > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.25rem 0;
+}
+
+.failure-analysis-details dt {
+  color: var(--muted-foreground);
+}
+
+.failure-analysis-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .turn-evidence h4 {
   display: flex;
   flex-wrap: wrap;
@@ -316,6 +394,11 @@ pre {
   }
 
   .run-metadata > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
+  .failure-analysis-details > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
   }
@@ -420,9 +503,15 @@ pre {
     max-width: none;
   }
 
-  .result-group,
-  .evidence-row {
+  .result-row,
+  .logic-item {
     break-inside: avoid;
+  }
+
+  .evidence-row,
+  .evidence-row[hidden] {
+    display: table-row;
+    break-inside: auto;
   }
 
   .row-toggle {
@@ -430,6 +519,8 @@ pre {
   }
 
   pre {
-    max-height: 180px;
+    max-height: none;
+    overflow: visible;
+    break-inside: auto;
   }
 }

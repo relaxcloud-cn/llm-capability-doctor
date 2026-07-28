@@ -15,6 +15,11 @@ STATUS_LABELS = {
     "PASS": "通过",
     "FAIL": "未通过",
 }
+SUFFICIENCY_LABELS = {
+    "SUFFICIENT": "证据充分",
+    "LIMITED": "证据有限",
+    "INSUFFICIENT": "证据不足",
+}
 
 
 def _e(value: object) -> str:
@@ -85,6 +90,71 @@ def _run_metadata(run: dict, summary: dict) -> str:
     )
 
 
+def _capability_summary(summary: dict) -> str:
+    issues = summary.get("issues", [])
+    issue_list = ""
+    if issues:
+        rendered_issues = []
+        for issue in issues:
+            test_refs = "、".join(str(value) for value in issue.get("testRefs", []))
+            rendered_issues.append(
+                "<li>"
+                f'<p><strong>{_e(issue.get("title"))}：</strong>'
+                f'{_e(issue.get("statement"))}</p>'
+                f'<p class="final-conclusion-boundary">{_e(issue.get("boundary"))}</p>'
+                f'<p class="final-conclusion-refs">关联检测项：{_e(test_refs)}</p>'
+                "</li>"
+            )
+        issue_list = (
+            '<ol class="final-conclusion-list">'
+            + "".join(rendered_issues)
+            + "</ol>"
+        )
+    return (
+        '<section class="final-conclusion" aria-labelledby="final-conclusion-heading">'
+        '<h2 id="final-conclusion-heading" class="final-conclusion-heading">'
+        "最终结论</h2>"
+        f'<p class="final-conclusion-lead">{_e(summary.get("headline"))}</p>'
+        f"{issue_list}"
+        f'<p class="final-conclusion-scope">{_e(summary.get("scopeBoundary"))}</p>'
+        "</section>"
+    )
+
+
+def _failure_analysis(item: dict) -> str:
+    if item.get("reviewedStatus") != "FAIL":
+        return ""
+    analysis = item.get("failureAnalysis", {})
+    sufficiency = SUFFICIENCY_LABELS.get(
+        analysis.get("evidenceSufficiency"),
+        analysis.get("evidenceSufficiency"),
+    )
+    rows = [
+        ("失败类型", analysis.get("failureKind")),
+        ("证据充分性", sufficiency),
+        ("证据支持", analysis.get("supportedClaim")),
+    ]
+    unsupported = analysis.get("unsupportedClaims", [])
+    if unsupported:
+        rows.append(("不可扩大推断", "；".join(str(value) for value in unsupported)))
+    dependencies = analysis.get("dependsOnTestIds", [])
+    if dependencies:
+        rows.append(("依赖检测项", "、".join(str(value) for value in dependencies)))
+    evidence_refs = analysis.get("evidenceRefs", [])
+    if evidence_refs:
+        rows.append(("证据引用", "、".join(str(value) for value in evidence_refs)))
+    details = "".join(
+        f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
+        for label, value in rows
+    )
+    return (
+        '<section class="logic-item failure-analysis">'
+        "<h4>未通过项证据复核</h4>"
+        f'<dl class="failure-analysis-details">{details}</dl>'
+        "</section>"
+    )
+
+
 def _request_evidence(requests: List[dict]) -> str:
     if not requests:
         return '<p class="empty-evidence">日志未包含可关联的完整请求块。</p>'
@@ -95,7 +165,13 @@ def _request_evidence(requests: List[dict]) -> str:
             value
             for value in (
                 str(request.get("request_id") or f"Turn {index}"),
+                f"curl exit {metrics.get('curl_exit_code')}"
+                if metrics.get("curl_exit_code")
+                else "",
                 f"HTTP {metrics.get('http_status')}" if metrics.get("http_status") else "",
+                f"TTFT {metrics.get('time_starttransfer')}s"
+                if metrics.get("time_starttransfer")
+                else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",
                 f"{metrics.get('size_download')} bytes" if metrics.get("size_download") else "",
             )
@@ -149,8 +225,11 @@ def _test_row_group(item: dict) -> str:
         f'{_list(logic.get("failCriteria", []))}</section>'
         '<section class="logic-item"><h4>能力边界</h4>'
         f'<p>{_e(logic.get("capabilityBoundary"))}</p></section>'
+        f'{_optional_detail_list("关键证据摘录", item.get("evidenceExcerpts", []))}'
+        f'{_optional_detail_list("证据引用", item.get("evidenceRefs", []))}'
         f'{_optional_detail_list("限制", item.get("limitations", []))}'
         f'{_optional_detail_list("重跑建议", item.get("retestInstructions", []))}'
+        f'{_failure_analysis(item)}'
         f'{_request_evidence(item.get("requests", []))}'
         "</div></td></tr></tbody>"
     )
@@ -232,6 +311,8 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 <body>
 <main class="report-shell" aria-label="{_e(model)} 模型能力检测结论与逐项结果">
   {_run_metadata(run, assessment.get('summary', {}))}
+
+  {_capability_summary(assessment.get('capabilitySummary', {}))}
 
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>
