@@ -956,6 +956,42 @@ test_manifest_count: 1
             parser.children[:3],
         )
 
+    def test_final_conclusion_renders_all_three_fact_rows(self) -> None:
+        assessment = assemble_assessment(self._parsed(), self._reviews())
+
+        html = render_report(assessment, ASSET_DIR)
+
+        for expected in (
+            "接口协议格式",
+            "上下文能力",
+            "并发能力",
+            "本轮证据不足以确认接口协议格式。",
+            "本轮未采集上下文档位证据。",
+            "本轮未采集并发波次证据。",
+        ):
+            self.assertIn(expected, html)
+        expected_order = (
+            '<h2 id="final-conclusion-heading"',
+            '<dl class="verified-facts">',
+            '<p class="final-conclusion-lead">',
+            '<table class="summary-table">',
+        )
+        positions = tuple(html.find(marker) for marker in expected_order)
+        self.assertTrue(all(position >= 0 for position in positions), positions)
+        self.assertEqual(tuple(sorted(positions)), positions)
+
+    def test_verified_facts_escape_dynamic_text(self) -> None:
+        reviews = self._reviews()
+        reviews["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"][
+            "statement"
+        ] = "<script>alert(1)</script>"
+        assessment = assemble_assessment(self._parsed(), reviews)
+
+        html = render_report(assessment, ASSET_DIR)
+
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
     def test_only_fail_rows_render_evidence_review(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())
 
@@ -982,8 +1018,19 @@ test_manifest_count: 1
 
     def test_print_css_reveals_evidence_and_removes_code_clipping(self) -> None:
         css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 640px)", 1)[1].split(
+            "@media print", 1
+        )[0]
         print_css = css.split("@media print", 1)[1]
 
+        self.assertRegex(
+            mobile_css,
+            r"\.verified-facts\s*>\s*div\s*\{[^}]*grid-template-columns:\s*1fr;",
+        )
+        self.assertNotRegex(
+            print_css,
+            r"\.verified-facts(?:\s*>\s*div)?\s*\{[^}]*display:\s*none;",
+        )
         self.assertRegex(
             print_css,
             r"\.evidence-row\[hidden\]\s*\{\s*display:\s*table-row;",

@@ -94,6 +94,37 @@ button {
   letter-spacing: 0;
 }
 
+.verified-facts {
+  margin: 0 0 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.verified-facts > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.verified-facts dt {
+  color: var(--muted-foreground);
+}
+
+.verified-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verified-fact-detail,
+.verified-fact-boundary {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 .final-conclusion-lead {
   margin: 0 0 0.75rem;
   font-weight: 500;
@@ -396,6 +427,10 @@ pre {
   .run-metadata > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
+  }
+
+  .verified-facts > div {
+    grid-template-columns: 1fr;
   }
 
   .failure-analysis-details > div {
