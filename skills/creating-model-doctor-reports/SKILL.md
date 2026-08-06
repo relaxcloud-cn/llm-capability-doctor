@@ -78,6 +78,8 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - If all tests pass, use an empty `issues` array and a bounded headline.
    - Use the exact scope boundary: `本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。`
 
+   `reviews.v2` 不得填写 `generalVerdict`。总体等级由 `assemble_assessment` 程序生成，并由 assessment validator 根据逐项状态独立复算。完整 46 项按 31 项基础必过项和 15 项增强能力项判定为“通用能力通过”“通用能力有条件通过”或“通用能力未通过”；历史日志缺项时显示“通用能力未评定”。Skill 作者只填写证据约束下的 `headline`、`verifiedFacts`、`issues` 和 `scopeBoundary`，不得选择或改写总体等级。
+
    Write `$TMP/reviews.json` in this envelope:
 
    ```json
@@ -165,7 +167,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
      --html "$LOG_DIR/<model-slug>-model-capability-report.html"
    ```
 
-   The renderer puts “最终结论” immediately below “检测信息” and puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all evidence rows without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
+   The renderer puts “最终结论” immediately below “检测信息”. It leads with the program-generated general verdict, fixed statement, and four capability facts, then renders the evidence-backed headline and issues. It puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all evidence rows without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
 11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v6`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, and every referenced request appears in its report row.
 12. Verify the HTML contains exactly one final-conclusion section between detection information and the capability-domain table; confirm its “接口协议格式”, “上下文能力”, and “并发能力” rows all render. Verify one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
-13. Report absolute output paths, PASS/FAIL counts, and the bounded summary headline. Never add another status class or a project readiness verdict.
+13. Report absolute output paths, PASS/FAIL counts, the program-generated general verdict, and the bounded summary headline. Never add another status class or a project readiness verdict.

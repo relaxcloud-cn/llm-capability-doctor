@@ -454,5 +454,52 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
         self.assertIn(".general-verdict", printing)
 
 
+class GeneralVerdictSkillContractTests(unittest.TestCase):
+    def test_skill_forbids_authored_verdict_and_requires_program_output(self) -> None:
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        for required in (
+            "`reviews.v2` 不得填写 `generalVerdict`",
+            "总体等级由 `assemble_assessment` 程序生成",
+            "31 项基础必过项",
+            "15 项增强能力项",
+            "通用能力通过",
+            "通用能力有条件通过",
+            "通用能力未通过",
+            "通用能力未评定",
+        ):
+            self.assertIn(required, skill)
+
+    def test_rules_define_fixed_gates_and_customer_statements(self) -> None:
+        rules = (SKILL_DIR / "references" / "evaluation-rules.md").read_text(
+            encoding="utf-8"
+        )
+
+        for required in (
+            "## 6. Deterministic General Capability Verdict",
+            "`reviews.v2` must not contain `generalVerdict`",
+            "31 core checks",
+            "15 enhanced checks",
+            "`PASS`：46 项全部 PASS",
+            "`CONDITIONAL_PASS`：31 项基础必过项全部 PASS",
+            "`FAIL`：任意基础必过项 FAIL",
+            "`NOT_ASSESSED`：历史 evidence.v1 未采集完整 46 项",
+            "本轮固定 46 项检测全部通过，因此判定通用能力通过。",
+            "不构成项目 READY/BLOCKED 或可上线/不可上线判定",
+        ):
+            self.assertIn(required, rules)
+
+        core_section = rules.split("### Core checks (31)", 1)[1].split(
+            "### Enhanced checks (15)", 1
+        )[0]
+        enhanced_section = rules.split("### Enhanced checks (15)", 1)[1].split(
+            "### Fixed statements", 1
+        )[0]
+        for test_id in CORE_TEST_IDS:
+            self.assertIn(f"`{test_id}`", core_section)
+        for test_id in ENHANCED_TEST_IDS:
+            self.assertIn(f"`{test_id}`", enhanced_section)
+
+
 if __name__ == "__main__":
     unittest.main()

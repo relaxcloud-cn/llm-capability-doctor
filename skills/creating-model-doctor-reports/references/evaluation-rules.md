@@ -7,12 +7,13 @@
 3. Cross-cutting rules
 4. Verified capability facts
 5. Failure evidence audit and capability synthesis
-6. Interface and protocol
-7. Structured results
-8. Context, instruction, and reasoning
-9. Tool calls
-10. Performance and stability
-11. Security business language
+6. Deterministic general capability verdict
+7. Interface and protocol
+8. Structured results
+9. Context, instruction, and reasoning
+10. Tool calls
+11. Performance and stability
+12. Security business language
 
 ## 1. Evidence Scope
 
@@ -119,7 +120,43 @@ Apply these recurring boundaries:
 
 The exact scope boundary is `本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。`
 
-## 6. Interface and Protocol
+## 6. Deterministic General Capability Verdict
+
+`reviews.v2` must not contain `generalVerdict`. The Skill authors evidence-bound per-test decisions, facts, headline, issues, and scope only. `assemble_assessment` generates `assessment.v6.capabilitySummary.generalVerdict` from the final test statuses, and `validate_assessment` independently recomputes the entire object.
+
+Complete evidence v2 reports partition the retained checks into 31 core checks and 15 enhanced checks. The groups are disjoint and cover all 46 checks.
+
+### Core checks (31)
+
+`001`、`002`、`003`、`004`、`005`、`006`、`007`、`009`、`010`、`011`、`012`、`013`、`014`、`019`、`022`、`031`、`038`、`040`、`041`、`042`、`043`、`044`、`047`、`048`、`049`、`050`、`052`、`053`、`054`、`055`、`057`
+
+These checks cover interface access, basic generation, native usage, baseline structured output and context, exact instruction following, basic logic, the core tool chain, latency observability, repeated success, and the fixed concurrency run.
+
+### Enhanced checks (15)
+
+`008`、`015`、`016`、`017`、`018`、`020`、`024`、`033`、`034`、`035`、`036`、`045`、`056`、`059`、`060`
+
+These checks cover error observability, higher context tiers, fine-grained format and summary constraints, reasoning observability, parallel tools, percentile calculation, and security business language.
+
+Apply exactly one deterministic result:
+
+- `PASS`：46 项全部 PASS，显示“通用能力通过”。
+- `CONDITIONAL_PASS`：31 项基础必过项全部 PASS，且至少一项增强能力项 FAIL，显示“通用能力有条件通过”。
+- `FAIL`：任意基础必过项 FAIL，显示“通用能力未通过”。
+- `NOT_ASSESSED`：历史 evidence.v1 未采集完整 46 项，显示“通用能力未评定”；这不是能力失败。当前 evidence.v2 缺项仍由 parser 拒绝。
+
+### Fixed statements
+
+Use only these program-generated templates:
+
+- `PASS`: `本轮固定 46 项检测全部通过，因此判定通用能力通过。`
+- `CONDITIONAL_PASS`: `本轮固定 46 项检测通过 {passed} 项，31 项基础必过项全部通过；{failed_enhanced} 项增强能力存在限制，因此判定通用能力有条件通过。`
+- `FAIL`: `本轮固定 46 项检测通过 {passed} 项，其中 {failed_core} 项基础必过能力未满足，因此判定通用能力未通过。`
+- `NOT_ASSESSED`: `本轮仅采集 {collected}/46 项，证据不足以生成通用能力等级，因此本轮通用能力未评定。`
+
+This verdict describes the fixed general capability standard. It 不构成项目 READY/BLOCKED 或可上线/不可上线判定. Project-specific readiness still requires explicit project requirements that are outside this report.
+
+## 7. Interface and Protocol
 
 ### 001 URL 可达性
 
@@ -174,7 +211,7 @@ The exact scope boundary is `本节仅总结本轮可观察能力，不构成项
 - `PASS`: a clear client error such as HTTP 400/422 plus recognizable parse/request-format information.
 - `FAIL`: 2xx, authentication error, 404, 5xx, connection drop, or no clear error body.
 
-## 7. Structured Results
+## 8. Structured Results
 
 ### 009 裸 JSON 输出
 
@@ -206,7 +243,7 @@ The exact scope boundary is `本节仅总结本轮可观察能力，不构成项
 - `PASS`: stage, reference, and evidence entity all exist and correlate.
 - `FAIL`: missing entity, dangling/mismatched reference, or invalid JSON.
 
-## 8. Context, Instruction, and Reasoning
+## 9. Context, Instruction, and Reasoning
 
 ### 014 8K 级上下文
 
@@ -306,7 +343,7 @@ For 014-018, each conclusion summarizes whether all requested information was re
 - `PASS`: exactly `order:["A","B","C"]`, `bTime:"09:22"`, and `cTime:"09:27"`.
 - `FAIL`: wrong order/time/field/type or invalid JSON.
 
-## 9. Tool Calls
+## 10. Tool Calls
 
 Require protocol-native formal tool calls. Natural-language descriptions never count.
 
@@ -362,7 +399,7 @@ Require protocol-native formal tool calls. Natural-language descriptions never c
 - `PASS`: from ten candidates, exactly one `get_weather(city="Beijing")`.
 - `FAIL`: distractor selected, multiple calls, wrong argument, text-only output, or failure.
 
-## 10. Performance and Stability
+## 11. Performance and Stability
 
 Semantic correctness is required for every sample. `time_total` means 完整响应延迟, not TTFB, TTFT, throughput, or Token generation speed.
 
@@ -405,7 +442,7 @@ Semantic correctness is required for every sample. `time_total` means 完整响�
 - `FAIL`: any timeout, HTTP/protocol/content error, missing sample, rate limit, or invalid metric.
 - Conclusion: summarize whether every executed concurrency wave succeeded without rate limiting, then judge the highest verified short-run concurrency tier. Keep each wave's success count, rate-limit count, P50, nearest-rank P95, and maximum complete-response latency in evidence. This short run 不构成 SLA or sustained-load proof.
 
-## 11. Security Business Language
+## 12. Security Business Language
 
 The experiment request is the capability target. The control request is diagnostic context for failure attribution.
 
