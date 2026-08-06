@@ -58,6 +58,7 @@
   "generalVerdict": {
     "level": "CONDITIONAL_PASS",
     "label": "通用能力有条件通过",
+    "collectedTests": 46,
     "passedTests": 40,
     "totalTests": 46,
     "passedCoreTests": 31,
@@ -69,7 +70,7 @@
 }
 ```
 
-`level`、中文标签、所有计数和 `statement` 均由程序按固定模板生成。assessment 校验器逐字段复算，防止手工篡改或文案与状态不一致。
+`level`、中文标签、所有计数和 `statement` 均由程序按固定模板生成。`collectedTests` 明确记录本轮实际采集项数，完整日志固定为 46，历史不完整日志用于呈现“已采集 N/46”。assessment 校验器逐字段复算，防止手工篡改或文案与状态不一致。
 
 `level` 允许 `PASS`、`CONDITIONAL_PASS`、`FAIL` 和历史不完整日志专用的 `NOT_ASSESSED`。`NOT_ASSESSED` 必须使用固定判定句：“本轮仅采集 `{collected}`/46 项，证据不足以生成通用能力等级，因此本轮通用能力未评定。”
 
