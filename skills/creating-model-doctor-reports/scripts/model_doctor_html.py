@@ -238,34 +238,12 @@ def _general_verdict(summary: dict) -> str:
 
 
 def _capability_summary(summary: dict) -> str:
-    issues = summary.get("issues", [])
-    issue_list = ""
-    if issues:
-        rendered_issues = []
-        for issue in issues:
-            test_refs = "、".join(str(value) for value in issue.get("testRefs", []))
-            rendered_issues.append(
-                "<li>"
-                f'<p><strong>{_e(issue.get("title"))}：</strong>'
-                f'{_e(issue.get("statement"))}</p>'
-                f'<p class="final-conclusion-boundary">{_e(issue.get("boundary"))}</p>'
-                f'<p class="final-conclusion-refs">关联检测项：{_e(test_refs)}</p>'
-                "</li>"
-            )
-        issue_list = (
-            '<ol class="final-conclusion-list">'
-            + "".join(rendered_issues)
-            + "</ol>"
-        )
     return (
         '<section class="final-conclusion" aria-labelledby="final-conclusion-heading">'
         '<h2 id="final-conclusion-heading" class="final-conclusion-heading">'
         "最终结论</h2>"
         f"{_general_verdict(summary)}"
         f'{_verified_facts(summary.get("verifiedFacts", {}))}'
-        f'<p class="final-conclusion-lead">{_e(summary.get("headline"))}</p>'
-        f"{issue_list}"
-        f'<p class="final-conclusion-scope">{_e(summary.get("scopeBoundary"))}</p>'
         "</section>"
     )
 

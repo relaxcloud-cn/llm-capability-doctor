@@ -25,7 +25,8 @@ Add a renderer test with unique freeform markers and assert that headline, issue
 Run:
 
 ```bash
-python3 -m unittest skills.creating-model-doctor-reports.tests.test_model_doctor_v6.ModelDoctorV6Tests.test_final_conclusion_omits_freeform_summary_content
+cd skills/creating-model-doctor-reports/tests
+python3 -m unittest test_model_doctor_v6.ModelDoctorV6Tests.test_final_conclusion_omits_freeform_summary_content
 ```
 
 Expected: FAIL because the current renderer emits the freeform markers.

@@ -385,14 +385,14 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
             "OpenAI Chat",
             "32K Token 近似档",
             "32 并发",
-            "已验证能力摘要。",
-            "一项增强能力受限",
-            summary["scopeBoundary"],
         )
         positions = tuple(html.find(marker) for marker in markers)
         self.assertTrue(all(position >= 0 for position in positions), positions)
         self.assertEqual(tuple(sorted(positions)), positions)
         self.assertEqual(1, html.count("综合结论："))
+        self.assertNotIn(summary["headline"], html)
+        self.assertNotIn(summary["issues"][0]["title"], html)
+        self.assertNotIn(summary["scopeBoundary"], html)
 
     def test_all_verdict_labels_render(self) -> None:
         scenarios = []

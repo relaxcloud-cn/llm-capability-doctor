@@ -204,48 +204,6 @@ button {
   font-size: 12px;
 }
 
-.final-conclusion-lead {
-  margin: 0 0 0.75rem;
-  font-weight: 500;
-}
-
-.final-conclusion-list {
-  margin: 0;
-  padding-left: 1.35rem;
-}
-
-.final-conclusion-list li {
-  padding-left: 0.15rem;
-}
-
-.final-conclusion-list li + li {
-  margin-top: 0.65rem;
-}
-
-.final-conclusion-list p {
-  margin: 0;
-}
-
-.final-conclusion-list strong {
-  font-weight: 600;
-}
-
-.final-conclusion-boundary,
-.final-conclusion-refs,
-.final-conclusion-scope {
-  color: var(--muted-foreground);
-  font-size: 12px;
-}
-
-.final-conclusion-list .final-conclusion-boundary,
-.final-conclusion-list .final-conclusion-refs {
-  margin-top: 0.2rem;
-}
-
-.final-conclusion-scope {
-  margin: 0.75rem 0 0;
-}
-
 table {
   width: 100%;
   border-collapse: collapse;

@@ -1520,7 +1520,6 @@ test_manifest_count: 1
         expected_order = (
             '<h2 id="final-conclusion-heading"',
             '<dl class="verified-facts">',
-            '<p class="final-conclusion-lead">',
             '<table class="summary-table">',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
@@ -1639,18 +1638,48 @@ test_manifest_count: 1
         self.assertRegex(print_css, r"pre\s*\{[^}]*max-height:\s*none;")
         self.assertRegex(print_css, r"pre\s*\{[^}]*overflow:\s*visible;")
 
-    def test_summary_renders_issue_references_and_boundary(self) -> None:
-        assessment = assemble_assessment(self._parsed(), self._reviews())
+    def test_final_conclusion_omits_freeform_summary_content(self) -> None:
+        reviews = self._reviews()
+        reviews["capabilitySummary"]["headline"] = "HTML_HEADLINE_MUST_NOT_RENDER"
+        reviews["capabilitySummary"]["issues"][0].update(
+            title="HTML_ISSUE_TITLE_MUST_NOT_RENDER",
+            statement="HTML_ISSUE_STATEMENT_MUST_NOT_RENDER",
+            boundary="HTML_ISSUE_BOUNDARY_MUST_NOT_RENDER",
+        )
+        assessment = assemble_assessment(self._parsed(), reviews)
 
         html = render_report(assessment, ASSET_DIR)
 
-        self.assertIn("响应未满足契约", html)
-        self.assertIn("关联检测项：002", html)
-        self.assertIn("本次证据不支持扩大归因。", html)
-        self.assertIn(
-            "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
-            html,
+        self.assertEqual(
+            "HTML_HEADLINE_MUST_NOT_RENDER",
+            assessment["capabilitySummary"]["headline"],
         )
+        for omitted in (
+            "HTML_HEADLINE_MUST_NOT_RENDER",
+            "HTML_ISSUE_TITLE_MUST_NOT_RENDER",
+            "HTML_ISSUE_STATEMENT_MUST_NOT_RENDER",
+            "HTML_ISSUE_BOUNDARY_MUST_NOT_RENDER",
+            "关联检测项：",
+            "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
+            'class="final-conclusion-lead"',
+            'class="final-conclusion-list"',
+            'class="final-conclusion-scope"',
+        ):
+            self.assertNotIn(omitted, html)
+        self.assertIn('class="general-verdict ', html)
+        self.assertIn('<dl class="verified-facts">', html)
+
+    def test_final_conclusion_css_omits_removed_freeform_styles(self) -> None:
+        css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
+
+        for selector in (
+            ".final-conclusion-lead",
+            ".final-conclusion-list",
+            ".final-conclusion-boundary",
+            ".final-conclusion-refs",
+            ".final-conclusion-scope",
+        ):
+            self.assertNotIn(selector, css)
 
     def test_summary_and_failure_analysis_escape_dynamic_text(self) -> None:
         reviews = self._reviews()
@@ -1665,7 +1694,7 @@ test_manifest_count: 1
         html = render_report(assessment, ASSET_DIR)
 
         self.assertNotIn("<script>alert(1)</script>", html)
-        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertNotIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertIn("&lt;b&gt;bad&lt;/b&gt;", html)
 
     def test_all_pass_summary_renders_without_empty_issue_list(self) -> None:
@@ -1693,7 +1722,7 @@ test_manifest_count: 1
 
         html = render_report(assessment, ASSET_DIR)
 
-        self.assertIn("本轮所有已执行检测项均通过。", html)
+        self.assertNotIn("本轮所有已执行检测项均通过。", html)
         self.assertNotIn('<ol class="final-conclusion-list">', html)
 
     def test_cli_rejects_non_object_reviews_with_v2_message(self) -> None:
