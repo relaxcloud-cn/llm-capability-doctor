@@ -23,11 +23,35 @@ from model_doctor_assessment import (  # noqa: E402
 )
 from model_doctor_html import render_report  # noqa: E402
 from model_doctor_log import (  # noqa: E402
+    RETAINED_TEST_IDS,
     _credential_is_masked,
     parse_log,
     redact_text,
 )
 from model_doctor_report import main  # noqa: E402
+
+
+def _full_v2_log() -> str:
+    manifests = "".join(
+        "========== TEST-{0} BEGIN ==========\n"
+        "name: fixture-{0}\n"
+        "category: fixture\n"
+        "request_refs: \n"
+        "========== TEST-{0} END ==========\n".format(test_id)
+        for test_id in sorted(RETAINED_TEST_IDS)
+    )
+    return (
+        "========== MODEL DOCTOR RUN ==========\n"
+        "script_version: 0.10.0\n"
+        "section_encoding: base64\n"
+        "log_schema: llm-capability-doctor.evidence.v2\n"
+        "selected_test_count: 46\n"
+        + manifests
+        + "========== RUN SUMMARY ==========\n"
+        "request_count: 0\n"
+        "test_manifest_count: 46\n"
+        "========== END ==========\n"
+    )
 
 
 class _MainChildParser(HTMLParser):
@@ -48,6 +72,13 @@ class _MainChildParser(HTMLParser):
 
 
 class ModelDoctorV5Tests(unittest.TestCase):
+    def _parse_text_log(self, value: str, name: str) -> dict:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        path = Path(directory.name) / name
+        path.write_text(value, encoding="utf-8")
+        return parse_log(path)
+
     def _request(self, request_id: str, content: str) -> dict:
         return {
             "request_id": request_id,
@@ -483,6 +514,50 @@ test_manifest_count: 1
                 "TEST-002 category must be non-empty",
             ):
                 parse_log(path)
+
+    def test_parser_accepts_complete_profile_free_v2(self) -> None:
+        parsed = self._parse_text_log(_full_v2_log(), "full-v2.log")
+
+        self.assertEqual(
+            "llm-capability-doctor.evidence.v2",
+            parsed["run"]["log_schema"],
+        )
+        self.assertNotIn("collection_profile", parsed["run"])
+        self.assertEqual(46, len(parsed["tests"]))
+
+    def test_parser_rejects_invalid_v2_contract_variants(self) -> None:
+        complete = _full_v2_log()
+        variants = {
+            "profile": complete.replace(
+                "section_encoding: base64\n",
+                "section_encoding: base64\ncollection_profile: full\n",
+            ),
+            "mixed": complete.replace(
+                "script_version: 0.10.0",
+                "script_version: 0.9.0",
+            ),
+            "incomplete": re.sub(
+                r"^========== TEST-060 BEGIN ==========\n.*?"
+                r"^========== TEST-060 END ==========\n",
+                "",
+                complete.replace("selected_test_count: 46", "selected_test_count: 45")
+                .replace("test_manifest_count: 46", "test_manifest_count: 45"),
+                count=1,
+                flags=re.MULTILINE | re.DOTALL,
+            ),
+        }
+        messages = {
+            "profile": "must not contain collection_profile",
+            "mixed": "schema/version pair",
+            "incomplete": "must contain all 46 retained tests",
+        }
+
+        for name, value in variants.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError,
+                messages[name],
+            ):
+                self._parse_text_log(value, f"{name}.log")
 
     def test_redaction_handles_curl_headers_and_json_cookies(self) -> None:
         secret = "sk-live-secret-123456"
