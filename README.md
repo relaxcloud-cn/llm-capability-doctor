@@ -2,7 +2,7 @@
 
 用于客户现场采集大模型接口能力证据，为判断模型是否满足项目要求提供依据。
 Rust CLI 在现场一次性采集完整请求与响应，生成
-`llm-capability-doctor.evidence.v1` 日志；日志带回分析环境后，由 Model Doctor
+`llm-capability-doctor.evidence.v2` 日志；日志带回分析环境后，由 Model Doctor
 Report Skill 逐项判定并生成 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
@@ -17,9 +17,9 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 | 客户机器 | Release 文件 |
 | --- | --- |
-| macOS Apple Silicon | `model-capability-doctor-v0.9.0-aarch64-apple-darwin` |
-| Linux x86_64 | `model-capability-doctor-v0.9.0-x86_64-unknown-linux-musl` |
-| Linux ARM64 | `model-capability-doctor-v0.9.0-aarch64-unknown-linux-musl` |
+| macOS Apple Silicon | `model-capability-doctor-v0.10.0-aarch64-apple-darwin` |
+| Linux x86_64 | `model-capability-doctor-v0.10.0-x86_64-unknown-linux-musl` |
+| Linux ARM64 | `model-capability-doctor-v0.10.0-aarch64-unknown-linux-musl` |
 
 Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
 执行权限，不需要创建软链接。
@@ -27,7 +27,7 @@ Release 文件不是压缩包。下载后将对应文件重命名为 `model-capa
 Linux x86_64：
 
 ```bash
-mv ./model-capability-doctor-v0.9.0-x86_64-unknown-linux-musl ./model-capability-doctor
+mv ./model-capability-doctor-v0.10.0-x86_64-unknown-linux-musl ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -36,7 +36,7 @@ sha256sum ./model-capability-doctor
 Linux ARM64：
 
 ```bash
-mv ./model-capability-doctor-v0.9.0-aarch64-unknown-linux-musl ./model-capability-doctor
+mv ./model-capability-doctor-v0.10.0-aarch64-unknown-linux-musl ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -45,7 +45,7 @@ sha256sum ./model-capability-doctor
 macOS Apple Silicon：
 
 ```bash
-mv ./model-capability-doctor-v0.9.0-aarch64-apple-darwin ./model-capability-doctor
+mv ./model-capability-doctor-v0.10.0-aarch64-apple-darwin ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 shasum -a 256 ./model-capability-doctor
@@ -86,7 +86,7 @@ read -rsp 'API Key: ' MODEL_API_KEY && printf '\n'
 export MODEL_API_KEY
 ```
 
-执行默认现场检测：
+执行完整检测：
 
 ```bash
 ./model-capability-doctor \
@@ -107,27 +107,7 @@ export MODEL_API_KEY
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
 自动使用 Bearer、`api-key`、`x-api-key` 或 `x-goog-api-key` 等对应认证头。
 
-默认执行精简后的现场检测模式，共 29 个高价值检测项。通常无需增加参数。
-
-需要完整执行全部 46 个检测项时：
-
-```bash
-./model-capability-doctor \
-  --url 'https://model.example/v1/chat/completions' \
-  --model 'your-model-name' \
-  --full \
-  --log-file "$MODEL_DOCTOR_OUTPUT/your-model-full-model-doctor.log"
-```
-
-只执行指定检测项时：
-
-```bash
-./model-capability-doctor \
-  --url 'https://model.example/v1/chat/completions' \
-  --model 'your-model-name' \
-  --only '001,040,060' \
-  --log-file "$MODEL_DOCTOR_OUTPUT/your-model-custom-model-doctor.log"
-```
+默认执行全部 46 个检测项，不需要也不接受检测模式或检测项 ID 参数。
 
 检测结束后清除当前 Shell 中的密钥：
 
@@ -163,13 +143,7 @@ PASS 或 FAIL。CLI 只负责采集证据，不在客户现场给出结论；Ski
 一份结构完整的日志可以直接完成一次报告分析。如果日志版本不匹配、结构校验
 失败或采集过程被中断，需要重新执行 CLI 采集，不应让 Skill 猜测缺失证据。
 
-## 检测模式与范围
-
-| 模式 | 检测项数 | 用途 |
-| --- | ---: | --- |
-| 默认现场模式 | 29 | 一次覆盖项目接入最关键的高价值能力。 |
-| `--full` | 46 | 执行完整核心目录，用于更全面的兼容性调查。 |
-| `--only IDS` | 自定义 | 执行逗号分隔的检测项，例如 `001,040,060`。 |
+## 检测范围
 
 46 个核心检测项覆盖以下能力：
 
@@ -186,9 +160,8 @@ PASS 或 FAIL。CLI 只负责采集证据，不在客户现场给出结论；Ski
 
 ### 请求负载提示
 
-默认 29 项现场模式包含约 51.2 万字符的上下文请求和一轮 8 并发请求。`--full`
-还会执行约 3.2 万、6.4 万、12.8 万、25.6 万和 51.2 万字符的上下文请求，以及
-4、8、16、32 并发波次。执行前应确认客户授权、模型上下文上限、配额、费用和
+每次检测都会执行约 3.2 万、6.4 万、12.8 万、25.6 万和 51.2 万字符的上下文请求，
+以及 4、8、16、32 四个并发波次。执行前应确认客户授权、模型上下文上限、配额、费用和
 限流策略；不要在未经批准的生产接口上直接运行。
 
 查看实际目录：
@@ -207,10 +180,8 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 | `--url URL` | 完整模型接口 URL，不自动改写路径。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
-| `--log-file PATH` | 指定 evidence-v1 日志路径。 |
+| `--log-file PATH` | 指定 evidence-v2 日志路径。 |
 | `--timeout SECONDS` | 单次请求超时，默认 120 秒。 |
-| `--only IDS` | 只执行逗号分隔的检测项；不能与 `--full` 同时使用。 |
-| `--full` | 执行完整 46 项，而不是默认现场模式。 |
 | `--list-tests` | 输出完整 46 项目录并退出。 |
 | `--insecure` | 跳过 HTTPS 证书和主机身份校验。 |
 
