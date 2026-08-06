@@ -18,8 +18,8 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 | 客户机器 | Release 文件 |
 | --- | --- |
 | macOS Apple Silicon | `model-capability-doctor-v0.10.0-aarch64-apple-darwin` |
-| Linux x86_64 | `model-capability-doctor-v0.10.0-x86_64-unknown-linux-musl` |
-| Linux ARM64 | `model-capability-doctor-v0.10.0-aarch64-unknown-linux-musl` |
+| Linux x86_64 | `model-capability-doctor-v0.10.0-linux-x86_64` |
+| Linux ARM64 | `model-capability-doctor-v0.10.0-linux-arm64` |
 
 Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
 执行权限，不需要创建软链接。
@@ -27,7 +27,7 @@ Release 文件不是压缩包。下载后将对应文件重命名为 `model-capa
 Linux x86_64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-x86_64-unknown-linux-musl ./model-capability-doctor
+mv ./model-capability-doctor-v0.10.0-linux-x86_64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -36,7 +36,7 @@ sha256sum ./model-capability-doctor
 Linux ARM64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-aarch64-unknown-linux-musl ./model-capability-doctor
+mv ./model-capability-doctor-v0.10.0-linux-arm64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -51,7 +51,8 @@ chmod +x ./model-capability-doctor
 shasum -a 256 ./model-capability-doctor
 ```
 
-Linux Release 文件采用静态链接的 MUSL 构建，适合带到离线客户环境直接运行。
+Linux Release 文件采用 GNU libc 动态链接，适用于对应 CPU 架构的主流 glibc Linux
+发行版，不支持在纯 MUSL 环境中直接运行。
 复制前记录二进制的 SHA-256，传入客户环境后重新计算并比对。报告分析应使用同一
 Release 对应提交中的 `skills/creating-model-doctor-reports`，避免 CLI 与判定规则
 版本不匹配。
