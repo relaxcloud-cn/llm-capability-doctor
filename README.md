@@ -17,7 +17,6 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 | 客户机器 | Release 文件 |
 | --- | --- |
-| macOS Apple Silicon | `model-capability-doctor-v0.10.0-aarch64-apple-darwin` |
 | Linux x86_64 | `model-capability-doctor-v0.10.0-linux-x86_64` |
 | Linux ARM64 | `model-capability-doctor-v0.10.0-linux-arm64` |
 
@@ -40,15 +39,6 @@ mv ./model-capability-doctor-v0.10.0-linux-arm64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
-```
-
-macOS Apple Silicon：
-
-```bash
-mv ./model-capability-doctor-v0.10.0-aarch64-apple-darwin ./model-capability-doctor
-chmod +x ./model-capability-doctor
-./model-capability-doctor --version
-shasum -a 256 ./model-capability-doctor
 ```
 
 Linux Release 文件采用 GNU libc 动态链接，适用于对应 CPU 架构的主流 glibc Linux
