@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
+from model_doctor_general_verdict import derive_general_verdict
 from model_doctor_verified_facts import validate_verified_facts
 
 
@@ -49,11 +50,14 @@ FAILURE_ANALYSIS_FIELDS = {
     "dependsOnTestIds",
     "evidenceRefs",
 }
-CAPABILITY_SUMMARY_FIELDS = {
+REVIEW_CAPABILITY_SUMMARY_FIELDS = {
     "headline",
     "verifiedFacts",
     "issues",
     "scopeBoundary",
+}
+ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
+    "generalVerdict"
 }
 CAPABILITY_ISSUE_FIELDS = {
     "title",
@@ -401,7 +405,7 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
     summary = reviews.get("capabilitySummary")
     if not isinstance(summary, dict):
         return errors + ["capabilitySummary must be an object"]
-    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+    for field in sorted(set(summary) - REVIEW_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
@@ -576,6 +580,11 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
             item["failureAnalysis"] = deepcopy(review["failureAnalysis"])
         items.append(item)
 
+    capability_summary = deepcopy(reviews["capabilitySummary"])
+    capability_summary["generalVerdict"] = derive_general_verdict(
+        {item["testId"]: item["reviewedStatus"] for item in items}
+    )
+
     return {
         "schemaVersion": ASSESSMENT_SCHEMA_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -584,7 +593,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "summary": {"counts": _status_counts(items)},
-        "capabilitySummary": deepcopy(reviews["capabilitySummary"]),
+        "capabilitySummary": capability_summary,
         "categories": _categories(items),
         "tests": items,
     }
@@ -730,8 +739,24 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
     errors: List[str] = []
     if not isinstance(summary, dict):
         return ["capabilitySummary must be an object"]
-    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+    for field in sorted(set(summary) - ASSESSMENT_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
+    statuses = {
+        item.get("testId"): item.get("reviewedStatus")
+        for item in items
+        if isinstance(item, dict)
+    }
+    try:
+        expected_verdict = derive_general_verdict(statuses)
+    except ValueError:
+        errors.append(
+            "capabilitySummary generalVerdict cannot be derived from test statuses"
+        )
+    else:
+        if summary.get("generalVerdict") != expected_verdict:
+            errors.append(
+                "capabilitySummary generalVerdict does not match test statuses"
+            )
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
     elif _contains_readiness_decision(summary.get("headline")):
