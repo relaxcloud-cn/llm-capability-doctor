@@ -1614,7 +1614,8 @@ test_manifest_count: 1
         self.assertIn("证据引用", html)
         self.assertIn("request:req-fail", html)
         self.assertIn("curl exit 0", html)
-        self.assertIn("TTFT 0.050000s", html)
+        self.assertIn("TTFB 0.050000s", html)
+        self.assertNotIn("TTFT 0.050000s", html)
 
     def test_print_css_reveals_evidence_and_removes_code_clipping(self) -> None:
         css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")

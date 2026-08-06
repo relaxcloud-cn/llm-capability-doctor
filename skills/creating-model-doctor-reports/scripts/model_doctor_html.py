@@ -249,7 +249,7 @@ def _request_evidence(requests: List[dict]) -> str:
                 if metrics.get("curl_exit_code")
                 else "",
                 f"HTTP {metrics.get('http_status')}" if metrics.get("http_status") else "",
-                f"TTFT {metrics.get('time_starttransfer')}s"
+                f"TTFB {metrics.get('time_starttransfer')}s"
                 if metrics.get("time_starttransfer")
                 else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",
