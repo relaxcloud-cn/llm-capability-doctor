@@ -260,6 +260,194 @@ class ModelDoctorV6Tests(unittest.TestCase):
             reviews["tests"]["003"] = dependent
         return reviews
 
+    def _complete_fact_fixture(self) -> tuple[dict, dict]:
+        requests = {
+            "protocol-openai": self._request(
+                "protocol-openai",
+                json.dumps(
+                    {
+                        "id": "chatcmpl-fixture",
+                        "object": "chat.completion",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": "pong"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+            "context-pass": self._request(
+                "context-pass",
+                '{"choices":[{"message":{"role":"assistant","content":"PASS"}}]}',
+            ),
+            "context-fail": self._request(
+                "context-fail",
+                '{"error":{"message":"maximum context length exceeded"}}',
+            ),
+            "concurrency-32-1": self._request(
+                "concurrency-32-1",
+                '{"choices":[{"message":{"role":"assistant","content":"PONG"}}]}',
+            ),
+        }
+        requests["protocol-openai"]["requestBody"] = json.dumps(
+            {
+                "model": "fixture-model",
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            ensure_ascii=False,
+        )
+        requests["context-pass"]["metrics"].update(
+            input_tokens="80175",
+            context_tier="32K Token 近似档",
+        )
+        requests["context-fail"]["metrics"].update(
+            http_status="400",
+            input_tokens="131072",
+            context_tier="64K Token 近似档",
+        )
+        requests["concurrency-32-1"]["metrics"].update(
+            concurrency_level="32",
+            successful_requests="32",
+        )
+
+        parsed = {
+            "schemaVersion": "llm-capability-doctor.parsed-evidence.v1",
+            "source": {
+                "fileName": "complete-facts.log",
+                "size": 4096,
+                "sha256": "1" * 64,
+            },
+            "run": {
+                "url": "https://example.invalid/v1/chat/completions",
+                "model": "fixture-model",
+                "api_key": "[MASKED]",
+            },
+            "tokenTotals": {},
+            "warnings": [],
+            "tests": {
+                "002": {
+                    "category": "接口与协议",
+                    "name": "OpenAI Chat Completions 协议结构",
+                    "requestRefs": ["protocol-openai"],
+                },
+                "016": {
+                    "category": "上下文能力",
+                    "name": "32K Token 近似档",
+                    "requestRefs": ["context-pass"],
+                },
+                "017": {
+                    "category": "上下文能力",
+                    "name": "64K Token 近似档",
+                    "requestRefs": ["context-fail"],
+                },
+                "057": {
+                    "category": "性能与稳定性",
+                    "name": "32 路短时并发",
+                    "requestRefs": ["concurrency-32-1"],
+                },
+            },
+            "requests": requests,
+        }
+
+        def review(test_id: str, status: str, request_id: str, excerpt: str) -> dict:
+            value = {
+                "testId": test_id,
+                "reviewedStatus": status,
+                "conclusion": (
+                    "响应满足本项可观察契约，因此判定通过。"
+                    if status == "PASS"
+                    else "响应明确拒绝该输入档位，因此判定未通过。"
+                ),
+                "logic": self._logic(),
+                "evidenceRefs": [f"request:{request_id}"],
+                "evidenceExcerpts": [excerpt],
+                "limitations": [],
+                "retestInstructions": [],
+            }
+            if status == "FAIL":
+                value["failureAnalysis"] = {
+                    "failureKind": "DIRECT",
+                    "evidenceSufficiency": "SUFFICIENT",
+                    "supportedClaim": "131072 输入 Token 请求返回上下文长度超限错误。",
+                    "unsupportedClaims": ["不能据此推断低于该档位的精确硬上限。"],
+                    "dependsOnTestIds": [],
+                    "evidenceRefs": [f"request:{request_id}"],
+                }
+            return value
+
+        verified = {
+            "interfaceProtocol": {
+                "evidenceState": "VERIFIED",
+                "family": "OPENAI_CHAT_COMPLETIONS",
+                "requestFormat": "messages 数组与 role/content 消息。",
+                "responseFormat": "choices[].message 与 chat.completion 结构。",
+                "statement": "请求和响应采用 OpenAI Chat Completions 格式，不是 Anthropic 或自定义格式。",
+                "evidenceRefs": ["request:protocol-openai"],
+                "boundary": "协议结构不证明底层商业模型身份。",
+            },
+            "contextWindow": {
+                "evidenceState": "VERIFIED",
+                "highestVerifiedTier": "32K Token 近似档",
+                "highestVerifiedInputTokens": 80175,
+                "firstFailedTier": "64K Token 近似档",
+                "firstFailedInputTokens": 131072,
+                "statement": "最高已验证 80175 输入 Token，131072 输入 Token 的更高档首次失败。",
+                "evidenceRefs": ["request:context-pass", "request:context-fail"],
+                "boundary": "最高已验证值不是硬上限，真实上限未测试。",
+            },
+            "concurrency": {
+                "evidenceState": "VERIFIED",
+                "highestVerifiedConcurrentRequests": 32,
+                "statement": "短时并发最高已验证到 32 个同时请求。",
+                "evidenceRefs": ["request:concurrency-32-1"],
+                "boundary": "32 是最高已验证波次，不代表服务硬上限或持续负载能力。",
+            },
+        }
+        reviews = {
+            "schemaVersion": "llm-capability-doctor.reviews.v2",
+            "tests": {
+                "002": review(
+                    "002",
+                    "PASS",
+                    "protocol-openai",
+                    "messages 请求对应 chat.completion 与 choices[].message 响应。",
+                ),
+                "016": review(
+                    "016", "PASS", "context-pass", "80175 输入 Token 请求成功。"
+                ),
+                "017": review(
+                    "017",
+                    "FAIL",
+                    "context-fail",
+                    "131072 输入 Token 返回 maximum context length exceeded。",
+                ),
+                "057": review(
+                    "057",
+                    "PASS",
+                    "concurrency-32-1",
+                    "32 路短时并发波次全部成功。",
+                ),
+            },
+            "capabilitySummary": {
+                "headline": "协议与短时并发证据通过，更高上下文档位存在直接失败。",
+                "verifiedFacts": verified,
+                "issues": [
+                    {
+                        "title": "更高上下文档位失败",
+                        "statement": "131072 输入 Token 请求被服务拒绝。",
+                        "testRefs": ["017"],
+                        "evidenceRefs": ["request:context-fail"],
+                        "boundary": "只证明本轮该档位失败，不推断精确硬上限。",
+                    }
+                ],
+                "scopeBoundary": "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
+            },
+        }
+        return parsed, reviews
+
     def test_reviews_v2_requires_verified_facts(self) -> None:
         reviews = self._reviews()
         del reviews["capabilitySummary"]["verifiedFacts"]
@@ -709,6 +897,29 @@ class ModelDoctorV6Tests(unittest.TestCase):
             assessment["capabilitySummary"]["verifiedFacts"],
         )
         self.assertEqual([], validate_assessment(assessment))
+
+    def test_complete_verified_facts_survive_validate_assemble_and_render(
+        self,
+    ) -> None:
+        parsed, reviews = self._complete_fact_fixture()
+        self.assertEqual([], validate_reviews(parsed, reviews))
+        assessment = assemble_assessment(parsed, reviews)
+        self.assertEqual([], validate_assessment(assessment))
+        html = render_report(assessment, ASSET_DIR)
+        self.assertEqual(
+            80175,
+            assessment["capabilitySummary"]["verifiedFacts"]["contextWindow"][
+                "highestVerifiedInputTokens"
+            ],
+        )
+        self.assertEqual(
+            32,
+            assessment["capabilitySummary"]["verifiedFacts"]["concurrency"][
+                "highestVerifiedConcurrentRequests"
+            ],
+        )
+        self.assertIn("OpenAI Chat Completions", html)
+        self.assertIn("真实上限未测试", html)
 
     def test_assessment_rejects_verified_fact_evidence_outside_item_domain(
         self,
