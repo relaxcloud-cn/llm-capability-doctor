@@ -261,6 +261,33 @@ class ModelDoctorV6Tests(unittest.TestCase):
         return reviews
 
     def _complete_fact_fixture(self) -> tuple[dict, dict]:
+        def completion_response(
+            request_id: str,
+            content: str,
+            prompt_tokens: int,
+        ) -> str:
+            return json.dumps(
+                {
+                    "id": f"chatcmpl-{request_id}",
+                    "object": "chat.completion",
+                    "created": 1785427200,
+                    "model": "fixture-model",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {"role": "assistant", "content": content},
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": 1,
+                        "total_tokens": prompt_tokens + 1,
+                    },
+                },
+                ensure_ascii=False,
+            )
+
         requests = {
             "protocol-openai": self._request(
                 "protocol-openai",
@@ -281,11 +308,11 @@ class ModelDoctorV6Tests(unittest.TestCase):
             ),
             "context-pass": self._request(
                 "context-pass",
-                '{"choices":[{"message":{"role":"assistant","content":"PASS"}}]}',
+                completion_response("context-pass", "EXPECTED_SENTINEL", 80175),
             ),
             "context-fail": self._request(
                 "context-fail",
-                '{"error":{"message":"maximum context length exceeded"}}',
+                completion_response("context-fail", "NOT_FOUND", 131072),
             ),
             "concurrency-32-1": self._request(
                 "concurrency-32-1",
@@ -300,18 +327,21 @@ class ModelDoctorV6Tests(unittest.TestCase):
             ensure_ascii=False,
         )
         requests["context-pass"]["metrics"].update(
-            input_tokens="80175",
             context_tier="32K Token 近似档",
         )
         requests["context-fail"]["metrics"].update(
-            http_status="400",
-            input_tokens="131072",
             context_tier="64K Token 近似档",
         )
         requests["concurrency-32-1"]["metrics"].update(
             concurrency_level="32",
             successful_requests="32",
         )
+        context_prompt_tokens = {
+            request_id: json.loads(requests[request_id]["responseBody"])["usage"][
+                "prompt_tokens"
+            ]
+            for request_id in ("context-pass", "context-fail")
+        }
 
         parsed = {
             "schemaVersion": "llm-capability-doctor.parsed-evidence.v1",
@@ -359,7 +389,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "conclusion": (
                     "响应满足本项可观察契约，因此判定通过。"
                     if status == "PASS"
-                    else "响应明确拒绝该输入档位，因此判定未通过。"
+                    else "响应未返回目标哨兵，因此判定未通过。"
                 ),
                 "logic": self._logic(),
                 "evidenceRefs": [f"request:{request_id}"],
@@ -371,8 +401,10 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 value["failureAnalysis"] = {
                     "failureKind": "DIRECT",
                     "evidenceSufficiency": "SUFFICIENT",
-                    "supportedClaim": "131072 输入 Token 请求返回上下文长度超限错误。",
-                    "unsupportedClaims": ["不能据此推断低于该档位的精确硬上限。"],
+                    "supportedClaim": "usage 记录 131072 输入 Token，但响应未返回目标哨兵。",
+                    "unsupportedClaims": [
+                        "不能据此声称服务拒绝该输入或推断精确硬上限。"
+                    ],
                     "dependsOnTestIds": [],
                     "evidenceRefs": [f"request:{request_id}"],
                 }
@@ -391,9 +423,9 @@ class ModelDoctorV6Tests(unittest.TestCase):
             "contextWindow": {
                 "evidenceState": "VERIFIED",
                 "highestVerifiedTier": "32K Token 近似档",
-                "highestVerifiedInputTokens": 80175,
+                "highestVerifiedInputTokens": context_prompt_tokens["context-pass"],
                 "firstFailedTier": "64K Token 近似档",
-                "firstFailedInputTokens": 131072,
+                "firstFailedInputTokens": context_prompt_tokens["context-fail"],
                 "statement": "最高已验证 80175 输入 Token，131072 输入 Token 的更高档首次失败。",
                 "evidenceRefs": ["request:context-pass", "request:context-fail"],
                 "boundary": "最高已验证值不是硬上限，真实上限未测试。",
@@ -422,7 +454,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
                     "017",
                     "FAIL",
                     "context-fail",
-                    "131072 输入 Token 返回 maximum context length exceeded。",
+                    "usage.prompt_tokens=131072，响应内容为 NOT_FOUND。",
                 ),
                 "057": review(
                     "057",
@@ -432,15 +464,15 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 ),
             },
             "capabilitySummary": {
-                "headline": "协议与短时并发证据通过，更高上下文档位存在直接失败。",
+                "headline": "协议与短时并发证据通过，更高上下文档位语义验证失败。",
                 "verifiedFacts": verified,
                 "issues": [
                     {
-                        "title": "更高上下文档位失败",
-                        "statement": "131072 输入 Token 请求被服务拒绝。",
+                        "title": "更高上下文档位语义验证失败",
+                        "statement": "131072 输入 Token 被计入 usage，但未返回目标哨兵。",
                         "testRefs": ["017"],
                         "evidenceRefs": ["request:context-fail"],
-                        "boundary": "只证明本轮该档位失败，不推断精确硬上限。",
+                        "boundary": "只证明本轮该档语义验证失败，不代表服务拒绝输入或达到硬上限。",
                     }
                 ],
                 "scopeBoundary": "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
@@ -902,14 +934,39 @@ class ModelDoctorV6Tests(unittest.TestCase):
         self,
     ) -> None:
         parsed, reviews = self._complete_fact_fixture()
+        native_prompt_tokens = {
+            request_id: json.loads(parsed["requests"][request_id]["responseBody"])
+            .get("usage", {})
+            .get("prompt_tokens")
+            for request_id in ("context-pass", "context-fail")
+        }
+        self.assertEqual(
+            {"context-pass": 80175, "context-fail": 131072},
+            native_prompt_tokens,
+        )
+        for request_id in native_prompt_tokens:
+            self.assertNotIn(
+                "input_tokens",
+                parsed["requests"][request_id]["metrics"],
+            )
+            self.assertEqual(
+                "200",
+                parsed["requests"][request_id]["metrics"]["http_status"],
+            )
         self.assertEqual([], validate_reviews(parsed, reviews))
         assessment = assemble_assessment(parsed, reviews)
         self.assertEqual([], validate_assessment(assessment))
         html = render_report(assessment, ASSET_DIR)
         self.assertEqual(
-            80175,
+            native_prompt_tokens["context-pass"],
             assessment["capabilitySummary"]["verifiedFacts"]["contextWindow"][
                 "highestVerifiedInputTokens"
+            ],
+        )
+        self.assertEqual(
+            native_prompt_tokens["context-fail"],
+            assessment["capabilitySummary"]["verifiedFacts"]["contextWindow"][
+                "firstFailedInputTokens"
             ],
         )
         self.assertEqual(
