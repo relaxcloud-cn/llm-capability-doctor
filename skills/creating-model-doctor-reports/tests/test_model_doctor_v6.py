@@ -659,6 +659,68 @@ class ModelDoctorV6Tests(unittest.TestCase):
                     errors,
                 )
 
+    def test_assessment_duplicate_test_id_cannot_hide_fail_or_supply_fact_evidence(
+        self,
+    ) -> None:
+        assessment = assemble_assessment(self._parsed(), self._reviews())
+        duplicate = dict(assessment["tests"][0])
+        duplicate["testId"] = "002"
+        assessment["tests"].append(duplicate)
+        assessment["summary"]["counts"] = {"PASS": 2, "FAIL": 1}
+        assessment["categories"][0]["counts"]["PASS"] = 2
+        assessment["capabilitySummary"]["issues"] = []
+        assessment["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"][
+            "evidenceRefs"
+        ] = ["request:req-pass"]
+
+        errors = validate_assessment(assessment)
+
+        self.assertIn("tests[2] testId is duplicated: 002", errors)
+        self.assertIn("capabilitySummary does not cover FAIL tests: 002", errors)
+        self.assertIn(
+            "interfaceProtocol evidence reference is outside its allowed domain: "
+            "request:req-pass",
+            errors,
+        )
+
+    def test_assessment_rejects_invalid_test_ids_without_crashing(self) -> None:
+        invalid_ids = (None, "", "   ", [], {}, 2, True)
+        for test_id in invalid_ids:
+            with self.subTest(test_id=test_id):
+                assessment = assemble_assessment(self._parsed(), self._reviews())
+                assessment["tests"][0]["testId"] = test_id
+
+                try:
+                    errors = validate_assessment(assessment)
+                except (AttributeError, TypeError) as error:
+                    self.fail(f"invalid assessment testId caused crash: {error}")
+
+                self.assertIn(
+                    "tests[0] testId must be a non-empty string",
+                    errors,
+                )
+
+    def test_assessment_rejects_malformed_containers_without_crashing(self) -> None:
+        cases = (
+            ("assessment", None, [], "Assessment must be an object"),
+            ("summary", "summary", [], "summary must be an object"),
+            ("source", "source", None, "source must be an object"),
+        )
+        for name, field, value, expected in cases:
+            with self.subTest(name=name):
+                assessment = assemble_assessment(self._parsed(), self._reviews())
+                if field is None:
+                    assessment = value
+                else:
+                    assessment[field] = value
+
+                try:
+                    errors = validate_assessment(assessment)
+                except (AttributeError, TypeError) as error:
+                    self.fail(f"malformed assessment container caused crash: {error}")
+
+                self.assertIn(expected, errors)
+
     def test_assessment_rejects_uncovered_fail(self) -> None:
         try:
             assessment = assemble_assessment(self._parsed(), self._reviews())

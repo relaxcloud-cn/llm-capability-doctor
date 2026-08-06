@@ -607,10 +607,20 @@ def _assessment_evidence_ref_belongs_to_item(item: dict, reference: str) -> bool
     )
 
 
+def _assessment_items_by_id(items: List[dict]) -> Dict[str, dict]:
+    items_by_id: Dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if not _non_empty_string(test_id) or test_id in items_by_id:
+            continue
+        items_by_id[test_id] = item
+    return items_by_id
+
+
 def _assessment_fact_evidence_domains(items: List[dict]) -> Dict[str, set[str]]:
-    items_by_id = {
-        item.get("testId"): item for item in items if isinstance(item, dict)
-    }
+    items_by_id = _assessment_items_by_id(items)
 
     def request_refs(test_ids: set[str]) -> set[str]:
         references = set()
@@ -728,7 +738,7 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
     issues = summary.get("issues")
     if not isinstance(issues, list):
         return errors + ["capabilitySummary issues must be an array"]
-    items_by_id = {item.get("testId"): item for item in items}
+    items_by_id = _assessment_items_by_id(items)
     fail_ids = {
         test_id
         for test_id, item in items_by_id.items()
@@ -833,14 +843,25 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
     return errors
 
 
-def validate_assessment(assessment: dict) -> List[str]:
+def validate_assessment(assessment: object) -> List[str]:
     """Validate binary cross-field consistency after assessment assembly."""
+
+    if not isinstance(assessment, dict):
+        return ["Assessment must be an object"]
 
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
         errors.append("schemaVersion is invalid")
     for field in sorted(set(assessment) - ASSESSMENT_FIELDS):
         errors.append(f"Assessment field {field} is not allowed")
+
+    summary = assessment.get("summary")
+    if not isinstance(summary, dict):
+        errors.append("summary must be an object")
+    source = assessment.get("source")
+    if not isinstance(source, dict):
+        errors.append("source must be an object")
+
     items = assessment.get("tests")
     if not isinstance(items, list):
         return errors + ["tests must be an array"]
@@ -849,15 +870,31 @@ def validate_assessment(assessment: dict) -> List[str]:
         errors.append("tests contain a non-object item")
     if any(item.get("reviewedStatus") not in STATUSES for item in object_items):
         errors.append("tests contain a non-binary reviewedStatus")
+
+    valid_items = []
+    seen_test_ids = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if not _non_empty_string(test_id):
+            errors.append(f"tests[{index}] testId must be a non-empty string")
+            continue
+        if test_id in seen_test_ids:
+            errors.append(f"tests[{index}] testId is duplicated: {test_id}")
+            continue
+        seen_test_ids.add(test_id)
+        valid_items.append(item)
+
     statuses = {
         item.get("testId"): item.get("reviewedStatus")
-        for item in object_items
+        for item in valid_items
     }
     for item in object_items:
         test_id = item.get("testId", "unknown")
         for field in sorted(set(item) - TEST_FIELDS):
             errors.append(f"Test {test_id} field {field} is not allowed")
-        for field in ("testId", "category", "name", "conclusion", "rawObservation"):
+        for field in ("category", "name", "conclusion", "rawObservation"):
             if not _non_empty_string(item.get(field)):
                 errors.append(f"Test {test_id} {field} is required")
         for obsolete_field in ("confidence", "gateLevel"):
@@ -874,18 +911,18 @@ def validate_assessment(assessment: dict) -> List[str]:
                 )
         errors.extend(_validate_assessment_failure_analysis(item, statuses))
     expected_counts = _status_counts(object_items)
-    if assessment.get("summary", {}).get("counts") != expected_counts:
+    if isinstance(summary, dict) and summary.get("counts") != expected_counts:
         errors.append("summary counts do not match test results")
     if assessment.get("categories") != _categories(object_items):
         errors.append("categories do not match test results")
     errors.extend(
         _validate_assessment_summary(
-            object_items,
+            valid_items,
             assessment.get("capabilitySummary"),
         )
     )
     if "overall" in assessment:
         errors.append("overall is not part of the assessment.v6 contract")
-    if "path" in assessment.get("source", {}):
+    if isinstance(source, dict) and "path" in source:
         errors.append("source must not expose an absolute path")
     return errors
