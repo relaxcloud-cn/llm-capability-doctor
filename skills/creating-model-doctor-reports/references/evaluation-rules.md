@@ -5,13 +5,14 @@
 1. Evidence scope
 2. Binary decisions
 3. Cross-cutting rules
-4. Failure evidence audit and capability synthesis
-5. Interface and protocol
-6. Structured results
-7. Context, instruction, and reasoning
-8. Tool calls
-9. Performance and stability
-10. Security business language
+4. Verified capability facts
+5. Failure evidence audit and capability synthesis
+6. Interface and protocol
+7. Structured results
+8. Context, instruction, and reasoning
+9. Tool calls
+10. Performance and stability
+11. Security business language
 
 ## 1. Evidence Scope
 
@@ -44,7 +45,37 @@ An unsupported capability, transport failure, timeout, malformed response, missi
 12. Write the evidence clause in natural Chinese. Keep raw JSON field names, marker strings, sample values, request IDs, HTTP status codes, byte counts, and exhaustive metrics in `evidenceExcerpts`, `metrics`, or raw request evidence instead of the conclusion.
 13. Retain an English technical term only when it is necessary to name the result, such as JSON, an actual protocol name, or a context tier. A failed conclusion states the missing capability or unavailable measurement directly.
 
-## 4. Failure Evidence Audit and Capability Synthesis
+## 4. Verified Capability Facts
+
+Write `capabilitySummary.verifiedFacts` after every per-test PASS/FAIL and FAIL audit is fixed, and before grouping FAIL issues. These facts summarize observed capabilities; they never change a per-test decision or replace `failureAnalysis`.
+
+### Evidence state and ownership
+
+- `VERIFIED`: cite one or more references from the fact's allowed test domain. Protocol requires a known family, context requires `highestVerifiedTier`, and concurrency requires `highestVerifiedConcurrentRequests`. Record optional values only when the cited evidence directly supports them.
+- `INCONCLUSIVE`: use when the domain was collected but cannot support a verified fact. Cite the relevant evidence and keep unsupported values null or unknown; do not fill gaps by inference.
+- `NOT_COLLECTED`: use when the corresponding test or manifest was not collected. Use `UNKNOWN` plus empty references for protocol, null for every context tier/Token field, and null for concurrency plus empty references. Keep each required `statement`, `boundary`, `requestFormat`, and `responseFormat` string explicit about non-collection.
+
+Historical or custom logs that lack a fact's test domain use `NOT_COLLECTED`. Do not infer facts from the model name, URL, provider documentation, or unrelated requests.
+
+### Interface protocol
+
+Derive `interfaceProtocol` only from test 002's actual request and response structures, and name both structures in `requestFormat` and `responseFormat`. Classify `family` as `OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `ANTHROPIC_MESSAGES`, `GEMINI_GENERATE_CONTENT`, `OLLAMA_CHAT`, `CUSTOM`, or `UNKNOWN`.
+
+A request and response matching a known protocol use that known family, never `CUSTOM`. A probe that receives an unmatched response may remain `UNKNOWN`; an error, wrapper, or otherwise unmatched response does not automatically prove a coherent custom protocol.
+
+### Context window
+
+Derive `contextWindow` only from tests 014-018. Report the highest passing collected tier and the first failing collected higher tier. If no higher tier was collected, leave the failure fields null. Populate `highestVerifiedInputTokens` and `firstFailedInputTokens` only from native provider response usage fields; character counts and prompt-size estimates are not exact Token values and leave those fields null.
+
+The highest pass and first higher failure define an observed interval, not an exact limit or root cause. Say “最高已验证” or “至少支持”. Even when every collected tier passes, the highest tested tier 不能写成真实硬上限.
+
+### Concurrency
+
+Derive `concurrency` only after inspecting every request in every collected test 057 wave. A wave counts as verified only when its complete sample set is present, every response is semantically correct, every required metric is valid, and no sample is rate-limited. Missing, invalid, or rate-limited samples disqualify that wave but do not erase a lower fully verified wave.
+
+“32 concurrent requests passed” means the service at least supported, or 最高已验证, 32-way short-run concurrency in this collection. It does not establish the real maximum, a hard limit, sustained load behavior, or an SLA.
+
+## 5. Failure Evidence Audit and Capability Synthesis
 
 Complete this stage only after every manifest has a fixed PASS or FAIL. Cross-test synthesis never changes a per-test status.
 
@@ -88,7 +119,7 @@ Apply these recurring boundaries:
 
 The exact scope boundary is `本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。`
 
-## 5. Interface and Protocol
+## 6. Interface and Protocol
 
 ### 001 URL 可达性
 
@@ -143,7 +174,7 @@ The exact scope boundary is `本节仅总结本轮可观察能力，不构成项
 - `PASS`: a clear client error such as HTTP 400/422 plus recognizable parse/request-format information.
 - `FAIL`: 2xx, authentication error, 404, 5xx, connection drop, or no clear error body.
 
-## 6. Structured Results
+## 7. Structured Results
 
 ### 009 裸 JSON 输出
 
@@ -175,7 +206,7 @@ The exact scope boundary is `本节仅总结本轮可观察能力，不构成项
 - `PASS`: stage, reference, and evidence entity all exist and correlate.
 - `FAIL`: missing entity, dangling/mismatched reference, or invalid JSON.
 
-## 7. Context, Instruction, and Reasoning
+## 8. Context, Instruction, and Reasoning
 
 ### 014 8K 级上下文
 
@@ -275,7 +306,7 @@ For 014-018, each conclusion summarizes whether all requested information was re
 - `PASS`: exactly `order:["A","B","C"]`, `bTime:"09:22"`, and `cTime:"09:27"`.
 - `FAIL`: wrong order/time/field/type or invalid JSON.
 
-## 8. Tool Calls
+## 9. Tool Calls
 
 Require protocol-native formal tool calls. Natural-language descriptions never count.
 
@@ -331,7 +362,7 @@ Require protocol-native formal tool calls. Natural-language descriptions never c
 - `PASS`: from ten candidates, exactly one `get_weather(city="Beijing")`.
 - `FAIL`: distractor selected, multiple calls, wrong argument, text-only output, or failure.
 
-## 9. Performance and Stability
+## 10. Performance and Stability
 
 Semantic correctness is required for every sample. `time_total` means 完整响应延迟, not TTFB, TTFT, throughput, or Token generation speed.
 
@@ -374,7 +405,7 @@ Semantic correctness is required for every sample. `time_total` means 完整响�
 - `FAIL`: any timeout, HTTP/protocol/content error, missing sample, rate limit, or invalid metric.
 - Conclusion: summarize whether every executed concurrency wave succeeded without rate limiting, then judge the highest verified short-run concurrency tier. Keep each wave's success count, rate-limit count, P50, nearest-rank P95, and maximum complete-response latency in evidence. This short run 不构成 SLA or sustained-load proof.
 
-## 10. Security Business Language
+## 11. Security Business Language
 
 The experiment request is the capability target. The control request is diagnostic context for failure attribution.
 

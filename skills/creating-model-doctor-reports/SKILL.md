@@ -31,7 +31,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    python3 scripts/model_doctor_report.py parse "$LOG" --output "$TMP/parsed.json"
    ```
 
-3. Read `references/evaluation-rules.md` completely. The output contract is `llm-capability-doctor.assessment.v5` in `references/assessment-schema.json`.
+3. Read `references/evaluation-rules.md` completely. Author `llm-capability-doctor.reviews.v2`; the rendered output contract is `llm-capability-doctor.assessment.v6` in `references/assessment-schema.json`.
 4. Inspect the inventory and small evidence packets:
 
    ```bash
@@ -57,7 +57,17 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - `dependsOnTestIds` links derived failures to other FAIL checks so the final conclusion does not count them twice.
    - `evidenceRefs` must exist and belong to the current manifest.
 
-7. After every per-test status is fixed, synthesize `capabilitySummary` from all FAIL items.
+7. After every per-test PASS/FAIL and FAIL audit is fixed, write `capabilitySummary.verifiedFacts` before grouping FAIL issues.
+
+   - Derive `interfaceProtocol` only from test 002's actual request and response structures. Use `OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `ANTHROPIC_MESSAGES`, `GEMINI_GENERATE_CONTENT`, `OLLAMA_CHAT`, `CUSTOM`, or `UNKNOWN`, and describe both formats. A matched known protocol is not `CUSTOM`; unmatched evidence may remain `UNKNOWN` and does not automatically prove `CUSTOM`.
+   - Derive `contextWindow` from tests 014-018. Record the highest passing collected tier and the first collected higher failure. Populate `highestVerifiedInputTokens` and `firstFailedInputTokens` only from provider response usage fields; never convert character estimates into exact Tokens.
+   - Derive `concurrency` by inspecting every test 057 wave. Set `highestVerifiedConcurrentRequests` only for the highest complete wave whose samples are all semantically correct, have valid metrics, and contain no missing sample or rate limit.
+   - Phrase supported values as “最高已验证” or “至少支持”; never call the highest tested value the real maximum or hard limit.
+   - Use `NOT_COLLECTED` with null values and empty `evidenceRefs` when the corresponding tests or manifests were not collected. Use `INCONCLUSIVE` with evidence references when evidence was collected but is insufficient.
+
+   Facts neither change per-test PASS/FAIL nor replace `failureAnalysis`.
+
+8. Group all FAIL items into `capabilitySummary.issues`.
 
    - Write one customer-readable `headline` without READY, BLOCKED, 可上线, or 不可上线 project decisions.
    - Group all FAILs into one to five issues ordered by impact and evidence strength. Every FAIL must appear in exactly one issue.
@@ -71,7 +81,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
 
    ```json
    {
-     "schemaVersion": "llm-capability-doctor.reviews.v1",
+     "schemaVersion": "llm-capability-doctor.reviews.v2",
      "tests": {
        "008": {
          "testId": "008",
@@ -100,6 +110,34 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
      },
      "capabilitySummary": {
        "headline": "基础能力可用，但接口错误可观测性存在缺口。",
+       "verifiedFacts": {
+         "interfaceProtocol": {
+           "evidenceState": "NOT_COLLECTED",
+           "family": "UNKNOWN",
+           "requestFormat": "本轮未采集测试 002 请求结构。",
+           "responseFormat": "本轮未采集测试 002 响应结构。",
+           "statement": "本轮未采集接口协议证据。",
+           "evidenceRefs": [],
+           "boundary": "不能从模型名称、URL 或其他请求推断协议。"
+         },
+         "contextWindow": {
+           "evidenceState": "NOT_COLLECTED",
+           "highestVerifiedTier": null,
+           "highestVerifiedInputTokens": null,
+           "firstFailedTier": null,
+           "firstFailedInputTokens": null,
+           "statement": "本轮未采集上下文档位证据。",
+           "evidenceRefs": [],
+           "boundary": "未采集时不能推断上下文上限。"
+         },
+         "concurrency": {
+           "evidenceState": "NOT_COLLECTED",
+           "highestVerifiedConcurrentRequests": null,
+           "statement": "本轮未采集并发波次证据。",
+           "evidenceRefs": [],
+           "boundary": "未采集时不能推断并发上限。"
+         }
+       },
        "issues": [{
          "title": "错误可观测性不足",
          "statement": "异常请求未获得结构化错误响应。",
@@ -112,13 +150,13 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    }
    ```
 
-8. Validate and correct every error:
+9. Validate and correct every error:
 
    ```bash
    python3 scripts/model_doctor_report.py validate "$TMP/parsed.json" "$TMP/reviews.json"
    ```
 
-9. Render both outputs beside the source log with a filesystem-safe model slug:
+10. Render both outputs beside the source log with a filesystem-safe model slug:
 
    ```bash
    python3 scripts/model_doctor_report.py render "$TMP/parsed.json" "$TMP/reviews.json" \
@@ -127,6 +165,6 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    ```
 
    The renderer puts “最终结论” immediately below “检测信息” and puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all evidence rows without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
-10. Verify the source hash is unchanged, assessment is v5, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, and every referenced request appears in its report row.
-11. Verify the HTML contains exactly one final-conclusion section between detection information and the capability-domain table, one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
-12. Report absolute output paths, PASS/FAIL counts, and the bounded summary headline. Never add another status class or a project readiness verdict.
+11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v6`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, and every referenced request appears in its report row.
+12. Verify the HTML contains exactly one final-conclusion section between detection information and the capability-domain table; confirm its “接口协议格式”, “上下文能力”, and “并发能力” rows all render. Verify one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
+13. Report absolute output paths, PASS/FAIL counts, and the bounded summary headline. Never add another status class or a project readiness verdict.

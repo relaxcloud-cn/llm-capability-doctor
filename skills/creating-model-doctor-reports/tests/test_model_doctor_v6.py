@@ -1272,6 +1272,20 @@ test_manifest_count: 1
         self.assertIn("不得手工修改渲染后的 HTML", skill_text)
         self.assertNotIn("assessment.v4", skill_text)
 
+    def test_skill_requires_verified_protocol_context_and_concurrency_facts(self) -> None:
+        skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "llm-capability-doctor.reviews.v2",
+            "llm-capability-doctor.assessment.v6",
+            "interfaceProtocol",
+            "contextWindow",
+            "highestVerifiedInputTokens",
+            "firstFailedInputTokens",
+            "highestVerifiedConcurrentRequests",
+        ):
+            self.assertIn(marker, skill_text)
+
     def test_evaluation_rules_define_evidence_sufficiency_and_grouping(self) -> None:
         rules_text = (
             SKILL_DIR / "references" / "evaluation-rules.md"
@@ -1285,6 +1299,14 @@ test_manifest_count: 1
             "dependsOnTestIds",
             "最多五项",
         ):
+            self.assertIn(marker, rules_text)
+
+    def test_rules_forbid_claiming_tested_values_as_hard_limits(self) -> None:
+        rules_text = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+
+        for marker in ("最高已验证", "不能写成真实硬上限", "002", "014-018", "057"):
             self.assertIn(marker, rules_text)
 
 
