@@ -66,6 +66,7 @@ def _unbounded_claim(value: object) -> bool:
     safe = (
         "不是硬上限",
         "不代表硬上限",
+        "不构成硬上限",
         "真实上限未测试",
         "上限无法确认",
         "不能确定上限",
@@ -104,6 +105,11 @@ def _shared_errors(
     evidence_state = value.get("evidenceState")
     if not isinstance(evidence_state, str) or evidence_state not in EVIDENCE_STATES:
         errors.append(f"{prefix} evidenceState is invalid")
+    if evidence_state == "NOT_COLLECTED" and allowed_refs:
+        errors.append(
+            f"{prefix} NOT_COLLECTED is invalid when its evidence domain "
+            "contains collected requests"
+        )
     for field in ("statement", "boundary"):
         if not _non_empty(value.get(field)):
             errors.append(f"{prefix} {field} is required")
@@ -143,6 +149,8 @@ def _validate_interface(value: object, allowed_refs: Set[str]) -> List[str]:
 
     state = value.get("evidenceState")
     refs = value.get("evidenceRefs")
+    if family == "CUSTOM" and state != "VERIFIED":
+        errors.append(f"{prefix} CUSTOM requires evidenceState VERIFIED")
     if state == "VERIFIED":
         if not _has_refs(refs):
             errors.append(f"{prefix} VERIFIED requires evidenceRefs")

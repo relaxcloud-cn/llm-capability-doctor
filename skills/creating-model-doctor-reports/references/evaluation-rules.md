@@ -53,7 +53,7 @@ Write `capabilitySummary.verifiedFacts` after every per-test PASS/FAIL and FAIL 
 
 - `VERIFIED`: cite one or more references from the fact's allowed test domain. Protocol requires a known family, context requires `highestVerifiedTier`, and concurrency requires `highestVerifiedConcurrentRequests`. Record optional values only when the cited evidence directly supports them.
 - `INCONCLUSIVE`: use when the domain was collected but cannot support a verified fact. Cite the relevant evidence and keep unsupported values null or unknown; do not fill gaps by inference.
-- `NOT_COLLECTED`: use when the corresponding test or manifest was not collected. Use `UNKNOWN` plus empty references for protocol, null for every context tier/Token field, and null for concurrency plus empty references. Keep each required `statement`, `boundary`, `requestFormat`, and `responseFormat` string explicit about non-collection.
+- `NOT_COLLECTED`: use only when the corresponding test domain contains no collected request. Use `UNKNOWN` plus empty references for protocol, null for every context tier/Token field, and null for concurrency plus empty references. Keep each required `statement`, `boundary`, `requestFormat`, and `responseFormat` string explicit about non-collection. A non-empty allowed evidence domain cannot use `NOT_COLLECTED`.
 
 Historical or custom logs that lack a fact's test domain use `NOT_COLLECTED`. Do not infer facts from the model name, URL, provider documentation, or unrelated requests.
 
@@ -61,7 +61,7 @@ Historical or custom logs that lack a fact's test domain use `NOT_COLLECTED`. Do
 
 Derive `interfaceProtocol` only from test 002's actual request and response structures, and name both structures in `requestFormat` and `responseFormat`. Classify `family` as `OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `ANTHROPIC_MESSAGES`, `GEMINI_GENERATE_CONTENT`, `OLLAMA_CHAT`, `CUSTOM`, or `UNKNOWN`.
 
-A request and response matching a known protocol use that known family, never `CUSTOM`. A probe that receives an unmatched response may remain `UNKNOWN`; an error, wrapper, or otherwise unmatched response does not automatically prove a coherent custom protocol.
+A request and response matching a known protocol use that known family, never `CUSTOM`. `VERIFIED CUSTOM` requires cited test-002 evidence of a complete, coherent request/response contract: describe both structures and establish that the pair matches none of the five known families. An error envelope, wrapper, one-off unmatched response, or only one unmatched side remains `UNKNOWN/INCONCLUSIVE`; never guess `CUSTOM`.
 
 ### Context window
 

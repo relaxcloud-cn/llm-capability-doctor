@@ -30,6 +30,7 @@ from model_doctor_log import (  # noqa: E402
     redact_text,
 )
 from model_doctor_report import main  # noqa: E402
+from model_doctor_verified_facts import validate_verified_facts  # noqa: E402
 
 
 def _full_v2_log() -> str:
@@ -288,6 +289,92 @@ class ModelDoctorV6Tests(unittest.TestCase):
         errors = validate_reviews(self._parsed(), reviews)
         self.assertTrue(any("NOT_COLLECTED" in error for error in errors))
 
+    def test_not_collected_rejects_each_collected_fact_domain(self) -> None:
+        facts = self._verified_facts()
+        facts["interfaceProtocol"].update(
+            evidenceState="NOT_COLLECTED",
+            family="UNKNOWN",
+            evidenceRefs=[],
+        )
+        domains = {
+            "interfaceProtocol": {"request:req-002"},
+            "contextWindow": {"request:req-014"},
+            "concurrency": {"request:req-057"},
+        }
+
+        errors = validate_verified_facts(facts, domains)
+
+        for fact_name in domains:
+            self.assertIn(
+                f"{fact_name} NOT_COLLECTED is invalid when its evidence domain "
+                "contains collected requests",
+                errors,
+            )
+        self.assertEqual(
+            [],
+            validate_verified_facts(
+                facts,
+                {fact_name: set() for fact_name in domains},
+            ),
+        )
+
+    def test_reviews_reject_not_collected_for_collected_protocol(self) -> None:
+        reviews = self._reviews()
+        reviews["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"].update(
+            evidenceState="NOT_COLLECTED",
+            family="UNKNOWN",
+            evidenceRefs=[],
+        )
+
+        errors = validate_reviews(self._parsed(), reviews)
+
+        self.assertIn(
+            "interfaceProtocol NOT_COLLECTED is invalid when its evidence domain "
+            "contains collected requests",
+            errors,
+        )
+
+    def test_custom_protocol_requires_verified_state(self) -> None:
+        for state, rejected in (("INCONCLUSIVE", True), ("VERIFIED", False)):
+            with self.subTest(state=state):
+                reviews = self._reviews()
+                protocol = reviews["capabilitySummary"]["verifiedFacts"][
+                    "interfaceProtocol"
+                ]
+                protocol.update(evidenceState=state, family="CUSTOM")
+
+                errors = validate_reviews(self._parsed(), reviews)
+
+                expected = "interfaceProtocol CUSTOM requires evidenceState VERIFIED"
+                if rejected:
+                    self.assertIn(expected, errors)
+                else:
+                    self.assertNotIn(expected, errors)
+
+    def test_bounded_hard_limit_phrase_is_allowed(self) -> None:
+        parsed = self._parsed()
+        parsed["tests"]["057"] = {
+            "category": "性能与稳定性",
+            "name": "并发响应时间",
+            "requestRefs": ["req-pass"],
+        }
+        reviews = self._reviews()
+        reviews["tests"]["057"] = self._test_review("057", "PASS")
+        concurrency = reviews["capabilitySummary"]["verifiedFacts"]["concurrency"]
+        concurrency.update(
+            evidenceState="VERIFIED",
+            highestVerifiedConcurrentRequests=32,
+            statement="本轮最高已验证 32 路并发，不构成硬上限。",
+            evidenceRefs=["request:req-pass"],
+        )
+
+        self.assertEqual([], validate_reviews(parsed, reviews))
+        concurrency["statement"] = "本轮 32 路并发是真实硬上限。"
+        self.assertIn(
+            "concurrency statement contains an unbounded maximum claim",
+            validate_reviews(parsed, reviews),
+        )
+
     def test_verified_facts_validation_matrix(self) -> None:
         cases = (
             (
@@ -377,15 +464,15 @@ class ModelDoctorV6Tests(unittest.TestCase):
             )
             facts["contextWindow"].update(
                 evidenceState="VERIFIED",
-                highestVerifiedTier="0 Token 边界档",
-                highestVerifiedInputTokens=0,
-                statement="本轮已验证 0 Token 输入边界值。",
+                highestVerifiedTier="8K Token 近似档",
+                highestVerifiedInputTokens=8120,
+                statement="本轮至少支持 8K Token 近似档输入。",
                 evidenceRefs=["request:req-pass"],
             )
             facts["concurrency"].update(
                 evidenceState="VERIFIED",
-                highestVerifiedConcurrentRequests=1,
-                statement="本轮已验证 1 路并发请求成功。",
+                highestVerifiedConcurrentRequests=4,
+                statement="本轮最高已验证 4 路短时并发请求成功。",
                 evidenceRefs=["request:req-pass"],
             )
             self.assertEqual([], validate_reviews(parsed, reviews))
@@ -1274,6 +1361,9 @@ test_manifest_count: 1
 
     def test_skill_requires_verified_protocol_context_and_concurrency_facts(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        workflow = skill_text.split("## Workflow", 1)[1].split(
+            "Write `$TMP/reviews.json`", 1
+        )[0]
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
@@ -1284,7 +1374,39 @@ test_manifest_count: 1
             "firstFailedInputTokens",
             "highestVerifiedConcurrentRequests",
         ):
-            self.assertIn(marker, skill_text)
+            self.assertIn(marker, workflow)
+        self.assertLess(
+            workflow.index("capabilitySummary.verifiedFacts"),
+            workflow.index("capabilitySummary.issues"),
+        )
+
+    def test_skill_reviews_example_is_valid_and_evidence_bounded(self) -> None:
+        skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        match = re.search(
+            r"Write `\$TMP/reviews\.json` in this envelope:\s*"
+            r"```json\s*(\{.*?\})\s*```",
+            skill_text,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(match)
+        reviews = json.loads(match.group(1))
+        parsed = self._parsed()
+        parsed["tests"] = {
+            "008": {
+                "category": "接口与协议",
+                "name": "错误可观测性",
+                "requestRefs": ["test-008"],
+            }
+        }
+        parsed["requests"] = {
+            "test-008": self._request("test-008", "UNSTRUCTURED_ERROR")
+        }
+
+        self.assertEqual([], validate_reviews(parsed, reviews))
+        self.assertNotIn(
+            "基础能力可用",
+            reviews["capabilitySummary"]["headline"],
+        )
 
     def test_evaluation_rules_define_evidence_sufficiency_and_grouping(self) -> None:
         rules_text = (
@@ -1305,9 +1427,18 @@ test_manifest_count: 1
         rules_text = (
             SKILL_DIR / "references" / "evaluation-rules.md"
         ).read_text(encoding="utf-8")
+        facts_section = rules_text.split(
+            "## 4. Verified Capability Facts", 1
+        )[1].split("## 5. Failure Evidence Audit", 1)[0]
 
         for marker in ("最高已验证", "不能写成真实硬上限", "002", "014-018", "057"):
-            self.assertIn(marker, rules_text)
+            self.assertIn(marker, facts_section)
+        for custom_rule in (
+            "complete, coherent request/response contract",
+            "matches none of the five known families",
+            "UNKNOWN/INCONCLUSIVE",
+        ):
+            self.assertIn(custom_rule, facts_section)
 
 
 if __name__ == "__main__":

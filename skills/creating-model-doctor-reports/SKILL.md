@@ -59,11 +59,12 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
 
 7. After every per-test PASS/FAIL and FAIL audit is fixed, write `capabilitySummary.verifiedFacts` before grouping FAIL issues.
 
-   - Derive `interfaceProtocol` only from test 002's actual request and response structures. Use `OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `ANTHROPIC_MESSAGES`, `GEMINI_GENERATE_CONTENT`, `OLLAMA_CHAT`, `CUSTOM`, or `UNKNOWN`, and describe both formats. A matched known protocol is not `CUSTOM`; unmatched evidence may remain `UNKNOWN` and does not automatically prove `CUSTOM`.
+   - Derive `interfaceProtocol` only from test 002's actual request and response structures. Use `OPENAI_CHAT_COMPLETIONS`, `OPENAI_RESPONSES`, `ANTHROPIC_MESSAGES`, `GEMINI_GENERATE_CONTENT`, `OLLAMA_CHAT`, `CUSTOM`, or `UNKNOWN`, and describe both formats. A matched known protocol is not `CUSTOM`.
+   - Use `VERIFIED CUSTOM` only when cited test 002 evidence exposes a complete, coherent request/response contract, both structures are describable, and the pair matches none of the five known families. Keep an error envelope, wrapper, one-off unmatched response, or only one unmatched side `UNKNOWN/INCONCLUSIVE`; never guess `CUSTOM`.
    - Derive `contextWindow` from tests 014-018. Record the highest passing collected tier and the first collected higher failure. Populate `highestVerifiedInputTokens` and `firstFailedInputTokens` only from provider response usage fields; never convert character estimates into exact Tokens.
    - Derive `concurrency` by inspecting every test 057 wave. Set `highestVerifiedConcurrentRequests` only for the highest complete wave whose samples are all semantically correct, have valid metrics, and contain no missing sample or rate limit.
    - Phrase supported values as “最高已验证” or “至少支持”; never call the highest tested value the real maximum or hard limit.
-   - Use `NOT_COLLECTED` with null values and empty `evidenceRefs` when the corresponding tests or manifests were not collected. Use `INCONCLUSIVE` with evidence references when evidence was collected but is insufficient.
+   - Use `NOT_COLLECTED` with null values and empty `evidenceRefs` only when the corresponding domain has no collected request. Use `INCONCLUSIVE` with evidence references when evidence was collected but is insufficient.
 
    Facts neither change per-test PASS/FAIL nor replace `failureAnalysis`.
 
@@ -109,7 +110,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
        }
      },
      "capabilitySummary": {
-       "headline": "基础能力可用，但接口错误可观测性存在缺口。",
+       "headline": "本轮仅观察到错误可观测性缺口，其他能力未在该示例中采集。",
        "verifiedFacts": {
          "interfaceProtocol": {
            "evidenceState": "NOT_COLLECTED",
