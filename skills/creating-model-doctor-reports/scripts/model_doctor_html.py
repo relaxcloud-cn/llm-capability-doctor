@@ -29,6 +29,15 @@ PROTOCOL_FAMILY_LABELS = {
     "CUSTOM": "自定义格式",
     "UNKNOWN": "未确认",
 }
+PROTOCOL_FACT_LABELS = {
+    "OPENAI_CHAT_COMPLETIONS": "OpenAI Chat",
+    "OPENAI_RESPONSES": "OpenAI Responses",
+    "ANTHROPIC_MESSAGES": "Anthropic Messages",
+    "GEMINI_GENERATE_CONTENT": "Gemini GenerateContent",
+    "OLLAMA_CHAT": "Ollama Chat",
+    "CUSTOM": "自定义格式",
+}
+VERDICT_LEVELS = {"PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"}
 
 
 def _e(value: object) -> str:
@@ -169,6 +178,65 @@ def _verified_facts(facts: dict) -> str:
     return f'<dl class="verified-facts">{rendered_rows}</dl>'
 
 
+def _general_verdict(summary: dict) -> str:
+    verdict = summary.get("generalVerdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    facts = summary.get("verifiedFacts")
+    facts = facts if isinstance(facts, dict) else {}
+    interface = facts.get("interfaceProtocol")
+    interface = interface if isinstance(interface, dict) else {}
+    context = facts.get("contextWindow")
+    context = context if isinstance(context, dict) else {}
+    concurrency = facts.get("concurrency")
+    concurrency = concurrency if isinstance(concurrency, dict) else {}
+
+    level = verdict.get("level")
+    class_level = level if level in VERDICT_LEVELS else "NOT_ASSESSED"
+    if level == "NOT_ASSESSED":
+        result_value = (
+            f'已采集 {verdict.get("collectedTests", 0)}/'
+            f'{verdict.get("totalTests", 46)}'
+        )
+    else:
+        result_value = (
+            f'{verdict.get("passedTests", 0)}/'
+            f'{verdict.get("totalTests", 46)} 通过'
+        )
+
+    protocol_value = "未确认"
+    if interface.get("evidenceState") == "VERIFIED":
+        protocol_value = PROTOCOL_FACT_LABELS.get(
+            interface.get("family"),
+            "未确认",
+        )
+    context_value = "未确认"
+    if context.get("evidenceState") == "VERIFIED":
+        context_value = context.get("highestVerifiedTier") or "未确认"
+    concurrency_value = "未确认"
+    if concurrency.get("evidenceState") == "VERIFIED":
+        highest_concurrency = concurrency.get("highestVerifiedConcurrentRequests")
+        if highest_concurrency is not None:
+            concurrency_value = f"{highest_concurrency} 并发"
+
+    fact_rows = (
+        ("检测结果", result_value),
+        ("接口协议", protocol_value),
+        ("上下文", context_value),
+        ("并发", concurrency_value),
+    )
+    rendered_facts = "".join(
+        f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
+        for label, value in fact_rows
+    )
+    return (
+        f'<div class="general-verdict general-verdict-{class_level}">'
+        f'<p class="general-verdict-label">综合结论：{_e(verdict.get("label"))}</p>'
+        f'<p class="general-verdict-statement">{_e(verdict.get("statement"))}</p>'
+        "</div>"
+        f'<dl class="capability-fact-strip">{rendered_facts}</dl>'
+    )
+
+
 def _capability_summary(summary: dict) -> str:
     issues = summary.get("issues", [])
     issue_list = ""
@@ -193,6 +261,7 @@ def _capability_summary(summary: dict) -> str:
         '<section class="final-conclusion" aria-labelledby="final-conclusion-heading">'
         '<h2 id="final-conclusion-heading" class="final-conclusion-heading">'
         "最终结论</h2>"
+        f"{_general_verdict(summary)}"
         f'{_verified_facts(summary.get("verifiedFacts", {}))}'
         f'<p class="final-conclusion-lead">{_e(summary.get("headline"))}</p>'
         f"{issue_list}"

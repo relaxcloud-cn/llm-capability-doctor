@@ -22,6 +22,7 @@ from model_doctor_assessment import (  # noqa: E402
     validate_reviews,
 )
 from model_doctor_log import RETAINED_TEST_IDS  # noqa: E402
+from model_doctor_html import _capability_summary  # noqa: E402
 
 
 class GeneralVerdictTests(unittest.TestCase):
@@ -237,7 +238,8 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
 
     def test_assembler_injects_general_verdict_without_mutating_reviews(self) -> None:
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
-        statuses["060"] = "FAIL"
+        for test_id in ("017", "018", "020", "024", "035", "036"):
+            statuses[test_id] = "FAIL"
         parsed, reviews = self._fixture(statuses)
 
         assessment = assemble_assessment(parsed, reviews)
@@ -318,6 +320,138 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             ["PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"],
             verdict_schema["properties"]["level"]["enum"],
         )
+
+
+class GeneralVerdictHtmlTests(unittest.TestCase):
+    def _summary(self, verdict: dict) -> dict:
+        return {
+            "generalVerdict": verdict,
+            "headline": "已验证能力摘要。",
+            "verifiedFacts": {
+                "interfaceProtocol": {
+                    "evidenceState": "VERIFIED",
+                    "family": "OPENAI_CHAT_COMPLETIONS",
+                    "requestFormat": "OpenAI Chat 请求格式。",
+                    "responseFormat": "OpenAI Chat 响应格式。",
+                    "statement": "本轮已验证 OpenAI Chat 接口。",
+                    "evidenceRefs": ["request:protocol"],
+                    "boundary": "仅覆盖本轮接口请求。",
+                },
+                "contextWindow": {
+                    "evidenceState": "VERIFIED",
+                    "highestVerifiedTier": "32K Token 近似档",
+                    "highestVerifiedInputTokens": 80175,
+                    "firstFailedTier": "64K Token 近似档",
+                    "firstFailedInputTokens": 131072,
+                    "statement": "最高通过 32K Token 近似档。",
+                    "evidenceRefs": ["request:context"],
+                    "boundary": "不代表真实硬上限。",
+                },
+                "concurrency": {
+                    "evidenceState": "VERIFIED",
+                    "highestVerifiedConcurrentRequests": 32,
+                    "statement": "32 并发波次 32/32 成功且无 429。",
+                    "evidenceRefs": ["request:concurrency"],
+                    "boundary": "仅覆盖本轮短时并发。",
+                },
+            },
+            "issues": [
+                {
+                    "title": "一项增强能力受限",
+                    "statement": "固定样本未满足契约。",
+                    "testRefs": ["060"],
+                    "evidenceRefs": ["test:060:manifest"],
+                    "boundary": "不扩大到未测试场景。",
+                }
+            ],
+            "scopeBoundary": (
+                "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。"
+            ),
+        }
+
+    def test_final_conclusion_uses_fixed_customer_information_order(self) -> None:
+        statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
+        for test_id in ("017", "018", "020", "024", "035", "036"):
+            statuses[test_id] = "FAIL"
+        summary = self._summary(derive_general_verdict(statuses))
+
+        html = _capability_summary(summary)
+
+        markers = (
+            "最终结论",
+            "综合结论：通用能力有条件通过",
+            summary["generalVerdict"]["statement"],
+            "40/46 通过",
+            "OpenAI Chat",
+            "32K Token 近似档",
+            "32 并发",
+            "已验证能力摘要。",
+            "一项增强能力受限",
+            summary["scopeBoundary"],
+        )
+        positions = tuple(html.find(marker) for marker in markers)
+        self.assertTrue(all(position >= 0 for position in positions), positions)
+        self.assertEqual(tuple(sorted(positions)), positions)
+        self.assertEqual(1, html.count("综合结论："))
+
+    def test_all_verdict_labels_render(self) -> None:
+        scenarios = []
+        all_pass = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
+        scenarios.append((all_pass, "通用能力通过"))
+        conditional = dict(all_pass)
+        conditional["060"] = "FAIL"
+        scenarios.append((conditional, "通用能力有条件通过"))
+        failed = dict(all_pass)
+        failed["001"] = "FAIL"
+        scenarios.append((failed, "通用能力未通过"))
+        scenarios.append(({"001": "PASS"}, "通用能力未评定"))
+
+        for statuses, label in scenarios:
+            with self.subTest(label=label):
+                html = _capability_summary(
+                    self._summary(derive_general_verdict(statuses))
+                )
+                self.assertIn(f"综合结论：{label}", html)
+
+    def test_partial_report_shows_collected_count_instead_of_pass_ratio(self) -> None:
+        html = _capability_summary(
+            self._summary(derive_general_verdict({"001": "PASS"}))
+        )
+
+        self.assertIn("已采集 1/46", html)
+        self.assertNotIn("1/46 通过", html)
+
+    def test_new_conclusion_fields_are_html_escaped(self) -> None:
+        summary = self._summary(derive_general_verdict({"001": "PASS"}))
+        summary["generalVerdict"]["label"] = '<script data-x="1">label</script>'
+        summary["generalVerdict"]["statement"] = "<b>statement</b>"
+        summary["verifiedFacts"]["contextWindow"]["highestVerifiedTier"] = (
+            "<img src=x onerror=alert(1)>"
+        )
+
+        html = _capability_summary(summary)
+
+        self.assertNotIn("<script data-x", html)
+        self.assertNotIn("<b>statement</b>", html)
+        self.assertNotIn("<img src=x", html)
+        self.assertIn("&lt;script data-x=&quot;1&quot;&gt;", html)
+        self.assertIn("&lt;b&gt;statement&lt;/b&gt;", html)
+        self.assertIn("&lt;img src=x onerror=alert(1)&gt;", html)
+
+    def test_customer_verdict_css_has_responsive_and_print_rules(self) -> None:
+        css = (SKILL_DIR / "assets" / "report.css").read_text(encoding="utf-8")
+
+        for selector in (
+            ".general-verdict",
+            ".general-verdict-label",
+            ".capability-fact-strip",
+            ".capability-fact-strip > div",
+        ):
+            self.assertIn(selector, css)
+        mobile = css[css.index("@media (max-width: 640px)") :]
+        self.assertIn(".capability-fact-strip", mobile)
+        printing = css[css.index("@media print") :]
+        self.assertIn(".general-verdict", printing)
 
 
 if __name__ == "__main__":
