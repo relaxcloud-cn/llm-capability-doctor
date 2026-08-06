@@ -205,5 +205,5 @@ cargo build --release --locked
 
 ## Shell 参考实现
 
-`model-capability-doctor.sh` 仅保留为 v0.7.0 行为对照和历史兼容实现。Rust CLI
-不调用该脚本，也不调用 curl；后续能力以 Rust CLI 为准。
+`model-capability-doctor.sh` 仅保留为 Shell 参考实现，固定执行其 62 项历史目录，
+不接受检测项选择参数。Rust CLI 不调用该脚本，也不调用 curl；后续能力以 Rust CLI 为准。
