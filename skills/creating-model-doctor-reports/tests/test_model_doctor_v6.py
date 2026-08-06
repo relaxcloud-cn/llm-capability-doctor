@@ -662,26 +662,47 @@ class ModelDoctorV6Tests(unittest.TestCase):
     def test_assessment_duplicate_test_id_cannot_hide_fail_or_supply_fact_evidence(
         self,
     ) -> None:
-        assessment = assemble_assessment(self._parsed(), self._reviews())
-        duplicate = dict(assessment["tests"][0])
-        duplicate["testId"] = "002"
-        assessment["tests"].append(duplicate)
-        assessment["summary"]["counts"] = {"PASS": 2, "FAIL": 1}
-        assessment["categories"][0]["counts"]["PASS"] = 2
-        assessment["capabilitySummary"]["issues"] = []
-        assessment["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"][
-            "evidenceRefs"
-        ] = ["request:req-pass"]
+        for duplicate_position in ("before", "after"):
+            with self.subTest(duplicate_position=duplicate_position):
+                assessment = assemble_assessment(
+                    self._parsed(include_dependent_fail=True),
+                    self._reviews(include_dependent_fail=True),
+                )
+                duplicate = dict(assessment["tests"][0])
+                duplicate["testId"] = "002"
+                insert_at = 1 if duplicate_position == "before" else 2
+                assessment["tests"].insert(insert_at, duplicate)
+                assessment["summary"]["counts"] = {"PASS": 2, "FAIL": 2}
+                assessment["categories"][0]["counts"]["PASS"] = 2
+                assessment["capabilitySummary"]["issues"] = [
+                    {
+                        "title": "派生失败",
+                        "statement": "依赖样本不足，指标不可测量。",
+                        "testRefs": ["003"],
+                        "evidenceRefs": ["request:req-dependent"],
+                        "boundary": "不判定性能优劣。",
+                    }
+                ]
+                assessment["capabilitySummary"]["verifiedFacts"][
+                    "interfaceProtocol"
+                ]["evidenceRefs"] = ["request:req-pass"]
 
-        errors = validate_assessment(assessment)
+                errors = validate_assessment(assessment)
 
-        self.assertIn("tests[2] testId is duplicated: 002", errors)
-        self.assertIn("capabilitySummary does not cover FAIL tests: 002", errors)
-        self.assertIn(
-            "interfaceProtocol evidence reference is outside its allowed domain: "
-            "request:req-pass",
-            errors,
-        )
+                self.assertIn("tests[2] testId is duplicated: 002", errors)
+                self.assertIn(
+                    "Test 003 dependency must reference another FAIL test: 002",
+                    errors,
+                )
+                self.assertIn(
+                    "interfaceProtocol evidence reference is outside its allowed "
+                    "domain: request:req-pass",
+                    errors,
+                )
+                self.assertNotIn(
+                    "capabilitySummary does not cover FAIL tests: 002",
+                    errors,
+                )
 
     def test_assessment_rejects_invalid_test_ids_without_crashing(self) -> None:
         invalid_ids = (None, "", "   ", [], {}, 2, True)

@@ -607,13 +607,25 @@ def _assessment_evidence_ref_belongs_to_item(item: dict, reference: str) -> bool
     )
 
 
+def _assessment_test_id_counts(items: List[dict]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if _non_empty_string(test_id):
+            counts[test_id] = counts.get(test_id, 0) + 1
+    return counts
+
+
 def _assessment_items_by_id(items: List[dict]) -> Dict[str, dict]:
+    test_id_counts = _assessment_test_id_counts(items)
     items_by_id: Dict[str, dict] = {}
     for item in items:
         if not isinstance(item, dict):
             continue
         test_id = item.get("testId")
-        if not _non_empty_string(test_id) or test_id in items_by_id:
+        if not _non_empty_string(test_id) or test_id_counts.get(test_id) != 1:
             continue
         items_by_id[test_id] = item
     return items_by_id
@@ -871,6 +883,10 @@ def validate_assessment(assessment: object) -> List[str]:
     if any(item.get("reviewedStatus") not in STATUSES for item in object_items):
         errors.append("tests contain a non-binary reviewedStatus")
 
+    test_id_counts = _assessment_test_id_counts(object_items)
+    duplicate_test_ids = {
+        test_id for test_id, count in test_id_counts.items() if count > 1
+    }
     valid_items = []
     seen_test_ids = set()
     for index, item in enumerate(items):
@@ -882,8 +898,9 @@ def validate_assessment(assessment: object) -> List[str]:
             continue
         if test_id in seen_test_ids:
             errors.append(f"tests[{index}] testId is duplicated: {test_id}")
-            continue
         seen_test_ids.add(test_id)
+        if test_id in duplicate_test_ids:
+            continue
         valid_items.append(item)
 
     statuses = {
