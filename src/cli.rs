@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = "Model Capability Doctor 0.9.0 - Run all 46 checks",
+    about = "Model Capability Doctor 0.10.0 - Run all 46 checks",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -49,26 +48,7 @@ pub struct Config {
     pub api_key: SecretString,
     pub log_file: Option<PathBuf>,
     pub timeout: Duration,
-    pub only: Option<String>,
-    pub profile: CollectionProfile,
     pub insecure: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CollectionProfile {
-    Onsite,
-    Full,
-    Custom,
-}
-
-impl fmt::Display for CollectionProfile {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Onsite => "onsite",
-            Self::Full => "full",
-            Self::Custom => "custom",
-        })
-    }
 }
 
 pub struct SecretString(String);
@@ -111,8 +91,6 @@ impl Cli {
             api_key: SecretString(api_key),
             log_file: self.log_file,
             timeout: Duration::from_secs(self.timeout),
-            only: None,
-            profile: CollectionProfile::Full,
             insecure: self.insecure,
         })
     }

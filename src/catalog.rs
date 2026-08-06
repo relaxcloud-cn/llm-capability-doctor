@@ -1,7 +1,3 @@
-use std::collections::HashSet;
-
-use thiserror::Error;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TestCase {
     pub id: &'static str,
@@ -68,22 +64,6 @@ pub static CATALOG: [TestCase; 46] = [
     test_case!("060", "护栏与词汇", "英文安全业务词可用性"),
 ];
 
-pub const ONSITE_TEST_IDS: [&str; 29] = [
-    "002", "003", "005", "007", "008", "009", "013", "020", "022", "024", "014", "016", "018",
-    "031", "033", "035", "036", "038", "042", "043", "045", "047", "048", "049", "055", "056",
-    "057", "059", "060",
-];
-
-#[derive(Debug, Error, Eq, PartialEq)]
-pub enum CatalogError {
-    #[error("Invalid --only test ID: {0}")]
-    InvalidId(String),
-    #[error("Unknown --only test ID: {0}")]
-    UnknownId(String),
-    #[error("Duplicate --only test ID: {0}")]
-    DuplicateId(String),
-}
-
 pub fn render() -> String {
     let mut output = String::new();
     for test in CATALOG {
@@ -97,36 +77,6 @@ pub fn render() -> String {
     output
 }
 
-pub fn select_onsite() -> Vec<&'static TestCase> {
-    ONSITE_TEST_IDS
-        .iter()
-        .map(|id| {
-            CATALOG
-                .iter()
-                .find(|test| test.id == *id)
-                .expect("onsite test IDs must exist in the catalog")
-        })
-        .collect()
-}
-
-pub fn select(only: Option<&str>) -> Result<Vec<&'static TestCase>, CatalogError> {
-    let Some(only) = only else {
-        return Ok(CATALOG.iter().collect());
-    };
-
-    let mut seen = HashSet::new();
-    only.split(',')
-        .map(|id| {
-            if id.len() != 3 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
-                return Err(CatalogError::InvalidId(id.to_owned()));
-            }
-            if !seen.insert(id) {
-                return Err(CatalogError::DuplicateId(id.to_owned()));
-            }
-            CATALOG
-                .iter()
-                .find(|test| test.id == id)
-                .ok_or_else(|| CatalogError::UnknownId(id.to_owned()))
-        })
-        .collect()
+pub fn all() -> Vec<&'static TestCase> {
+    CATALOG.iter().collect()
 }

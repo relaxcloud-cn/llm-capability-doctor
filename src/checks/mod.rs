@@ -93,7 +93,6 @@ pub struct PlanContext<'a> {
     pub protocol: Protocol,
     pub auth_mode: AuthMode,
     pub model: &'a str,
-    pub onsite: bool,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
