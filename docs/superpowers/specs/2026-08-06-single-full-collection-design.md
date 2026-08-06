@@ -20,7 +20,7 @@ only prints the catalog and does not select a run profile.
 
 `Config` contains endpoint, authentication, output, timeout, and TLS settings only.
 It no longer contains a selected ID list or collection profile. The Rust runner
-always selects the full catalog with `catalog::select(None)`.
+always obtains the full catalog with `catalog::all()`.
 
 The onsite catalog constant and selector are deleted. `PlanContext` no longer has
 an `onsite` flag. Check 057 always plans four concurrent batches with sizes 4, 8,
