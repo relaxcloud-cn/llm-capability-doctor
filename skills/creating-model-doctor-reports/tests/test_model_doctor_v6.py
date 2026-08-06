@@ -7,6 +7,7 @@ import io
 import re
 import tempfile
 from contextlib import redirect_stderr, redirect_stdout
+from html import escape
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -21,7 +22,7 @@ from model_doctor_assessment import (  # noqa: E402
     validate_assessment,
     validate_reviews,
 )
-from model_doctor_html import render_report  # noqa: E402
+from model_doctor_html import _verified_facts, render_report  # noqa: E402
 from model_doctor_log import (  # noqa: E402
     RETAINED_TEST_IDS,
     _credential_is_masked,
@@ -742,6 +743,56 @@ class ModelDoctorV6Tests(unittest.TestCase):
 
                 self.assertIn(expected, errors)
 
+    def test_renderer_rejects_incompatible_containers_with_value_error(self) -> None:
+        cases = (
+            (
+                "run",
+                lambda assessment: assessment.__setitem__("run", []),
+                "run must be an object",
+            ),
+            (
+                "logic",
+                lambda assessment: assessment["tests"][0].__setitem__(
+                    "logic", []
+                ),
+                "Test 001 logic must be an object",
+            ),
+            (
+                "requests",
+                lambda assessment: assessment["tests"][0].__setitem__(
+                    "requests", {"unexpected": {}}
+                ),
+                "Test 001 requests must be an array",
+            ),
+            (
+                "request",
+                lambda assessment: assessment["tests"][0].__setitem__(
+                    "requests", [[]]
+                ),
+                "Test 001 requests[0] must be an object",
+            ),
+            (
+                "request metrics",
+                lambda assessment: assessment["tests"][0]["requests"][
+                    0
+                ].__setitem__("metrics", []),
+                "Test 001 requests[0] metrics must be an object",
+            ),
+        )
+        for name, mutate, expected in cases:
+            with self.subTest(name=name):
+                assessment = assemble_assessment(self._parsed(), self._reviews())
+                mutate(assessment)
+
+                try:
+                    render_report(assessment, ASSET_DIR)
+                except AttributeError as error:
+                    self.fail(f"renderer leaked AttributeError: {error}")
+                except ValueError as error:
+                    self.assertIn(expected, str(error))
+                else:
+                    self.fail("renderer accepted an incompatible assessment container")
+
     def test_assessment_rejects_uncovered_fail(self) -> None:
         try:
             assessment = assemble_assessment(self._parsed(), self._reviews())
@@ -991,6 +1042,59 @@ test_manifest_count: 1
 
         self.assertNotIn("<script>alert(1)</script>", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+
+    def test_verified_facts_helper_escapes_every_dynamic_field(self) -> None:
+        payloads = {
+            "interface statement": "<script>interface-statement</script>",
+            "request format": "<request-format>request</request-format>",
+            "response format": "<response-format>response</response-format>",
+            "protocol family": "<unknown-family>family</unknown-family>",
+            "interface boundary": "<interface-boundary>boundary</interface-boundary>",
+            "context statement": "<context-statement>statement</context-statement>",
+            "highest tier": "<highest-tier>tier</highest-tier>",
+            "highest tokens": "<highest-tokens>tokens</highest-tokens>",
+            "failed tier": "<failed-tier>tier</failed-tier>",
+            "failed tokens": "<failed-tokens>tokens</failed-tokens>",
+            "context boundary": "<context-boundary>boundary</context-boundary>",
+            "concurrency statement": (
+                "<concurrency-statement>statement</concurrency-statement>"
+            ),
+            "concurrency value": "<concurrency-value>value</concurrency-value>",
+            "concurrency boundary": (
+                "<concurrency-boundary>boundary</concurrency-boundary>"
+            ),
+        }
+        facts = {
+            "interfaceProtocol": {
+                "statement": payloads["interface statement"],
+                "requestFormat": payloads["request format"],
+                "responseFormat": payloads["response format"],
+                "family": payloads["protocol family"],
+                "boundary": payloads["interface boundary"],
+            },
+            "contextWindow": {
+                "statement": payloads["context statement"],
+                "highestVerifiedTier": payloads["highest tier"],
+                "highestVerifiedInputTokens": payloads["highest tokens"],
+                "firstFailedTier": payloads["failed tier"],
+                "firstFailedInputTokens": payloads["failed tokens"],
+                "boundary": payloads["context boundary"],
+            },
+            "concurrency": {
+                "statement": payloads["concurrency statement"],
+                "highestVerifiedConcurrentRequests": payloads[
+                    "concurrency value"
+                ],
+                "boundary": payloads["concurrency boundary"],
+            },
+        }
+
+        html = _verified_facts(facts)
+
+        for name, payload in payloads.items():
+            with self.subTest(name=name):
+                self.assertNotIn(payload, html)
+                self.assertIn(escape(payload, quote=True), html)
 
     def test_only_fail_rows_render_evidence_review(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())

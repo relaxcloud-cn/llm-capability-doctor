@@ -873,6 +873,9 @@ def validate_assessment(assessment: object) -> List[str]:
     source = assessment.get("source")
     if not isinstance(source, dict):
         errors.append("source must be an object")
+    run = assessment.get("run")
+    if not isinstance(run, dict):
+        errors.append("run must be an object")
 
     items = assessment.get("tests")
     if not isinstance(items, list):
@@ -921,11 +924,28 @@ def validate_assessment(assessment: object) -> List[str]:
                     "the per-test assessment.v6 contract"
                 )
         logic = item.get("logic")
-        if isinstance(logic, dict):
+        if not isinstance(logic, dict):
+            errors.append(f"Test {test_id} logic must be an object")
+        else:
             for field in sorted(set(logic) - LOGIC_FIELDS):
                 errors.append(
                     f"Test {test_id} logic.{field} is not allowed"
                 )
+        requests = item.get("requests")
+        if not isinstance(requests, list):
+            errors.append(f"Test {test_id} requests must be an array")
+        else:
+            for request_index, request in enumerate(requests):
+                if not isinstance(request, dict):
+                    errors.append(
+                        f"Test {test_id} requests[{request_index}] must be an object"
+                    )
+                    continue
+                if not isinstance(request.get("metrics"), dict):
+                    errors.append(
+                        f"Test {test_id} requests[{request_index}] metrics must be "
+                        "an object"
+                    )
         errors.extend(_validate_assessment_failure_analysis(item, statuses))
     expected_counts = _status_counts(object_items)
     if isinstance(summary, dict) and summary.get("counts") != expected_counts:
