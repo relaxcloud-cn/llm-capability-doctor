@@ -187,6 +187,13 @@ def _validate_parsed_structure(parsed: object) -> List[str]:
         refs = test.get("requestRefs")
         if not _string_list(refs):
             errors.append(f"Parsed test {test_id} requestRefs must be a string array")
+        else:
+            for request_id in refs:
+                if request_id not in requests:
+                    errors.append(
+                        f"Parsed test {test_id} requestRef does not exist: "
+                        f"{request_id}"
+                    )
     for request_id, request in requests.items():
         if not isinstance(request, dict):
             errors.append(f"Parsed request {request_id} must be an object")

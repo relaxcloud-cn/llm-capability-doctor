@@ -287,6 +287,123 @@ class ModelDoctorV6Tests(unittest.TestCase):
         errors = validate_reviews(self._parsed(), reviews)
         self.assertTrue(any("NOT_COLLECTED" in error for error in errors))
 
+    def test_verified_facts_validation_matrix(self) -> None:
+        cases = (
+            (
+                "exact child shape",
+                "interfaceProtocol",
+                "unexpected",
+                True,
+                "interfaceProtocol field unexpected is not allowed",
+            ),
+            (
+                "evidenceState list",
+                "interfaceProtocol",
+                "evidenceState",
+                [],
+                "interfaceProtocol evidenceState is invalid",
+            ),
+            (
+                "family dict",
+                "interfaceProtocol",
+                "family",
+                {},
+                "interfaceProtocol family is invalid",
+            ),
+            (
+                "context bool",
+                "contextWindow",
+                "highestVerifiedInputTokens",
+                True,
+                "contextWindow highestVerifiedInputTokens must be a non-negative integer or null",
+            ),
+            (
+                "context negative",
+                "contextWindow",
+                "highestVerifiedInputTokens",
+                -1,
+                "contextWindow highestVerifiedInputTokens must be a non-negative integer or null",
+            ),
+            (
+                "concurrency bool",
+                "concurrency",
+                "highestVerifiedConcurrentRequests",
+                True,
+                "concurrency highestVerifiedConcurrentRequests must be a positive integer or null",
+            ),
+            (
+                "concurrency zero",
+                "concurrency",
+                "highestVerifiedConcurrentRequests",
+                0,
+                "concurrency highestVerifiedConcurrentRequests must be a positive integer or null",
+            ),
+            (
+                "wrong evidence domain",
+                "interfaceProtocol",
+                "evidenceRefs",
+                ["request:req-pass"],
+                "interfaceProtocol evidence reference is outside its allowed domain: request:req-pass",
+            ),
+        )
+        for name, fact_name, field, value, expected in cases:
+            with self.subTest(name=name):
+                reviews = self._reviews()
+                reviews["capabilitySummary"]["verifiedFacts"][fact_name][field] = value
+                try:
+                    errors = validate_reviews(self._parsed(), reviews)
+                except TypeError as error:
+                    self.fail(f"verified-facts validation crashed: {error}")
+                self.assertIn(expected, errors)
+
+        with self.subTest(name="successful VERIFIED combination"):
+            parsed = self._parsed()
+            reviews = self._reviews()
+            for test_id in ("014", "057"):
+                parsed["tests"][test_id] = {
+                    "category": "能力边界",
+                    "name": f"验证样例 {test_id}",
+                    "requestRefs": ["req-pass"],
+                }
+                reviews["tests"][test_id] = self._test_review(test_id, "PASS")
+            facts = reviews["capabilitySummary"]["verifiedFacts"]
+            facts["interfaceProtocol"].update(
+                evidenceState="VERIFIED",
+                family="OPENAI_CHAT_COMPLETIONS",
+                requestFormat="已验证 OpenAI Chat Completions 请求格式。",
+                responseFormat="已验证 OpenAI Chat Completions 响应格式。",
+                statement="本轮已验证接口协议格式。",
+            )
+            facts["contextWindow"].update(
+                evidenceState="VERIFIED",
+                highestVerifiedTier="0 Token 边界档",
+                highestVerifiedInputTokens=0,
+                statement="本轮已验证 0 Token 输入边界值。",
+                evidenceRefs=["request:req-pass"],
+            )
+            facts["concurrency"].update(
+                evidenceState="VERIFIED",
+                highestVerifiedConcurrentRequests=1,
+                statement="本轮已验证 1 路并发请求成功。",
+                evidenceRefs=["request:req-pass"],
+            )
+            self.assertEqual([], validate_reviews(parsed, reviews))
+
+    def test_parsed_structure_rejects_dangling_request_ref(self) -> None:
+        parsed = self._parsed()
+        parsed["tests"]["002"]["requestRefs"].append("req-missing")
+        reviews = self._reviews()
+        reviews["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"][
+            "evidenceRefs"
+        ] = ["request:req-missing"]
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertIn(
+            "Parsed test 002 requestRef does not exist: req-missing",
+            errors,
+        )
+
     def test_v5_requires_failure_analysis_for_every_fail(self) -> None:
         reviews = self._reviews()
         del reviews["tests"]["002"]["failureAnalysis"]

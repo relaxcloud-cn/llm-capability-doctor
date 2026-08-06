@@ -101,7 +101,8 @@ def _shared_errors(
     allowed_refs: Set[str],
 ) -> List[str]:
     errors: List[str] = []
-    if value.get("evidenceState") not in EVIDENCE_STATES:
+    evidence_state = value.get("evidenceState")
+    if not isinstance(evidence_state, str) or evidence_state not in EVIDENCE_STATES:
         errors.append(f"{prefix} evidenceState is invalid")
     for field in ("statement", "boundary"):
         if not _non_empty(value.get(field)):
@@ -134,7 +135,7 @@ def _validate_interface(value: object, allowed_refs: Set[str]) -> List[str]:
 
     errors.extend(_shared_errors(value, prefix, allowed_refs))
     family = value.get("family")
-    if family not in PROTOCOL_FAMILIES:
+    if not isinstance(family, str) or family not in PROTOCOL_FAMILIES:
         errors.append(f"{prefix} family is invalid")
     for field in ("requestFormat", "responseFormat"):
         if not _non_empty(value.get(field)):
