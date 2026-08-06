@@ -9,9 +9,11 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
+from model_doctor_verified_facts import validate_verified_facts
 
-REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v1"
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v5"
+
+REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v2"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v6"
 STATUSES = {"PASS", "FAIL"}
 FAILURE_KINDS = {
     "DIRECT",
@@ -47,7 +49,12 @@ FAILURE_ANALYSIS_FIELDS = {
     "dependsOnTestIds",
     "evidenceRefs",
 }
-CAPABILITY_SUMMARY_FIELDS = {"headline", "issues", "scopeBoundary"}
+CAPABILITY_SUMMARY_FIELDS = {
+    "headline",
+    "verifiedFacts",
+    "issues",
+    "scopeBoundary",
+}
 CAPABILITY_ISSUE_FIELDS = {
     "title",
     "statement",
@@ -184,6 +191,34 @@ def _validate_parsed_structure(parsed: object) -> List[str]:
         if not isinstance(request, dict):
             errors.append(f"Parsed request {request_id} must be an object")
     return errors
+
+
+def _parsed_fact_evidence_domains(parsed: dict) -> Dict[str, set[str]]:
+    tests = parsed.get("tests", {})
+    if not isinstance(tests, dict):
+        tests = {}
+
+    def request_refs(test_ids: set[str]) -> set[str]:
+        references = set()
+        for test_id in test_ids:
+            test = tests.get(test_id)
+            if not isinstance(test, dict):
+                continue
+            request_ids = test.get("requestRefs", [])
+            if not isinstance(request_ids, list):
+                continue
+            references.update(
+                f"request:{request_id}"
+                for request_id in request_ids
+                if _non_empty_string(request_id)
+            )
+        return references
+
+    return {
+        "interfaceProtocol": request_refs({"002"}),
+        "contextWindow": request_refs({"014", "015", "016", "017", "018"}),
+        "concurrency": request_refs({"057"}),
+    }
 
 
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
@@ -368,6 +403,12 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         )
     if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
         errors.append("capabilitySummary scopeBoundary is invalid")
+    errors.extend(
+        validate_verified_facts(
+            summary.get("verifiedFacts"),
+            _parsed_fact_evidence_domains(parsed),
+        )
+    )
 
     issues = summary.get("issues")
     if not isinstance(issues, list):

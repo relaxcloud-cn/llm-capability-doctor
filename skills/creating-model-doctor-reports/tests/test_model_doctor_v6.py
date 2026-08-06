@@ -71,7 +71,7 @@ class _MainChildParser(HTMLParser):
             self.stack.pop()
 
 
-class ModelDoctorV5Tests(unittest.TestCase):
+class ModelDoctorV6Tests(unittest.TestCase):
     def _parse_text_log(self, value: str, name: str) -> dict:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -183,6 +183,36 @@ class ModelDoctorV5Tests(unittest.TestCase):
             review["failureAnalysis"] = self._failure_analysis()
         return review
 
+    def _verified_facts(self) -> dict:
+        return {
+            "interfaceProtocol": {
+                "evidenceState": "INCONCLUSIVE",
+                "family": "UNKNOWN",
+                "requestFormat": "已采集请求，但未形成已知协议结论。",
+                "responseFormat": "已采集响应，但未形成已知协议结论。",
+                "statement": "本轮证据不足以确认接口协议格式。",
+                "evidenceRefs": ["request:req-fail"],
+                "boundary": "不能从 URL 或模型名称猜测协议格式。",
+            },
+            "contextWindow": {
+                "evidenceState": "NOT_COLLECTED",
+                "highestVerifiedTier": None,
+                "highestVerifiedInputTokens": None,
+                "firstFailedTier": None,
+                "firstFailedInputTokens": None,
+                "statement": "本轮未采集上下文档位证据。",
+                "evidenceRefs": [],
+                "boundary": "未采集时不能推断上下文上限。",
+            },
+            "concurrency": {
+                "evidenceState": "NOT_COLLECTED",
+                "highestVerifiedConcurrentRequests": None,
+                "statement": "本轮未采集并发波次证据。",
+                "evidenceRefs": [],
+                "boundary": "未采集时不能推断并发上限。",
+            },
+        }
+
     def _summary(self, include_dependent_fail: bool = False) -> dict:
         test_refs = ["002", "003"] if include_dependent_fail else ["002"]
         evidence_refs = (
@@ -192,6 +222,7 @@ class ModelDoctorV5Tests(unittest.TestCase):
         )
         return {
             "headline": "基础能力可用，但存在一项有直接证据的问题。",
+            "verifiedFacts": self._verified_facts(),
             "issues": [
                 {
                     "title": "响应未满足契约",
@@ -206,7 +237,7 @@ class ModelDoctorV5Tests(unittest.TestCase):
 
     def _reviews(self, include_dependent_fail: bool = False) -> dict:
         reviews = {
-            "schemaVersion": "llm-capability-doctor.reviews.v1",
+            "schemaVersion": "llm-capability-doctor.reviews.v2",
             "tests": {
                 "001": self._test_review("001", "PASS"),
                 "002": self._test_review("002", "FAIL"),
@@ -226,6 +257,35 @@ class ModelDoctorV5Tests(unittest.TestCase):
             }
             reviews["tests"]["003"] = dependent
         return reviews
+
+    def test_reviews_v2_requires_verified_facts(self) -> None:
+        reviews = self._reviews()
+        del reviews["capabilitySummary"]["verifiedFacts"]
+        self.assertIn(
+            "capabilitySummary verifiedFacts must be an object",
+            validate_reviews(self._parsed(), reviews),
+        )
+
+    def test_verified_context_rejects_unbounded_max_claim(self) -> None:
+        reviews = self._reviews()
+        context = reviews["capabilitySummary"]["verifiedFacts"]["contextWindow"]
+        context.update(
+            evidenceState="VERIFIED",
+            highestVerifiedTier="32K Token 近似档",
+            highestVerifiedInputTokens=80175,
+            statement="最大上下文是 80175 Token。",
+            evidenceRefs=["request:req-fail"],
+        )
+        errors = validate_reviews(self._parsed(), reviews)
+        self.assertTrue(any("unbounded maximum claim" in error for error in errors))
+
+    def test_not_collected_rejects_values_and_evidence(self) -> None:
+        reviews = self._reviews()
+        concurrency = reviews["capabilitySummary"]["verifiedFacts"]["concurrency"]
+        concurrency["highestVerifiedConcurrentRequests"] = 32
+        concurrency["evidenceRefs"] = ["request:req-fail"]
+        errors = validate_reviews(self._parsed(), reviews)
+        self.assertTrue(any("NOT_COLLECTED" in error for error in errors))
 
     def test_v5_requires_failure_analysis_for_every_fail(self) -> None:
         reviews = self._reviews()
@@ -422,10 +482,10 @@ class ModelDoctorV5Tests(unittest.TestCase):
         try:
             assessment = assemble_assessment(self._parsed(), self._reviews())
         except KeyError as error:
-            self.fail(f"assembly rejected the reviews v1 envelope: {error}")
+            self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v5",
+            "llm-capability-doctor.assessment.v6",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -440,7 +500,7 @@ class ModelDoctorV5Tests(unittest.TestCase):
         try:
             assessment = assemble_assessment(self._parsed(), self._reviews())
         except KeyError as error:
-            self.fail(f"assembly rejected the reviews v1 envelope: {error}")
+            self.fail(f"assembly rejected the reviews v2 envelope: {error}")
         assessment["capabilitySummary"]["issues"] = []
 
         errors = validate_assessment(assessment)
@@ -710,8 +770,17 @@ test_manifest_count: 1
         del parsed["tests"]["002"]
         reviews = self._reviews()
         del reviews["tests"]["002"]
+        verified_facts = self._verified_facts()
+        verified_facts["interfaceProtocol"].update(
+            evidenceState="NOT_COLLECTED",
+            requestFormat="本轮未采集可确认的请求格式。",
+            responseFormat="本轮未采集可确认的响应格式。",
+            statement="本轮未采集接口协议证据。",
+            evidenceRefs=[],
+        )
         reviews["capabilitySummary"] = {
             "headline": "本轮所有已执行检测项均通过。",
+            "verifiedFacts": verified_facts,
             "issues": [],
             "scopeBoundary": (
                 "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。"
@@ -724,7 +793,7 @@ test_manifest_count: 1
         self.assertIn("本轮所有已执行检测项均通过。", html)
         self.assertNotIn('<ol class="final-conclusion-list">', html)
 
-    def test_cli_rejects_non_object_reviews_with_v1_message(self) -> None:
+    def test_cli_rejects_non_object_reviews_with_v2_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             parsed_path = directory_path / "parsed.json"
@@ -742,11 +811,11 @@ test_manifest_count: 1
 
         self.assertEqual(2, exit_code)
         self.assertIn(
-            "Reviews must use llm-capability-doctor.reviews.v1",
+            "Reviews must use llm-capability-doctor.reviews.v2",
             stderr.getvalue(),
         )
 
-    def test_cli_render_writes_v5_and_final_conclusion(self) -> None:
+    def test_cli_render_writes_v6_and_final_conclusion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             parsed_path = directory_path / "parsed.json"
@@ -782,7 +851,7 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v5",
+            "llm-capability-doctor.assessment.v6",
             assessment["schemaVersion"],
         )
         self.assertIn('<section class="final-conclusion"', html)
