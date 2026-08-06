@@ -288,6 +288,36 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 ensure_ascii=False,
             )
 
+        wave_request_ids = [
+            f"concurrency-32-{index}" for index in range(1, 33)
+        ]
+        concurrency_requests = {}
+        for index, request_id in enumerate(wave_request_ids, start=1):
+            marker = f"WAVE-32-{index:02d}"
+            request = self._request(
+                request_id,
+                completion_response(request_id, marker, 12),
+            )
+            request["requestBody"] = json.dumps(
+                {
+                    "model": "fixture-model",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Return only the exact marker requested by the user.",
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Return exactly this wave marker: {marker}",
+                        },
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 16,
+                },
+                ensure_ascii=False,
+            )
+            concurrency_requests[request_id] = request
+
         requests = {
             "protocol-openai": self._request(
                 "protocol-openai",
@@ -314,11 +344,8 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "context-fail",
                 completion_response("context-fail", "NOT_FOUND", 131072),
             ),
-            "concurrency-32-1": self._request(
-                "concurrency-32-1",
-                '{"choices":[{"message":{"role":"assistant","content":"PONG"}}]}',
-            ),
         }
+        requests.update(concurrency_requests)
         requests["protocol-openai"]["requestBody"] = json.dumps(
             {
                 "model": "fixture-model",
@@ -326,15 +353,36 @@ class ModelDoctorV6Tests(unittest.TestCase):
             },
             ensure_ascii=False,
         )
+        for request_id, tier in (
+            ("context-pass", "32K Token 近似档"),
+            ("context-fail", "64K Token 近似档"),
+        ):
+            requests[request_id]["requestBody"] = json.dumps(
+                {
+                    "model": "fixture-model",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Return exactly the required target sentinel and no other text.",
+                        },
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Context-tier intent: {tier}\n"
+                                "Required target sentinel: EXPECTED_SENTINEL"
+                            ),
+                        },
+                    ],
+                    "temperature": 0,
+                    "max_tokens": 16,
+                },
+                ensure_ascii=False,
+            )
         requests["context-pass"]["metrics"].update(
             context_tier="32K Token 近似档",
         )
         requests["context-fail"]["metrics"].update(
             context_tier="64K Token 近似档",
-        )
-        requests["concurrency-32-1"]["metrics"].update(
-            concurrency_level="32",
-            successful_requests="32",
         )
         context_prompt_tokens = {
             request_id: json.loads(requests[request_id]["responseBody"])["usage"][
@@ -376,7 +424,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "057": {
                     "category": "性能与稳定性",
                     "name": "32 路短时并发",
-                    "requestRefs": ["concurrency-32-1"],
+                    "requestRefs": wave_request_ids,
                 },
             },
             "requests": requests,
@@ -434,7 +482,9 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "evidenceState": "VERIFIED",
                 "highestVerifiedConcurrentRequests": 32,
                 "statement": "短时并发最高已验证到 32 个同时请求。",
-                "evidenceRefs": ["request:concurrency-32-1"],
+                "evidenceRefs": [
+                    f"request:{request_id}" for request_id in wave_request_ids
+                ],
                 "boundary": "32 是最高已验证波次，不代表服务硬上限或持续负载能力。",
             },
         }
@@ -478,6 +528,9 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "scopeBoundary": "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
             },
         }
+        reviews["tests"]["057"]["evidenceRefs"] = [
+            f"request:{request_id}" for request_id in wave_request_ids
+        ]
         return parsed, reviews
 
     def test_reviews_v2_requires_verified_facts(self) -> None:
@@ -944,7 +997,29 @@ class ModelDoctorV6Tests(unittest.TestCase):
             {"context-pass": 80175, "context-fail": 131072},
             native_prompt_tokens,
         )
-        for request_id in native_prompt_tokens:
+        context_contracts = {
+            "context-pass": ("32K Token 近似档", "EXPECTED_SENTINEL", True),
+            "context-fail": ("64K Token 近似档", "EXPECTED_SENTINEL", False),
+        }
+        for request_id, (tier, target, should_pass) in context_contracts.items():
+            request_body = json.loads(parsed["requests"][request_id]["requestBody"])
+            messages = request_body.get("messages")
+            self.assertIsInstance(messages, list)
+            self.assertGreaterEqual(len(messages), 2)
+            contract_text = "\n".join(message["content"] for message in messages)
+            self.assertIn("Return exactly the required target sentinel", contract_text)
+            self.assertIn(f"Context-tier intent: {tier}", contract_text)
+            self.assertIn(f"Required target sentinel: {target}", contract_text)
+            response_body = json.loads(
+                parsed["requests"][request_id]["responseBody"]
+            )
+            returned = response_body["choices"][0]["message"]["content"]
+            if should_pass:
+                self.assertEqual(target, returned)
+            else:
+                self.assertEqual("NOT_FOUND", returned)
+                self.assertNotEqual(target, returned)
+
             self.assertNotIn(
                 "input_tokens",
                 parsed["requests"][request_id]["metrics"],
@@ -953,10 +1028,76 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "200",
                 parsed["requests"][request_id]["metrics"]["http_status"],
             )
+        wave_request_ids = [
+            f"concurrency-32-{index}" for index in range(1, 33)
+        ]
+        self.assertEqual(
+            wave_request_ids,
+            parsed["tests"]["057"]["requestRefs"],
+        )
+        self.assertEqual(
+            [f"request:{request_id}" for request_id in wave_request_ids],
+            reviews["capabilitySummary"]["verifiedFacts"]["concurrency"][
+                "evidenceRefs"
+            ],
+        )
+        self.assertEqual(
+            [f"request:{request_id}" for request_id in wave_request_ids],
+            reviews["tests"]["057"]["evidenceRefs"],
+        )
+        self.assertEqual(
+            wave_request_ids,
+            [
+                request_id
+                for request_id in parsed["requests"]
+                if request_id.startswith("concurrency-32-")
+            ],
+        )
+        wave_samples = {
+            request_id: parsed["requests"][request_id]
+            for request_id in wave_request_ids
+            if request_id in parsed["requests"]
+        }
+        self.assertEqual(32, len(wave_samples))
+        for request_id, sample in wave_samples.items():
+            with self.subTest(request_id=request_id):
+                request_body = json.loads(sample["requestBody"])
+                user_content = request_body["messages"][-1]["content"]
+                marker_prefix = "Return exactly this wave marker: "
+                self.assertTrue(user_content.startswith(marker_prefix))
+                requested_marker = user_content[len(marker_prefix) :]
+                response_body = json.loads(sample["responseBody"])
+                returned_marker = response_body["choices"][0]["message"]["content"]
+                self.assertEqual(requested_marker, returned_marker)
+
+                metrics = sample["metrics"]
+                self.assertEqual(
+                    {
+                        "curl_exit_code",
+                        "http_status",
+                        "time_total",
+                        "time_starttransfer",
+                        "size_download",
+                    },
+                    set(metrics),
+                )
+                self.assertEqual("0", metrics["curl_exit_code"])
+                self.assertEqual("200", metrics["http_status"])
+                self.assertGreater(float(metrics["time_total"]), 0.0)
+                response_text = sample["responseBody"].lower()
+                self.assertNotIn("429", response_text)
+                self.assertNotIn("rate limit", response_text)
+                self.assertNotIn("too many requests", response_text)
         self.assertEqual([], validate_reviews(parsed, reviews))
         assessment = assemble_assessment(parsed, reviews)
         self.assertEqual([], validate_assessment(assessment))
         html = render_report(assessment, ASSET_DIR)
+        self.assertEqual(
+            [f"request:{request_id}" for request_id in wave_request_ids],
+            assessment["capabilitySummary"]["verifiedFacts"]["concurrency"][
+                "evidenceRefs"
+            ],
+        )
         self.assertEqual(
             native_prompt_tokens["context-pass"],
             assessment["capabilitySummary"]["verifiedFacts"]["contextWindow"][
