@@ -278,7 +278,8 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in review:
                 errors.append(
-                    f"Test {test_id} {obsolete_field} is not part of the v5 review contract"
+                    f"Test {test_id} {obsolete_field} is not part of the "
+                    "reviews.v2 contract"
                 )
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
@@ -592,14 +593,47 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
 def _assessment_evidence_ref_belongs_to_item(item: dict, reference: str) -> bool:
     if reference.startswith("request:"):
         request_id = reference.split(":", 1)[1]
+        requests = item.get("requests", [])
+        if not isinstance(requests, list):
+            return False
         return any(
             request.get("request_id") == request_id
-            for request in item.get("requests", [])
+            for request in requests
+            if isinstance(request, dict)
         )
     return (
         reference == f"test:{item.get('testId')}:manifest"
         and not item.get("requests")
     )
+
+
+def _assessment_fact_evidence_domains(items: List[dict]) -> Dict[str, set[str]]:
+    items_by_id = {
+        item.get("testId"): item for item in items if isinstance(item, dict)
+    }
+
+    def request_refs(test_ids: set[str]) -> set[str]:
+        references = set()
+        for test_id in test_ids:
+            item = items_by_id.get(test_id)
+            if not isinstance(item, dict):
+                continue
+            requests = item.get("requests", [])
+            if not isinstance(requests, list):
+                continue
+            for request in requests:
+                if not isinstance(request, dict):
+                    continue
+                request_id = request.get("request_id")
+                if _non_empty_string(request_id):
+                    references.add(f"request:{request_id}")
+        return references
+
+    return {
+        "interfaceProtocol": request_refs({"002"}),
+        "contextWindow": request_refs({"014", "015", "016", "017", "018"}),
+        "concurrency": request_refs({"057"}),
+    }
 
 
 def _validate_assessment_failure_analysis(
@@ -684,6 +718,12 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
         )
     if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
         errors.append("capabilitySummary scopeBoundary is invalid")
+    errors.extend(
+        validate_verified_facts(
+            summary.get("verifiedFacts"),
+            _assessment_fact_evidence_domains(items),
+        )
+    )
 
     issues = summary.get("issues")
     if not isinstance(issues, list):
@@ -824,7 +864,7 @@ def validate_assessment(assessment: dict) -> List[str]:
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test v5 contract"
+                    "the per-test assessment.v6 contract"
                 )
         logic = item.get("logic")
         if isinstance(logic, dict):
@@ -845,7 +885,7 @@ def validate_assessment(assessment: dict) -> List[str]:
         )
     )
     if "overall" in assessment:
-        errors.append("overall is not part of the assessment v5 contract")
+        errors.append("overall is not part of the assessment.v6 contract")
     if "path" in assessment.get("source", {}):
         errors.append("source must not expose an absolute path")
     return errors

@@ -404,7 +404,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             errors,
         )
 
-    def test_v5_requires_failure_analysis_for_every_fail(self) -> None:
+    def test_v6_requires_failure_analysis_for_every_fail(self) -> None:
         reviews = self._reviews()
         del reviews["tests"]["002"]["failureAnalysis"]
 
@@ -412,7 +412,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
 
         self.assertIn("Test 002 failureAnalysis is required for FAIL", errors)
 
-    def test_v5_rejects_failure_analysis_on_pass(self) -> None:
+    def test_v6_rejects_failure_analysis_on_pass(self) -> None:
         reviews = self._reviews()
         reviews["tests"]["001"]["failureAnalysis"] = self._failure_analysis()
 
@@ -528,7 +528,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             validate_reviews(self._parsed(), reviews),
         )
 
-    def test_v5_rejects_duplicate_contract_references(self) -> None:
+    def test_v6_rejects_duplicate_contract_references(self) -> None:
         parsed = self._parsed(include_dependent_fail=True)
         reviews = self._reviews(include_dependent_fail=True)
         reviews["tests"]["003"]["failureAnalysis"]["dependsOnTestIds"] = [
@@ -595,9 +595,11 @@ class ModelDoctorV6Tests(unittest.TestCase):
             errors,
         )
 
-    def test_assembly_carries_failure_analysis_and_capability_summary(self) -> None:
+    def test_assembly_emits_assessment_v6_with_verified_facts(self) -> None:
+        reviews = self._reviews()
+        expected_facts = self._verified_facts()
         try:
-            assessment = assemble_assessment(self._parsed(), self._reviews())
+            assessment = assemble_assessment(self._parsed(), reviews)
         except KeyError as error:
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
@@ -610,8 +612,52 @@ class ModelDoctorV6Tests(unittest.TestCase):
             "SUFFICIENT",
             assessment["tests"][1]["failureAnalysis"]["evidenceSufficiency"],
         )
-        self.assertEqual(self._summary(), assessment["capabilitySummary"])
+        self.assertEqual(
+            expected_facts,
+            assessment["capabilitySummary"]["verifiedFacts"],
+        )
+        self.assertIsNot(
+            reviews["capabilitySummary"]["verifiedFacts"],
+            assessment["capabilitySummary"]["verifiedFacts"],
+        )
         self.assertEqual([], validate_assessment(assessment))
+
+    def test_assessment_rejects_verified_fact_evidence_outside_item_domain(
+        self,
+    ) -> None:
+        assessment = assemble_assessment(self._parsed(), self._reviews())
+        assessment["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"][
+            "evidenceRefs"
+        ] = ["request:req-pass"]
+
+        errors = validate_assessment(assessment)
+
+        self.assertIn(
+            "interfaceProtocol evidence reference is outside its allowed domain: "
+            "request:req-pass",
+            errors,
+        )
+
+    def test_assessment_fact_validation_skips_malformed_request_data(self) -> None:
+        malformed_requests = (
+            "not-an-array",
+            ["not-an-object", None, {"request_id": ""}],
+        )
+        for requests in malformed_requests:
+            with self.subTest(requests=requests):
+                assessment = assemble_assessment(self._parsed(), self._reviews())
+                assessment["tests"][1]["requests"] = requests
+
+                try:
+                    errors = validate_assessment(assessment)
+                except (AttributeError, TypeError) as error:
+                    self.fail(f"malformed assessment requests caused crash: {error}")
+
+                self.assertIn(
+                    "interfaceProtocol evidence reference is outside its allowed "
+                    "domain: request:req-fail",
+                    errors,
+                )
 
     def test_assessment_rejects_uncovered_fail(self) -> None:
         try:
@@ -766,15 +812,24 @@ test_manifest_count: 1
         self.assertTrue(_credential_is_masked("********"))
         self.assertFalse(_credential_is_masked("sk-****-still-secret"))
 
-    def test_assessment_schema_declares_v5_summary_contract(self) -> None:
+    def test_assessment_schema_requires_verified_facts(self) -> None:
         schema_path = SKILL_DIR / "references" / "assessment-schema.json"
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v5",
+            "llm-capability-doctor.assessment.v6",
+            schema["$id"],
+        )
+        self.assertEqual(
+            "llm-capability-doctor.assessment.v6",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
+        self.assertIn(
+            "verifiedFacts",
+            schema["$defs"]["capabilitySummary"]["required"],
+        )
+        self.assertIn("verifiedFacts", schema["$defs"])
         test_schema = schema["properties"]["tests"]["items"]
         self.assertIn("failureAnalysis", test_schema["properties"])
         self.assertEqual(
@@ -796,7 +851,7 @@ test_manifest_count: 1
             assessment = assemble_assessment(self._parsed(), self._reviews())
             html = render_report(assessment, ASSET_DIR)
         except (KeyError, ValueError) as error:
-            self.fail(f"renderer rejected the desired v5 contract: {error}")
+            self.fail(f"renderer rejected the desired v6 contract: {error}")
 
         expected_order = (
             '<section class="run-information"',

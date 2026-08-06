@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v5",
+  "$id": "llm-capability-doctor.assessment.v6",
   "title": "LLM Capability Doctor Evidence-Bound Assessment",
   "type": "object",
   "required": [
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v5"
+      "const": "llm-capability-doctor.assessment.v6"
     },
     "generatedAt": {
       "type": "string"
@@ -264,12 +264,15 @@
     },
     "capabilitySummary": {
       "type": "object",
-      "required": ["headline", "issues", "scopeBoundary"],
+      "required": ["headline", "verifiedFacts", "issues", "scopeBoundary"],
       "properties": {
         "headline": {
           "type": "string",
           "minLength": 1,
           "pattern": "^(?![\\s\\S]*(?:(?:^|[^A-Za-z])(?:[Rr][Ee][Aa][Dd][Yy]|[Bb][Ll][Oo][Cc][Kk][Ee][Dd])(?![A-Za-z])|可上线|不可上线))[\\s\\S]+$"
+        },
+        "verifiedFacts": {
+          "$ref": "#/$defs/verifiedFacts"
         },
         "issues": {
           "type": "array",
@@ -279,6 +282,129 @@
         "scopeBoundary": {
           "const": "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。"
         }
+      },
+      "additionalProperties": false
+    },
+    "verifiedFacts": {
+      "type": "object",
+      "required": ["interfaceProtocol", "contextWindow", "concurrency"],
+      "properties": {
+        "interfaceProtocol": {
+          "$ref": "#/$defs/interfaceProtocolFact"
+        },
+        "contextWindow": {
+          "$ref": "#/$defs/contextWindowFact"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/concurrencyFact"
+        }
+      },
+      "additionalProperties": false
+    },
+    "interfaceProtocolFact": {
+      "type": "object",
+      "required": [
+        "evidenceState",
+        "family",
+        "requestFormat",
+        "responseFormat",
+        "statement",
+        "evidenceRefs",
+        "boundary"
+      ],
+      "properties": {
+        "evidenceState": {
+          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+        },
+        "family": {
+          "enum": [
+            "OPENAI_CHAT_COMPLETIONS",
+            "OPENAI_RESPONSES",
+            "ANTHROPIC_MESSAGES",
+            "GEMINI_GENERATE_CONTENT",
+            "OLLAMA_CHAT",
+            "CUSTOM",
+            "UNKNOWN"
+          ]
+        },
+        "requestFormat": {"type": "string", "minLength": 1},
+        "responseFormat": {"type": "string", "minLength": 1},
+        "statement": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "boundary": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "contextWindowFact": {
+      "type": "object",
+      "required": [
+        "evidenceState",
+        "highestVerifiedTier",
+        "highestVerifiedInputTokens",
+        "firstFailedTier",
+        "firstFailedInputTokens",
+        "statement",
+        "evidenceRefs",
+        "boundary"
+      ],
+      "properties": {
+        "evidenceState": {
+          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+        },
+        "highestVerifiedTier": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "highestVerifiedInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "firstFailedTier": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "firstFailedInputTokens": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "statement": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "boundary": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "concurrencyFact": {
+      "type": "object",
+      "required": [
+        "evidenceState",
+        "highestVerifiedConcurrentRequests",
+        "statement",
+        "evidenceRefs",
+        "boundary"
+      ],
+      "properties": {
+        "evidenceState": {
+          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+        },
+        "highestVerifiedConcurrentRequests": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "statement": {"type": "string", "minLength": 1},
+        "evidenceRefs": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "boundary": {"type": "string", "minLength": 1}
       },
       "additionalProperties": false
     }
