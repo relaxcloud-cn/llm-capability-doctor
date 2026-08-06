@@ -10,7 +10,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = "Model Capability Doctor 0.9.0",
+    about = "Model Capability Doctor 0.9.0 - Run all 46 checks",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -33,14 +33,6 @@ pub struct Cli {
     /// Per-request timeout in seconds. Defaults to 120.
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
-
-    /// Run comma-separated test IDs, for example 001,060.
-    #[arg(long, value_name = "IDS", value_parser = validate_only_syntax)]
-    pub only: Option<String>,
-
-    /// Run all 46 checks instead of the compact onsite profile.
-    #[arg(long, conflicts_with = "only")]
-    pub full: bool,
 
     /// Print the 46-item core catalog and exit.
     #[arg(long)]
@@ -113,22 +105,14 @@ impl Cli {
             .or(environment_api_key)
             .filter(|value| !value.is_empty())
             .ok_or(CliError::MissingApiKey)?;
-        let profile = if self.only.is_some() {
-            CollectionProfile::Custom
-        } else if self.full {
-            CollectionProfile::Full
-        } else {
-            CollectionProfile::Onsite
-        };
-
         Ok(Config {
             url,
             model,
             api_key: SecretString(api_key),
             log_file: self.log_file,
             timeout: Duration::from_secs(self.timeout),
-            only: self.only,
-            profile,
+            only: None,
+            profile: CollectionProfile::Full,
             insecure: self.insecure,
         })
     }
@@ -142,10 +126,4 @@ fn parse_positive_integer(value: &str) -> Result<u64, String> {
         return Err("must be a positive integer".to_owned());
     }
     Ok(parsed)
-}
-
-fn validate_only_syntax(value: &str) -> Result<String, String> {
-    crate::catalog::select(Some(value))
-        .map(|_| value.to_owned())
-        .map_err(|error| error.to_string())
 }

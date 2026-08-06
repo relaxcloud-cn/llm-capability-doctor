@@ -65,13 +65,12 @@ async fn main() -> ExitCode {
 }
 
 fn missing_value_option(arguments: &[std::ffi::OsString]) -> Option<&str> {
-    const OPTIONS_WITH_VALUES: [&str; 6] = [
+    const OPTIONS_WITH_VALUES: [&str; 5] = [
         "--url",
         "--model",
         "--api-key",
         "--log-file",
         "--timeout",
-        "--only",
     ];
     if arguments.iter().any(|argument| {
         matches!(
