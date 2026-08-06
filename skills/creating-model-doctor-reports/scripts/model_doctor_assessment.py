@@ -9,9 +9,12 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
+from model_doctor_general_verdict import derive_general_verdict
+from model_doctor_verified_facts import validate_verified_facts
 
-REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v1"
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v5"
+
+REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v2"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v6"
 STATUSES = {"PASS", "FAIL"}
 FAILURE_KINDS = {
     "DIRECT",
@@ -47,7 +50,15 @@ FAILURE_ANALYSIS_FIELDS = {
     "dependsOnTestIds",
     "evidenceRefs",
 }
-CAPABILITY_SUMMARY_FIELDS = {"headline", "issues", "scopeBoundary"}
+REVIEW_CAPABILITY_SUMMARY_FIELDS = {
+    "headline",
+    "verifiedFacts",
+    "issues",
+    "scopeBoundary",
+}
+ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
+    "generalVerdict"
+}
 CAPABILITY_ISSUE_FIELDS = {
     "title",
     "statement",
@@ -180,10 +191,45 @@ def _validate_parsed_structure(parsed: object) -> List[str]:
         refs = test.get("requestRefs")
         if not _string_list(refs):
             errors.append(f"Parsed test {test_id} requestRefs must be a string array")
+        else:
+            for request_id in refs:
+                if request_id not in requests:
+                    errors.append(
+                        f"Parsed test {test_id} requestRef does not exist: "
+                        f"{request_id}"
+                    )
     for request_id, request in requests.items():
         if not isinstance(request, dict):
             errors.append(f"Parsed request {request_id} must be an object")
     return errors
+
+
+def _parsed_fact_evidence_domains(parsed: dict) -> Dict[str, set[str]]:
+    tests = parsed.get("tests", {})
+    if not isinstance(tests, dict):
+        tests = {}
+
+    def request_refs(test_ids: set[str]) -> set[str]:
+        references = set()
+        for test_id in test_ids:
+            test = tests.get(test_id)
+            if not isinstance(test, dict):
+                continue
+            request_ids = test.get("requestRefs", [])
+            if not isinstance(request_ids, list):
+                continue
+            references.update(
+                f"request:{request_id}"
+                for request_id in request_ids
+                if _non_empty_string(request_id)
+            )
+        return references
+
+    return {
+        "interfaceProtocol": request_refs({"002"}),
+        "contextWindow": request_refs({"014", "015", "016", "017", "018"}),
+        "concurrency": request_refs({"057"}),
+    }
 
 
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
@@ -236,7 +282,8 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in review:
                 errors.append(
-                    f"Test {test_id} {obsolete_field} is not part of the v5 review contract"
+                    f"Test {test_id} {obsolete_field} is not part of the "
+                    "reviews.v2 contract"
                 )
         if not _non_empty_string(review.get("conclusion")):
             errors.append(f"Test {test_id} conclusion is required")
@@ -358,7 +405,7 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
     summary = reviews.get("capabilitySummary")
     if not isinstance(summary, dict):
         return errors + ["capabilitySummary must be an object"]
-    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+    for field in sorted(set(summary) - REVIEW_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
@@ -368,6 +415,12 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         )
     if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
         errors.append("capabilitySummary scopeBoundary is invalid")
+    errors.extend(
+        validate_verified_facts(
+            summary.get("verifiedFacts"),
+            _parsed_fact_evidence_domains(parsed),
+        )
+    )
 
     issues = summary.get("issues")
     if not isinstance(issues, list):
@@ -527,6 +580,11 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
             item["failureAnalysis"] = deepcopy(review["failureAnalysis"])
         items.append(item)
 
+    capability_summary = deepcopy(reviews["capabilitySummary"])
+    capability_summary["generalVerdict"] = derive_general_verdict(
+        {item["testId"]: item["reviewedStatus"] for item in items}
+    )
+
     return {
         "schemaVersion": ASSESSMENT_SCHEMA_VERSION,
         "generatedAt": datetime.now(timezone.utc).isoformat(),
@@ -535,7 +593,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "tokenTotals": parsed.get("tokenTotals", {}),
         "warnings": parsed.get("warnings", []),
         "summary": {"counts": _status_counts(items)},
-        "capabilitySummary": deepcopy(reviews["capabilitySummary"]),
+        "capabilitySummary": capability_summary,
         "categories": _categories(items),
         "tests": items,
     }
@@ -544,14 +602,69 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
 def _assessment_evidence_ref_belongs_to_item(item: dict, reference: str) -> bool:
     if reference.startswith("request:"):
         request_id = reference.split(":", 1)[1]
+        requests = item.get("requests", [])
+        if not isinstance(requests, list):
+            return False
         return any(
             request.get("request_id") == request_id
-            for request in item.get("requests", [])
+            for request in requests
+            if isinstance(request, dict)
         )
     return (
         reference == f"test:{item.get('testId')}:manifest"
         and not item.get("requests")
     )
+
+
+def _assessment_test_id_counts(items: List[dict]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if _non_empty_string(test_id):
+            counts[test_id] = counts.get(test_id, 0) + 1
+    return counts
+
+
+def _assessment_items_by_id(items: List[dict]) -> Dict[str, dict]:
+    test_id_counts = _assessment_test_id_counts(items)
+    items_by_id: Dict[str, dict] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if not _non_empty_string(test_id) or test_id_counts.get(test_id) != 1:
+            continue
+        items_by_id[test_id] = item
+    return items_by_id
+
+
+def _assessment_fact_evidence_domains(items: List[dict]) -> Dict[str, set[str]]:
+    items_by_id = _assessment_items_by_id(items)
+
+    def request_refs(test_ids: set[str]) -> set[str]:
+        references = set()
+        for test_id in test_ids:
+            item = items_by_id.get(test_id)
+            if not isinstance(item, dict):
+                continue
+            requests = item.get("requests", [])
+            if not isinstance(requests, list):
+                continue
+            for request in requests:
+                if not isinstance(request, dict):
+                    continue
+                request_id = request.get("request_id")
+                if _non_empty_string(request_id):
+                    references.add(f"request:{request_id}")
+        return references
+
+    return {
+        "interfaceProtocol": request_refs({"002"}),
+        "contextWindow": request_refs({"014", "015", "016", "017", "018"}),
+        "concurrency": request_refs({"057"}),
+    }
 
 
 def _validate_assessment_failure_analysis(
@@ -626,8 +739,24 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
     errors: List[str] = []
     if not isinstance(summary, dict):
         return ["capabilitySummary must be an object"]
-    for field in sorted(set(summary) - CAPABILITY_SUMMARY_FIELDS):
+    for field in sorted(set(summary) - ASSESSMENT_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
+    statuses = {
+        item.get("testId"): item.get("reviewedStatus")
+        for item in items
+        if isinstance(item, dict)
+    }
+    try:
+        expected_verdict = derive_general_verdict(statuses)
+    except ValueError:
+        errors.append(
+            "capabilitySummary generalVerdict cannot be derived from test statuses"
+        )
+    else:
+        if summary.get("generalVerdict") != expected_verdict:
+            errors.append(
+                "capabilitySummary generalVerdict does not match test statuses"
+            )
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
     elif _contains_readiness_decision(summary.get("headline")):
@@ -636,11 +765,17 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
         )
     if summary.get("scopeBoundary") != CAPABILITY_SCOPE_BOUNDARY:
         errors.append("capabilitySummary scopeBoundary is invalid")
+    errors.extend(
+        validate_verified_facts(
+            summary.get("verifiedFacts"),
+            _assessment_fact_evidence_domains(items),
+        )
+    )
 
     issues = summary.get("issues")
     if not isinstance(issues, list):
         return errors + ["capabilitySummary issues must be an array"]
-    items_by_id = {item.get("testId"): item for item in items}
+    items_by_id = _assessment_items_by_id(items)
     fail_ids = {
         test_id
         for test_id, item in items_by_id.items()
@@ -745,14 +880,28 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
     return errors
 
 
-def validate_assessment(assessment: dict) -> List[str]:
+def validate_assessment(assessment: object) -> List[str]:
     """Validate binary cross-field consistency after assessment assembly."""
+
+    if not isinstance(assessment, dict):
+        return ["Assessment must be an object"]
 
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
         errors.append("schemaVersion is invalid")
     for field in sorted(set(assessment) - ASSESSMENT_FIELDS):
         errors.append(f"Assessment field {field} is not allowed")
+
+    summary = assessment.get("summary")
+    if not isinstance(summary, dict):
+        errors.append("summary must be an object")
+    source = assessment.get("source")
+    if not isinstance(source, dict):
+        errors.append("source must be an object")
+    run = assessment.get("run")
+    if not isinstance(run, dict):
+        errors.append("run must be an object")
+
     items = assessment.get("tests")
     if not isinstance(items, list):
         return errors + ["tests must be an array"]
@@ -761,43 +910,81 @@ def validate_assessment(assessment: dict) -> List[str]:
         errors.append("tests contain a non-object item")
     if any(item.get("reviewedStatus") not in STATUSES for item in object_items):
         errors.append("tests contain a non-binary reviewedStatus")
+
+    test_id_counts = _assessment_test_id_counts(object_items)
+    duplicate_test_ids = {
+        test_id for test_id, count in test_id_counts.items() if count > 1
+    }
+    valid_items = []
+    seen_test_ids = set()
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        test_id = item.get("testId")
+        if not _non_empty_string(test_id):
+            errors.append(f"tests[{index}] testId must be a non-empty string")
+            continue
+        if test_id in seen_test_ids:
+            errors.append(f"tests[{index}] testId is duplicated: {test_id}")
+        seen_test_ids.add(test_id)
+        if test_id in duplicate_test_ids:
+            continue
+        valid_items.append(item)
+
     statuses = {
         item.get("testId"): item.get("reviewedStatus")
-        for item in object_items
+        for item in valid_items
     }
     for item in object_items:
         test_id = item.get("testId", "unknown")
         for field in sorted(set(item) - TEST_FIELDS):
             errors.append(f"Test {test_id} field {field} is not allowed")
-        for field in ("testId", "category", "name", "conclusion", "rawObservation"):
+        for field in ("category", "name", "conclusion", "rawObservation"):
             if not _non_empty_string(item.get(field)):
                 errors.append(f"Test {test_id} {field} is required")
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test v5 contract"
+                    "the per-test assessment.v6 contract"
                 )
         logic = item.get("logic")
-        if isinstance(logic, dict):
+        if not isinstance(logic, dict):
+            errors.append(f"Test {test_id} logic must be an object")
+        else:
             for field in sorted(set(logic) - LOGIC_FIELDS):
                 errors.append(
                     f"Test {test_id} logic.{field} is not allowed"
                 )
+        requests = item.get("requests")
+        if not isinstance(requests, list):
+            errors.append(f"Test {test_id} requests must be an array")
+        else:
+            for request_index, request in enumerate(requests):
+                if not isinstance(request, dict):
+                    errors.append(
+                        f"Test {test_id} requests[{request_index}] must be an object"
+                    )
+                    continue
+                if not isinstance(request.get("metrics"), dict):
+                    errors.append(
+                        f"Test {test_id} requests[{request_index}] metrics must be "
+                        "an object"
+                    )
         errors.extend(_validate_assessment_failure_analysis(item, statuses))
     expected_counts = _status_counts(object_items)
-    if assessment.get("summary", {}).get("counts") != expected_counts:
+    if isinstance(summary, dict) and summary.get("counts") != expected_counts:
         errors.append("summary counts do not match test results")
     if assessment.get("categories") != _categories(object_items):
         errors.append("categories do not match test results")
     errors.extend(
         _validate_assessment_summary(
-            object_items,
+            valid_items,
             assessment.get("capabilitySummary"),
         )
     )
     if "overall" in assessment:
-        errors.append("overall is not part of the assessment v5 contract")
-    if "path" in assessment.get("source", {}):
+        errors.append("overall is not part of the assessment.v6 contract")
+    if isinstance(source, dict) and "path" in source:
         errors.append("source must not expose an absolute path")
     return errors

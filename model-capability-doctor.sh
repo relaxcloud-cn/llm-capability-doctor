@@ -20,7 +20,6 @@ Options:
   --api-key KEY       API key. Prefer MODEL_API_KEY to avoid shell history.
   --log-file PATH     Audit log path. Defaults to a timestamped file in the current directory.
   --timeout SECONDS   Per-request timeout. Defaults to 120.
-  --only IDS          Run comma-separated test IDs, for example 001,062.
   --list-tests        Print the 62-item core catalog and exit.
   -h, --help          Show this help.
 EOF
@@ -168,46 +167,6 @@ absolute_path() {
     /*) printf '%s\n' "$1" ;;
     *) printf '%s/%s\n' "$(pwd)" "$1" ;;
   esac
-}
-
-catalog_row() {
-  print_core_catalog | awk -F '\t' -v wanted="$1" '$1 == wanted { print; exit }'
-}
-
-selected_catalog() {
-  if [[ -z "$ONLY_IDS" ]]; then
-    print_core_catalog
-    return
-  fi
-  local previous_ifs="$IFS"
-  local id=""
-  IFS=','
-  for id in $ONLY_IDS; do
-    catalog_row "$id"
-  done
-  IFS="$previous_ifs"
-}
-
-validate_only_ids() {
-  [[ -z "$ONLY_IDS" ]] && return 0
-  local previous_ifs="$IFS"
-  local id=""
-  local row=""
-  IFS=','
-  for id in $ONLY_IDS; do
-    if [[ ! "$id" =~ ^[0-9]{3}$ ]]; then
-      echo "Invalid --only test ID: $id" >&2
-      IFS="$previous_ifs"
-      return 1
-    fi
-    row="$(catalog_row "$id")"
-    if [[ -z "$row" ]]; then
-      echo "Unknown --only test ID: $id" >&2
-      IFS="$previous_ifs"
-      return 1
-    fi
-  done
-  IFS="$previous_ifs"
 }
 
 cleanup() {
@@ -1289,7 +1248,7 @@ run_core_guardrail_test() {
   record_test_manifest "$id" "$category" "$name" "$request_refs"
 }
 
-run_selected_tests() {
+run_all_tests() {
   local id=""
   local category=""
   local name=""
@@ -1314,7 +1273,7 @@ run_selected_tests() {
       059|060|061|062) run_core_guardrail_test "$id" "$category" "$name" ;;
       *) record_test_manifest "$id" "$category" "$name" "" ;;
     esac
-  done < <(selected_catalog)
+  done < <(print_core_catalog)
 }
 
 URL=""
@@ -1322,7 +1281,6 @@ MODEL=""
 API_KEY="${MODEL_API_KEY:-}"
 LOG_FILE=""
 TIMEOUT_SECONDS="120"
-ONLY_IDS=""
 LIST_TESTS=0
 
 require_option_value() {
@@ -1358,11 +1316,6 @@ while [[ $# -gt 0 ]]; do
     --timeout)
       require_option_value "$1" "$#"
       TIMEOUT_SECONDS="${2:-}"
-      shift 2
-      ;;
-    --only)
-      require_option_value "$1" "$#"
-      ONLY_IDS="${2:-}"
       shift 2
       ;;
     --list-tests)
@@ -1402,9 +1355,6 @@ if [[ ! "$TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
   echo "--timeout must be a positive integer" >&2
   exit 2
 fi
-if ! validate_only_ids; then
-  exit 2
-fi
 if ! command -v curl >/dev/null 2>&1; then
   echo "curl is required" >&2
   exit 1
@@ -1437,7 +1387,7 @@ chmod 600 "$LOG_FILE" || {
   exit 1
 }
 
-SELECTED_TEST_COUNT="$(selected_catalog | awk 'END { print NR + 0 }')"
+SELECTED_TEST_COUNT="$(print_core_catalog | wc -l | tr -d ' ')"
 REQUEST_COUNT=0
 TEST_MANIFEST_COUNT=0
 DETECTED_PROTOCOL="unknown"
@@ -1463,6 +1413,6 @@ CORE_REPEAT_REQUEST_REFS=""
 BATCH_REQUEST_REFS=""
 
 write_log_header
-run_selected_tests
+run_all_tests
 write_run_summary
 exit 0

@@ -10,6 +10,14 @@
   --code: #f5f6f7;
   --focus: #1478d4;
   --fail: #b42318;
+  --verdict-pass: #18794e;
+  --verdict-pass-bg: #f1f8f4;
+  --verdict-conditional: #8a5a00;
+  --verdict-conditional-bg: #fff8e6;
+  --verdict-fail: #b42318;
+  --verdict-fail-bg: #fff3f1;
+  --verdict-neutral: #5b6168;
+  --verdict-neutral-bg: #f5f6f7;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
@@ -94,46 +102,106 @@ button {
   letter-spacing: 0;
 }
 
-.final-conclusion-lead {
-  margin: 0 0 0.75rem;
-  font-weight: 500;
+.general-verdict {
+  margin: 0 0 0.85rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--verdict-neutral);
+  border-radius: 6px;
+  background: var(--verdict-neutral-bg);
 }
 
-.final-conclusion-list {
+.general-verdict-PASS {
+  border-left-color: var(--verdict-pass);
+  background: var(--verdict-pass-bg);
+}
+
+.general-verdict-CONDITIONAL_PASS {
+  border-left-color: var(--verdict-conditional);
+  background: var(--verdict-conditional-bg);
+}
+
+.general-verdict-FAIL {
+  border-left-color: var(--verdict-fail);
+  background: var(--verdict-fail-bg);
+}
+
+.general-verdict-label {
   margin: 0;
-  padding-left: 1.35rem;
+  color: var(--foreground);
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
 }
 
-.final-conclusion-list li {
-  padding-left: 0.15rem;
+.general-verdict-statement {
+  margin: 0.45rem 0 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
 }
 
-.final-conclusion-list li + li {
-  margin-top: 0.65rem;
+.capability-fact-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 1rem;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
 }
 
-.final-conclusion-list p {
-  margin: 0;
+.capability-fact-strip > div {
+  min-width: 0;
+  padding: 0.65rem;
+  border-right: 1px solid var(--line);
 }
 
-.final-conclusion-list strong {
-  font-weight: 600;
+.capability-fact-strip > div:last-child {
+  border-right: 0;
 }
 
-.final-conclusion-boundary,
-.final-conclusion-refs,
-.final-conclusion-scope {
+.capability-fact-strip dt {
   color: var(--muted-foreground);
   font-size: 12px;
 }
 
-.final-conclusion-list .final-conclusion-boundary,
-.final-conclusion-list .final-conclusion-refs {
-  margin-top: 0.2rem;
+.capability-fact-strip dd {
+  min-width: 0;
+  margin: 0.15rem 0 0;
+  color: var(--foreground);
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
-.final-conclusion-scope {
-  margin: 0.75rem 0 0;
+.verified-facts {
+  margin: 0 0 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.verified-facts > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.65rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.verified-facts dt {
+  color: var(--muted-foreground);
+}
+
+.verified-facts dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.verified-fact-detail,
+.verified-fact-boundary {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--muted-foreground);
+  font-size: 12px;
 }
 
 table {
@@ -385,6 +453,14 @@ pre {
     --code: #111111;
     --focus: #83c3ff;
     --fail: #ff856f;
+    --verdict-pass: #6cd5a2;
+    --verdict-pass-bg: #1c2b24;
+    --verdict-conditional: #f1bd62;
+    --verdict-conditional-bg: #302719;
+    --verdict-fail: #ff856f;
+    --verdict-fail-bg: #321e1b;
+    --verdict-neutral: #b1b6bc;
+    --verdict-neutral-bg: #242628;
   }
 }
 
@@ -396,6 +472,22 @@ pre {
   .run-metadata > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
+  }
+
+  .verified-facts > div {
+    grid-template-columns: 1fr;
+  }
+
+  .capability-fact-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .capability-fact-strip > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .capability-fact-strip > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
   }
 
   .failure-analysis-details > div {
@@ -504,6 +596,7 @@ pre {
   }
 
   .result-row,
+  .general-verdict,
   .logic-item {
     break-inside: avoid;
   }

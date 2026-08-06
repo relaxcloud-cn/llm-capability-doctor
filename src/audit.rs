@@ -10,7 +10,6 @@ use chrono::{DateTime, Local};
 use thiserror::Error;
 use url::Url;
 
-use crate::cli::CollectionProfile;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
@@ -21,7 +20,6 @@ pub struct RunMetadata {
     pub model: String,
     pub masked_api_key: String,
     pub selected_test_count: usize,
-    pub collection_profile: CollectionProfile,
     pub insecure: bool,
 }
 
@@ -193,15 +191,10 @@ impl AuditWriter {
     fn write_header(&mut self, metadata: &RunMetadata) -> Result<(), AuditError> {
         writeln!(self.writer, "========== MODEL DOCTOR RUN ==========")?;
         writeln!(self.writer, "run_id: {}", metadata.run_id)?;
-        writeln!(self.writer, "script_version: 0.9.0")?;
+        writeln!(self.writer, "script_version: 0.10.0")?;
         writeln!(self.writer, "collector_runtime: rust")?;
-        writeln!(
-            self.writer,
-            "collection_profile: {}",
-            metadata.collection_profile
-        )?;
         writeln!(self.writer, "section_encoding: base64")?;
-        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v1")?;
+        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v2")?;
         writeln!(
             self.writer,
             "started_at: {}",

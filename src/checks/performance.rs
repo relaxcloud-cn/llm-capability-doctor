@@ -35,14 +35,8 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
             }
         }
         "057" => {
-            let concurrency_levels: &[usize] = if context.onsite {
-                &[8]
-            } else {
-                &[4, 8, 16, 32]
-            };
-            let groups = concurrency_levels
-                .iter()
-                .copied()
+            let groups = [4_usize, 8, 16, 32]
+                .into_iter()
                 .map(|concurrency| {
                     let requests = (1..=concurrency)
                         .map(|index| {

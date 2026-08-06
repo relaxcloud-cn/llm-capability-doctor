@@ -1,4 +1,3 @@
-use std::fmt;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,7 +9,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = "Model Capability Doctor 0.9.0",
+    about = "Model Capability Doctor 0.10.0 - Run all 46 checks",
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -34,14 +33,6 @@ pub struct Cli {
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
-    /// Run comma-separated test IDs, for example 001,060.
-    #[arg(long, value_name = "IDS", value_parser = validate_only_syntax)]
-    pub only: Option<String>,
-
-    /// Run all 46 checks instead of the compact onsite profile.
-    #[arg(long, conflicts_with = "only")]
-    pub full: bool,
-
     /// Print the 46-item core catalog and exit.
     #[arg(long)]
     pub list_tests: bool,
@@ -57,26 +48,7 @@ pub struct Config {
     pub api_key: SecretString,
     pub log_file: Option<PathBuf>,
     pub timeout: Duration,
-    pub only: Option<String>,
-    pub profile: CollectionProfile,
     pub insecure: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CollectionProfile {
-    Onsite,
-    Full,
-    Custom,
-}
-
-impl fmt::Display for CollectionProfile {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(match self {
-            Self::Onsite => "onsite",
-            Self::Full => "full",
-            Self::Custom => "custom",
-        })
-    }
 }
 
 pub struct SecretString(String);
@@ -113,22 +85,12 @@ impl Cli {
             .or(environment_api_key)
             .filter(|value| !value.is_empty())
             .ok_or(CliError::MissingApiKey)?;
-        let profile = if self.only.is_some() {
-            CollectionProfile::Custom
-        } else if self.full {
-            CollectionProfile::Full
-        } else {
-            CollectionProfile::Onsite
-        };
-
         Ok(Config {
             url,
             model,
             api_key: SecretString(api_key),
             log_file: self.log_file,
             timeout: Duration::from_secs(self.timeout),
-            only: self.only,
-            profile,
             insecure: self.insecure,
         })
     }
@@ -142,10 +104,4 @@ fn parse_positive_integer(value: &str) -> Result<u64, String> {
         return Err("must be a positive integer".to_owned());
     }
     Ok(parsed)
-}
-
-fn validate_only_syntax(value: &str) -> Result<String, String> {
-    crate::catalog::select(Some(value))
-        .map(|_| value.to_owned())
-        .map_err(|error| error.to_string())
 }

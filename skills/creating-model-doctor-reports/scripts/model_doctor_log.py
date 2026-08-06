@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Parse evidence-v1 Model Doctor logs into inert, redacted evidence."""
+"""Parse supported Model Doctor evidence logs into inert, redacted evidence."""
 
 from __future__ import annotations
 
@@ -13,8 +13,9 @@ from urllib.parse import parse_qsl, urlsplit
 
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
-EVIDENCE_LOG_SCHEMA = "llm-capability-doctor.evidence.v1"
-COLLECTOR_VERSION = "0.9.0"
+V1_CONTRACT = ("llm-capability-doctor.evidence.v1", "0.9.0")
+V2_CONTRACT = ("llm-capability-doctor.evidence.v2", "0.10.0")
+SUPPORTED_CONTRACTS = {V1_CONTRACT, V2_CONTRACT}
 SECTION_ENCODING = "base64"
 RETAINED_TEST_IDS = {
     *(f"{value:03d}" for value in range(1, 21)),
@@ -342,22 +343,15 @@ def _parse_request_refs(value: str, test_id: str) -> List[str]:
 
 
 def parse_log(path: Path) -> Dict[str, object]:
-    """Parse one strict evidence-v1 log without retaining its absolute path."""
+    """Parse one supported evidence log without retaining its absolute path."""
 
     path = Path(path)
     raw = path.read_bytes()
     decoded = raw.decode("utf-8", errors="replace")
     raw_run = _run_header(decoded)
-    if raw_run.get("log_schema") != EVIDENCE_LOG_SCHEMA:
-        raise ValueError(
-            f"Unsupported or missing log_schema: {raw_run.get('log_schema')!r}"
-        )
-    if raw_run.get("script_version") != COLLECTOR_VERSION:
-        raise ValueError(
-            f"Unsupported or missing script_version: "
-            f"{raw_run.get('script_version')!r}; "
-            f"expected {COLLECTOR_VERSION}"
-        )
+    contract = (raw_run.get("log_schema"), raw_run.get("script_version"))
+    if contract not in SUPPORTED_CONTRACTS:
+        raise ValueError(f"Unsupported log schema/version pair: {contract!r}")
     if raw_run.get("section_encoding") != SECTION_ENCODING:
         raise ValueError(
             f"Unsupported or missing section_encoding: "
@@ -427,7 +421,7 @@ def parse_log(path: Path) -> Dict[str, object]:
         if identifier in tests:
             raise ValueError(f"Duplicate test block: {identifier}")
         if identifier not in RETAINED_TEST_IDS:
-            raise ValueError(f"Unsupported test ID in v0.9 log: {identifier}")
+            raise ValueError(f"Unsupported test ID in evidence log: {identifier}")
         metadata = _key_values(block)
         forbidden = FORBIDDEN_MANIFEST_FIELDS.intersection(metadata)
         if forbidden:
@@ -457,20 +451,30 @@ def parse_log(path: Path) -> Dict[str, object]:
     summary = _run_summary(decoded)
     if not summary:
         raise ValueError("Missing RUN SUMMARY")
-    profile = run.get("collection_profile")
     discovered_test_ids = set(tests)
-    if profile == "full" and discovered_test_ids != RETAINED_TEST_IDS:
-        raise ValueError(
-            "The full collection profile must contain all 46 retained tests"
-        )
-    if profile == "onsite" and discovered_test_ids != ONSITE_TEST_IDS:
-        raise ValueError(
-            "The onsite collection profile must contain all 29 onsite tests"
-        )
-    if profile == "custom" and not discovered_test_ids:
-        raise ValueError("The custom collection profile must contain at least one test")
-    if profile not in {"full", "onsite", "custom"}:
-        raise ValueError(f"Unsupported or missing collection_profile: {profile!r}")
+    if contract == V1_CONTRACT:
+        profile = run.get("collection_profile")
+        if profile == "full" and discovered_test_ids != RETAINED_TEST_IDS:
+            raise ValueError(
+                "The full collection profile must contain all 46 retained tests"
+            )
+        if profile == "onsite" and discovered_test_ids != ONSITE_TEST_IDS:
+            raise ValueError(
+                "The onsite collection profile must contain all 29 onsite tests"
+            )
+        if profile == "custom" and not discovered_test_ids:
+            raise ValueError(
+                "The custom collection profile must contain at least one test"
+            )
+        if profile not in {"full", "onsite", "custom"}:
+            raise ValueError(
+                f"Unsupported or missing collection_profile: {profile!r}"
+            )
+    else:
+        if "collection_profile" in run:
+            raise ValueError("Evidence v2 must not contain collection_profile")
+        if discovered_test_ids != RETAINED_TEST_IDS:
+            raise ValueError("Evidence v2 must contain all 46 retained tests")
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))

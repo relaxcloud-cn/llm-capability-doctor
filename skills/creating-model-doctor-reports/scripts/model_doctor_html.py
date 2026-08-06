@@ -20,6 +20,24 @@ SUFFICIENCY_LABELS = {
     "LIMITED": "证据有限",
     "INSUFFICIENT": "证据不足",
 }
+PROTOCOL_FAMILY_LABELS = {
+    "OPENAI_CHAT_COMPLETIONS": "OpenAI Chat Completions",
+    "OPENAI_RESPONSES": "OpenAI Responses",
+    "ANTHROPIC_MESSAGES": "Anthropic Messages",
+    "GEMINI_GENERATE_CONTENT": "Gemini GenerateContent",
+    "OLLAMA_CHAT": "Ollama Chat",
+    "CUSTOM": "自定义格式",
+    "UNKNOWN": "未确认",
+}
+PROTOCOL_FACT_LABELS = {
+    "OPENAI_CHAT_COMPLETIONS": "OpenAI Chat",
+    "OPENAI_RESPONSES": "OpenAI Responses",
+    "ANTHROPIC_MESSAGES": "Anthropic Messages",
+    "GEMINI_GENERATE_CONTENT": "Gemini GenerateContent",
+    "OLLAMA_CHAT": "Ollama Chat",
+    "CUSTOM": "自定义格式",
+}
+VERDICT_LEVELS = {"PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"}
 
 
 def _e(value: object) -> str:
@@ -90,33 +108,142 @@ def _run_metadata(run: dict, summary: dict) -> str:
     )
 
 
-def _capability_summary(summary: dict) -> str:
-    issues = summary.get("issues", [])
-    issue_list = ""
-    if issues:
-        rendered_issues = []
-        for issue in issues:
-            test_refs = "、".join(str(value) for value in issue.get("testRefs", []))
-            rendered_issues.append(
-                "<li>"
-                f'<p><strong>{_e(issue.get("title"))}：</strong>'
-                f'{_e(issue.get("statement"))}</p>'
-                f'<p class="final-conclusion-boundary">{_e(issue.get("boundary"))}</p>'
-                f'<p class="final-conclusion-refs">关联检测项：{_e(test_refs)}</p>'
-                "</li>"
-            )
-        issue_list = (
-            '<ol class="final-conclusion-list">'
-            + "".join(rendered_issues)
-            + "</ol>"
+def _verified_facts(facts: dict) -> str:
+    facts = facts if isinstance(facts, dict) else {}
+    interface = facts.get("interfaceProtocol")
+    interface = interface if isinstance(interface, dict) else {}
+    context = facts.get("contextWindow")
+    context = context if isinstance(context, dict) else {}
+    concurrency = facts.get("concurrency")
+    concurrency = concurrency if isinstance(concurrency, dict) else {}
+
+    family = interface.get("family")
+    family_label = (
+        PROTOCOL_FAMILY_LABELS.get(family, family)
+        if isinstance(family, str)
+        else "未确认"
+    )
+    interface_detail = (
+        f'请求：{interface.get("requestFormat") or ""}；'
+        f'响应：{interface.get("responseFormat") or ""}；'
+        f"分类：{family_label}。"
+    )
+
+    highest_tier = context.get("highestVerifiedTier") or "未确认"
+    highest_tokens = context.get("highestVerifiedInputTokens")
+    highest_tokens = highest_tokens if highest_tokens is not None else "未观察到"
+    failed_tier = context.get("firstFailedTier") or "未观察到"
+    failed_tokens = context.get("firstFailedInputTokens")
+    failed_tokens = failed_tokens if failed_tokens is not None else "未观察到"
+    context_detail = (
+        f"最高通过档：{highest_tier}；原生输入 Token：{highest_tokens}；"
+        f"首个失败档：{failed_tier}；失败档输入 Token：{failed_tokens}。"
+    )
+
+    highest_concurrency = concurrency.get("highestVerifiedConcurrentRequests")
+    highest_concurrency = (
+        highest_concurrency if highest_concurrency is not None else "未确认"
+    )
+    concurrency_detail = f"最高已验证并发：{highest_concurrency}。"
+
+    rows = (
+        (
+            "接口协议格式",
+            interface.get("statement"),
+            interface_detail,
+            interface.get("boundary"),
+        ),
+        (
+            "上下文能力",
+            context.get("statement"),
+            context_detail,
+            context.get("boundary"),
+        ),
+        (
+            "并发能力",
+            concurrency.get("statement"),
+            concurrency_detail,
+            concurrency.get("boundary"),
+        ),
+    )
+    rendered_rows = "".join(
+        "<div>"
+        f"<dt>{_e(label)}</dt>"
+        f"<dd><strong>{_e(statement)}</strong>"
+        f'<span class="verified-fact-detail">{_e(detail)}</span>'
+        f'<span class="verified-fact-boundary">{_e(boundary)}</span>'
+        "</dd></div>"
+        for label, statement, detail, boundary in rows
+    )
+    return f'<dl class="verified-facts">{rendered_rows}</dl>'
+
+
+def _general_verdict(summary: dict) -> str:
+    verdict = summary.get("generalVerdict")
+    verdict = verdict if isinstance(verdict, dict) else {}
+    facts = summary.get("verifiedFacts")
+    facts = facts if isinstance(facts, dict) else {}
+    interface = facts.get("interfaceProtocol")
+    interface = interface if isinstance(interface, dict) else {}
+    context = facts.get("contextWindow")
+    context = context if isinstance(context, dict) else {}
+    concurrency = facts.get("concurrency")
+    concurrency = concurrency if isinstance(concurrency, dict) else {}
+
+    level = verdict.get("level")
+    class_level = level if level in VERDICT_LEVELS else "NOT_ASSESSED"
+    if level == "NOT_ASSESSED":
+        result_value = (
+            f'已采集 {verdict.get("collectedTests", 0)}/'
+            f'{verdict.get("totalTests", 46)}'
         )
+    else:
+        result_value = (
+            f'{verdict.get("passedTests", 0)}/'
+            f'{verdict.get("totalTests", 46)} 通过'
+        )
+
+    protocol_value = "未确认"
+    if interface.get("evidenceState") == "VERIFIED":
+        protocol_value = PROTOCOL_FACT_LABELS.get(
+            interface.get("family"),
+            "未确认",
+        )
+    context_value = "未确认"
+    if context.get("evidenceState") == "VERIFIED":
+        context_value = context.get("highestVerifiedTier") or "未确认"
+    concurrency_value = "未确认"
+    if concurrency.get("evidenceState") == "VERIFIED":
+        highest_concurrency = concurrency.get("highestVerifiedConcurrentRequests")
+        if highest_concurrency is not None:
+            concurrency_value = f"{highest_concurrency} 并发"
+
+    fact_rows = (
+        ("检测结果", result_value),
+        ("接口协议", protocol_value),
+        ("上下文", context_value),
+        ("并发", concurrency_value),
+    )
+    rendered_facts = "".join(
+        f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
+        for label, value in fact_rows
+    )
+    return (
+        f'<div class="general-verdict general-verdict-{class_level}">'
+        f'<p class="general-verdict-label">综合结论：{_e(verdict.get("label"))}</p>'
+        f'<p class="general-verdict-statement">{_e(verdict.get("statement"))}</p>'
+        "</div>"
+        f'<dl class="capability-fact-strip">{rendered_facts}</dl>'
+    )
+
+
+def _capability_summary(summary: dict) -> str:
     return (
         '<section class="final-conclusion" aria-labelledby="final-conclusion-heading">'
         '<h2 id="final-conclusion-heading" class="final-conclusion-heading">'
         "最终结论</h2>"
-        f'<p class="final-conclusion-lead">{_e(summary.get("headline"))}</p>'
-        f"{issue_list}"
-        f'<p class="final-conclusion-scope">{_e(summary.get("scopeBoundary"))}</p>'
+        f"{_general_verdict(summary)}"
+        f'{_verified_facts(summary.get("verifiedFacts", {}))}'
         "</section>"
     )
 
@@ -169,7 +296,7 @@ def _request_evidence(requests: List[dict]) -> str:
                 if metrics.get("curl_exit_code")
                 else "",
                 f"HTTP {metrics.get('http_status')}" if metrics.get("http_status") else "",
-                f"TTFT {metrics.get('time_starttransfer')}s"
+                f"TTFB {metrics.get('time_starttransfer')}s"
                 if metrics.get("time_starttransfer")
                 else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",

@@ -9,11 +9,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::audit::{AuditError, AuditWriter, RequestEvidence, RunMetadata, TestManifest};
-use crate::catalog::{CatalogError, TestCase, select, select_onsite};
+use crate::catalog::TestCase;
 use crate::checks::{
     Body, CheckError, ManifestRefs, PlanContext, PlannedRequest, RequestGroup, plan,
 };
-use crate::cli::{CollectionProfile, Config};
+use crate::cli::Config;
 use crate::http::{HttpExecutor, RequestInput};
 use crate::protocol::tools::build_follow_up;
 use crate::protocol::{AuthMode, PROBE_CANDIDATES, Protocol, basic_request, matches_response};
@@ -30,11 +30,7 @@ pub async fn run(
     config: Config,
     cancellation: CancellationToken,
 ) -> Result<RunOutcome, RunnerError> {
-    let selected = match config.profile {
-        CollectionProfile::Onsite => select_onsite(),
-        CollectionProfile::Full => select(None)?,
-        CollectionProfile::Custom => select(config.only.as_deref())?,
-    };
+    let selected = crate::catalog::all();
     let started_at = Local::now();
     let started = Instant::now();
     let log_path = resolve_log_path(config.log_file.as_deref(), started_at)?;
@@ -50,7 +46,6 @@ pub async fn run(
         model: config.model.clone(),
         masked_api_key: mask_api_key(config.api_key.expose()),
         selected_test_count: selected.len(),
-        collection_profile: config.profile,
         insecure: config.insecure,
     };
     let audit = AuditWriter::create(&log_path, metadata, redactor)?;
@@ -142,7 +137,6 @@ impl Runner {
             protocol: self.detected_protocol,
             auth_mode: self.detected_auth_mode,
             model: &self.config.model,
-            onsite: self.config.profile == CollectionProfile::Onsite,
         };
         let check_plan = plan(test.id, &context)?;
         let initial_tool_body = if matches!(test.id, "047" | "048" | "049") {
@@ -322,8 +316,6 @@ fn resolve_log_path(
 pub enum RunnerError {
     #[error("collection interrupted")]
     Interrupted,
-    #[error(transparent)]
-    Catalog(#[from] CatalogError),
     #[error(transparent)]
     Check(#[from] CheckError),
     #[error(transparent)]
