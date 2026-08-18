@@ -127,8 +127,10 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 使用 $creating-model-doctor-reports 分析 `/绝对路径/your-model-model-doctor.log`，逐项判定 PASS 或 FAIL，并生成能力报告。
 ```
 
-Skill 会在日志旁生成评估 JSON 和自包含 HTML 报告，并对每个已采集检测项给出
-PASS 或 FAIL。CLI 只负责采集证据，不在客户现场给出结论；Skill 也不会自动给出
+Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON 和自包含 HTML
+报告，并对每个已采集检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
+协议响应结构，覆盖成功与错误响应以及流式与非流式响应，并逐项列出差异和固定官方
+参考。CLI 只负责采集证据，不在客户现场给出结论；Skill 也不会自动给出
 整个项目是否可用的总判定，实施人员应将项目必需项与逐项结果进行对照。
 
 一份结构完整的日志可以直接完成一次报告分析。如果日志版本不匹配、结构校验

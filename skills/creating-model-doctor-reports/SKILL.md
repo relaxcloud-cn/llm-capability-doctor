@@ -31,7 +31,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    python3 scripts/model_doctor_report.py parse "$LOG" --output "$TMP/parsed.json"
    ```
 
-3. Read `references/evaluation-rules.md` completely. Author `llm-capability-doctor.reviews.v2`; the rendered output contract is `llm-capability-doctor.assessment.v6` in `references/assessment-schema.json`.
+3. Read `references/evaluation-rules.md` completely. Author `llm-capability-doctor.reviews.v2`; the rendered output contract is `llm-capability-doctor.assessment.v7` in `references/assessment-schema.json`.
 4. Inspect the inventory and small evidence packets:
 
    ```bash
@@ -47,6 +47,8 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - HTTP 2xx alone never proves semantic success.
    - Write each `conclusion` as one concise Chinese sentence with two clauses: `<关键证据概括>，因此判定<实质结果>。`
    - Keep raw fields, markers, request IDs, exact metrics, and exhaustive values in evidence rather than the conclusion.
+
+   Assessment assembly independently checks the official response structure of 全部原始请求, including requests not referenced by a manifest. It covers 成功与错误响应 and 流式与非流式响应. Unreferenced requests use `checkIds: []`. This generated `protocolConformance` result never changes a manifest's PASS/FAIL or the general capability verdict.
 
 6. For every FAIL, add `failureAnalysis`. PASS items must omit it.
 
@@ -167,7 +169,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
      --html "$LOG_DIR/<model-slug>-model-capability-report.html"
    ```
 
-   The renderer puts “最终结论” immediately below “检测信息”. It renders only the program-generated general verdict, fixed statement, four capability facts, and three verified-fact rows before the capability-domain table. It must not render `headline`, `issues`, or `scopeBoundary`; those fields remain validated assessment JSON audit data. It puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all evidence rows without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
-11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v6`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, and every referenced request appears in its report row.
-12. Verify the HTML contains exactly one final-conclusion section between detection information and the capability-domain table; confirm its “接口协议格式”, “上下文能力”, and “并发能力” rows all render, and confirm the assessment `headline`, `issues`, and `scopeBoundary` are absent from HTML. Verify one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
+   The renderer puts “最终结论” immediately below “检测信息”, then puts “官方协议结构一致性” before the capability-domain table. It renders the program-generated general verdict, fixed statement, four capability facts, three verified-fact rows, protocol counts, groupings, pinned baselines, every raw request exactly once (both `CONSISTENT` and `DIFFERENT`), and every request-level difference. It must not render `headline`, `issues`, or `scopeBoundary`; those fields remain validated assessment JSON audit data. It puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all protocol and evidence details without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
+11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v7`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, every referenced request appears in its capability row, and every raw request appears exactly once in `protocolConformance.results`.
+12. Verify the HTML contains exactly one final-conclusion section and exactly one official-protocol-conformance section between detection information and the capability-domain table; confirm its “接口协议格式”, “上下文能力”, and “并发能力” rows all render, and confirm the assessment `headline`, `issues`, and `scopeBoundary` are absent from HTML. Verify every protocol difference exposes its request, location, kind, expected structure, observed category, and pinned official reference. Verify one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
 13. Report absolute output paths, PASS/FAIL counts, the program-generated general verdict, and the bounded summary headline. Never add another status class or a project readiness verdict.

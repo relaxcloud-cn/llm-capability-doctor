@@ -122,7 +122,7 @@ The exact scope boundary is `本节仅总结本轮可观察能力，不构成项
 
 ## 6. Deterministic General Capability Verdict
 
-`reviews.v2` must not contain `generalVerdict`. The Skill authors evidence-bound per-test decisions, facts, headline, issues, and scope only. `assemble_assessment` generates `assessment.v6.capabilitySummary.generalVerdict` from the final test statuses, and `validate_assessment` independently recomputes the entire object.
+`reviews.v2` must not contain `generalVerdict`. The Skill authors evidence-bound per-test decisions, facts, headline, issues, and scope only. `assemble_assessment` generates `llm-capability-doctor.assessment.v7.capabilitySummary.generalVerdict` from the final test statuses, and `validate_assessment` independently recomputes the entire object.
 
 Complete evidence v2 reports partition the retained checks into 31 core checks and 15 enhanced checks. The groups are disjoint and cover all 46 checks.
 
@@ -157,6 +157,19 @@ Use only these program-generated templates:
 This verdict describes the fixed general capability standard. It 不构成项目 READY/BLOCKED 或可上线/不可上线判定. Project-specific readiness still requires explicit project requirements that are outside this report.
 
 ## 7. Interface and Protocol
+
+### Official response structure conformance
+
+Generate `llm-capability-doctor.assessment.v7.protocolConformance` deterministically and keep it independent from manifest PASS/FAIL and the general capability verdict.
+
+- Check 全部原始请求 from the parsed evidence, including requests not referenced by a manifest. Cover both 成功与错误响应 and 流式与非流式响应.
+- 仅比较官方协议数据结构 for the protocol recorded on each request. Compare the observable wire envelope, required fields, field types, enums, event framing, terminal state, and cross-event correlation. Do not require dynamic IDs, timestamps, Token counts, or generated text to equal an example byte for byte.
+- 可选字段可以缺失. A required field that is absent is a difference, and 未记录的额外字段属于差异.
+- Missing evidence that prevents the response from being inspected is `EVIDENCE_GAP`, and 证据缺口不得判为一致. Distinguish it from an explicitly recorded empty response: an empty non-stream body where the official response requires JSON is `INVALID_JSON`; a stream with valid framing but no required response event is `SEQUENCE`; malformed stream framing is `FRAMING`. Observed malformed JSON, incomplete sequences, and mismatched correlations are also differences; classify them with the precise `INVALID_JSON`, `SEQUENCE`, or `CORRELATION` kind. Use only `CONSISTENT` or `DIFFERENT` for request-level results.
+- Set `checkIds` to every manifest check that references the request; requests not referenced by any manifest use `checkIds: []`. Render every request exactly once in the HTML, including both `CONSISTENT` and `DIFFERENT` results.
+- Record `requestId`, `protocol`, RFC 6901 `location`, `differenceKind`, `expected`, bounded `actual`, and the pinned `officialReference` for every difference. Never echo provider content into `actual`.
+- 不得归一化或修正响应 before comparison. Report what was observed; do not rewrite it into a valid official envelope.
+- Use the pinned baselines for OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Gemini GenerateContent, and Ollama Chat. Do not describe a framework-specific compatibility standard.
 
 ### 001 URL 可达性
 

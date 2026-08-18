@@ -956,7 +956,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             errors,
         )
 
-    def test_assembly_emits_assessment_v6_with_verified_facts(self) -> None:
+    def test_assembly_emits_assessment_v7_with_verified_facts(self) -> None:
         reviews = self._reviews()
         expected_facts = self._verified_facts()
         try:
@@ -965,7 +965,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -1447,11 +1447,11 @@ test_manifest_count: 1
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["$id"],
         )
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
@@ -1481,11 +1481,12 @@ test_manifest_count: 1
             assessment = assemble_assessment(self._parsed(), self._reviews())
             html = render_report(assessment, ASSET_DIR)
         except (KeyError, ValueError) as error:
-            self.fail(f"renderer rejected the desired v6 contract: {error}")
+            self.fail(f"renderer rejected the desired v7 contract: {error}")
 
         expected_order = (
             '<section class="run-information"',
             '<section class="final-conclusion"',
+            '<section class="protocol-conformance"',
             '<table class="summary-table">',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
@@ -1498,9 +1499,10 @@ test_manifest_count: 1
             [
                 ("section", "run-information"),
                 ("section", "final-conclusion"),
+                ("section", "protocol-conformance"),
                 ("table", "summary-table"),
             ],
-            parser.children[:3],
+            parser.children[:4],
         )
 
     def test_final_conclusion_renders_all_three_fact_rows(self) -> None:
@@ -1747,7 +1749,7 @@ test_manifest_count: 1
             stderr.getvalue(),
         )
 
-    def test_cli_render_writes_v6_and_final_conclusion(self) -> None:
+    def test_cli_render_writes_v7_and_final_conclusion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             parsed_path = directory_path / "parsed.json"
@@ -1783,7 +1785,7 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertIn('<section class="final-conclusion"', html)
@@ -1806,7 +1808,7 @@ test_manifest_count: 1
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             "interfaceProtocol",
             "contextWindow",
             "highestVerifiedInputTokens",

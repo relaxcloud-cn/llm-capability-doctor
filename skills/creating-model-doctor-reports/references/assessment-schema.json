@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v6",
+  "$id": "llm-capability-doctor.assessment.v7",
   "title": "LLM Capability Doctor Evidence-Bound Assessment",
   "type": "object",
   "required": [
@@ -12,12 +12,13 @@
     "warnings",
     "summary",
     "capabilitySummary",
+    "protocolConformance",
     "categories",
     "tests"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v6"
+      "const": "llm-capability-doctor.assessment.v7"
     },
     "generatedAt": {
       "type": "string"
@@ -59,6 +60,9 @@
     },
     "capabilitySummary": {
       "$ref": "#/$defs/capabilitySummary"
+    },
+    "protocolConformance": {
+      "$ref": "#/$defs/protocolConformance"
     },
     "categories": {
       "type": "array",
@@ -181,6 +185,365 @@
     }
   },
   "$defs": {
+    "protocolConformance": {
+      "type": "object",
+      "required": [
+        "ruleSetVersion",
+        "baselineDate",
+        "baselines",
+        "summary",
+        "results"
+      ],
+      "properties": {
+        "ruleSetVersion": {
+          "const": "official-protocol-conformance.2026-08-18"
+        },
+        "baselineDate": {
+          "const": "2026-08-18"
+        },
+        "baselines": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolBaseline"},
+          "minItems": 5,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "summary": {
+          "$ref": "#/$defs/protocolConformanceSummary"
+        },
+        "results": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolConformanceResult"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "protocolBaseline": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "officialVersion",
+        "referenceDate",
+        "sourceUrl",
+        "supportingReferences"
+      ],
+      "properties": {
+        "protocol": {
+          "enum": [
+            "openai_chat",
+            "openai_responses",
+            "anthropic_messages",
+            "gemini_generate_content",
+            "ollama_chat"
+          ]
+        },
+        "officialVersion": {"type": "string", "minLength": 1},
+        "referenceDate": {"const": "2026-08-18"},
+        "sourceUrl": {"type": "string", "minLength": 1},
+        "supportingReferences": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": [
+                "protocol",
+                "officialVersion",
+                "referenceDate",
+                "sourceUrl",
+                "supportingReferences"
+              ],
+              "properties": {
+                "protocol": {"const": "openai_chat"},
+                "officialVersion": {
+                  "const": "OpenAPI 2.3.0, commit 2186421dca0cca7c1e67caa7739005e8b1ccc4dd"
+                },
+                "referenceDate": {"const": "2026-08-18"},
+                "sourceUrl": {
+                  "const": "https://github.com/openai/openai-openapi/blob/2186421dca0cca7c1e67caa7739005e8b1ccc4dd/openapi.json"
+                },
+                "supportingReferences": {
+                  "const": [
+                    "https://platform.openai.com/docs/api-reference/chat/object",
+                    "https://platform.openai.com/docs/api-reference/chat/streaming",
+                    "https://platform.openai.com/docs/guides/error-codes/api-errors"
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "protocol",
+                "officialVersion",
+                "referenceDate",
+                "sourceUrl",
+                "supportingReferences"
+              ],
+              "properties": {
+                "protocol": {"const": "openai_responses"},
+                "officialVersion": {
+                  "const": "OpenAPI 2.3.0, commit 2186421dca0cca7c1e67caa7739005e8b1ccc4dd"
+                },
+                "referenceDate": {"const": "2026-08-18"},
+                "sourceUrl": {
+                  "const": "https://github.com/openai/openai-openapi/blob/2186421dca0cca7c1e67caa7739005e8b1ccc4dd/openapi.json"
+                },
+                "supportingReferences": {
+                  "const": [
+                    "https://platform.openai.com/docs/api-reference/responses/object",
+                    "https://platform.openai.com/docs/api-reference/responses-streaming",
+                    "https://platform.openai.com/docs/guides/error-codes/api-errors"
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "protocol",
+                "officialVersion",
+                "referenceDate",
+                "sourceUrl",
+                "supportingReferences"
+              ],
+              "properties": {
+                "protocol": {"const": "anthropic_messages"},
+                "officialVersion": {
+                  "const": "anthropic-version: 2023-06-01"
+                },
+                "referenceDate": {"const": "2026-08-18"},
+                "sourceUrl": {
+                  "const": "https://platform.claude.com/docs/en/api/messages/create"
+                },
+                "supportingReferences": {
+                  "const": [
+                    "https://platform.claude.com/docs/en/api/messages-streaming",
+                    "https://platform.claude.com/docs/en/api/errors"
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "protocol",
+                "officialVersion",
+                "referenceDate",
+                "sourceUrl",
+                "supportingReferences"
+              ],
+              "properties": {
+                "protocol": {"const": "gemini_generate_content"},
+                "officialVersion": {
+                  "const": "v1beta Discovery revision 20260816"
+                },
+                "referenceDate": {"const": "2026-08-18"},
+                "sourceUrl": {
+                  "const": "https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta"
+                },
+                "supportingReferences": {
+                  "const": [
+                    "https://ai.google.dev/api/generate-content",
+                    "https://ai.google.dev/api/rest/generativelanguage"
+                  ]
+                }
+              }
+            },
+            {
+              "required": [
+                "protocol",
+                "officialVersion",
+                "referenceDate",
+                "sourceUrl",
+                "supportingReferences"
+              ],
+              "properties": {
+                "protocol": {"const": "ollama_chat"},
+                "officialVersion": {
+                  "const": "OpenAPI commit d67ad83426633195089509347ffd4fe795120198"
+                },
+                "referenceDate": {"const": "2026-08-18"},
+                "sourceUrl": {
+                  "const": "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml"
+                },
+                "supportingReferences": {
+                  "const": [
+                    "https://docs.ollama.com/api/chat",
+                    "https://docs.ollama.com/api/errors"
+                  ]
+                }
+              }
+            }
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "protocolConformanceSummary": {
+      "type": "object",
+      "required": [
+        "totalRequests",
+        "checkedRequests",
+        "consistentRequests",
+        "differentRequests",
+        "byProtocol",
+        "byCheck",
+        "byDifferenceKind"
+      ],
+      "properties": {
+        "totalRequests": {"type": "integer", "minimum": 0},
+        "checkedRequests": {"type": "integer", "minimum": 0},
+        "consistentRequests": {"type": "integer", "minimum": 0},
+        "differentRequests": {"type": "integer", "minimum": 0},
+        "byProtocol": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolConformanceProtocolGroup"}
+        },
+        "byCheck": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolConformanceCheckGroup"}
+        },
+        "byDifferenceKind": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolConformanceDifferenceGroup"}
+        }
+      },
+      "additionalProperties": false
+    },
+    "protocolConformanceProtocolGroup": {
+      "type": "object",
+      "required": [
+        "protocol",
+        "totalRequests",
+        "consistentRequests",
+        "differentRequests"
+      ],
+      "properties": {
+        "protocol": {"type": "string", "minLength": 1},
+        "totalRequests": {"type": "integer", "minimum": 0},
+        "consistentRequests": {"type": "integer", "minimum": 0},
+        "differentRequests": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "protocolConformanceCheckGroup": {
+      "type": "object",
+      "required": [
+        "checkId",
+        "totalRequests",
+        "consistentRequests",
+        "differentRequests"
+      ],
+      "properties": {
+        "checkId": {"type": "string", "minLength": 1},
+        "totalRequests": {"type": "integer", "minimum": 0},
+        "consistentRequests": {"type": "integer", "minimum": 0},
+        "differentRequests": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "protocolConformanceDifferenceGroup": {
+      "type": "object",
+      "required": ["differenceKind", "count"],
+      "properties": {
+        "differenceKind": {
+          "$ref": "#/$defs/protocolDifferenceKind"
+        },
+        "count": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "protocolConformanceResult": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "protocol",
+        "checkIds",
+        "stream",
+        "httpStatus",
+        "status",
+        "differences"
+      ],
+      "properties": {
+        "requestId": {"type": "string", "minLength": 1},
+        "protocol": {"type": ["string", "null"], "minLength": 1},
+        "checkIds": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "stream": {"type": "boolean"},
+        "httpStatus": {"type": ["integer", "null"]},
+        "status": {"enum": ["CONSISTENT", "DIFFERENT"]},
+        "differences": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/protocolDifference"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "CONSISTENT"}},
+            "required": ["status"]
+          },
+          "then": {"properties": {"differences": {"maxItems": 0}}},
+          "else": {"properties": {"differences": {"minItems": 1}}}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "protocolDifference": {
+      "type": "object",
+      "required": [
+        "requestId",
+        "protocol",
+        "location",
+        "differenceKind",
+        "expected",
+        "actual",
+        "officialReference"
+      ],
+      "properties": {
+        "requestId": {"type": "string", "minLength": 1},
+        "protocol": {"type": ["string", "null"], "minLength": 1},
+        "location": {"type": "string", "pattern": "^/"},
+        "differenceKind": {
+          "enum": [
+            "EVIDENCE_GAP",
+            "FRAMING",
+            "INVALID_JSON",
+            "MISSING_FIELD",
+            "UNEXPECTED_FIELD",
+            "TYPE_MISMATCH",
+            "ENUM_MISMATCH",
+            "VALUE_MISMATCH",
+            "SEQUENCE",
+            "CORRELATION"
+          ]
+        },
+        "expected": {"type": "string", "minLength": 1},
+        "actual": {"type": "string", "minLength": 1},
+        "officialReference": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "protocolDifferenceKind": {
+      "enum": [
+        "EVIDENCE_GAP",
+        "FRAMING",
+        "INVALID_JSON",
+        "MISSING_FIELD",
+        "UNEXPECTED_FIELD",
+        "TYPE_MISMATCH",
+        "ENUM_MISMATCH",
+        "VALUE_MISMATCH",
+        "SEQUENCE",
+        "CORRELATION"
+      ]
+    },
     "failureAnalysis": {
       "type": "object",
       "required": [

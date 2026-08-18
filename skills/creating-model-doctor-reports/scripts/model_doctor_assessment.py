@@ -10,11 +10,15 @@ import re
 from typing import Dict, List
 
 from model_doctor_general_verdict import derive_general_verdict
+from model_doctor_protocol_conformance import (
+    analyze_protocol_conformance,
+    validate_protocol_conformance,
+)
 from model_doctor_verified_facts import validate_verified_facts
 
 
 REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v2"
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v6"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v7"
 STATUSES = {"PASS", "FAIL"}
 FAILURE_KINDS = {
     "DIRECT",
@@ -82,6 +86,7 @@ ASSESSMENT_FIELDS = {
     "warnings",
     "summary",
     "capabilitySummary",
+    "protocolConformance",
     "categories",
     "tests",
 }
@@ -594,6 +599,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "warnings": parsed.get("warnings", []),
         "summary": {"counts": _status_counts(items)},
         "capabilitySummary": capability_summary,
+        "protocolConformance": analyze_protocol_conformance(parsed),
         "categories": _categories(items),
         "tests": items,
     }
@@ -889,8 +895,13 @@ def validate_assessment(assessment: object) -> List[str]:
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
         errors.append("schemaVersion is invalid")
+    for field in sorted(ASSESSMENT_FIELDS - set(assessment)):
+        errors.append(f"Assessment field {field} is required")
     for field in sorted(set(assessment) - ASSESSMENT_FIELDS):
         errors.append(f"Assessment field {field} is not allowed")
+    errors.extend(
+        validate_protocol_conformance(assessment.get("protocolConformance"))
+    )
 
     summary = assessment.get("summary")
     if not isinstance(summary, dict):
@@ -946,7 +957,7 @@ def validate_assessment(assessment: object) -> List[str]:
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test assessment.v6 contract"
+                    "the per-test assessment.v7 contract"
                 )
         logic = item.get("logic")
         if not isinstance(logic, dict):
@@ -984,7 +995,7 @@ def validate_assessment(assessment: object) -> List[str]:
         )
     )
     if "overall" in assessment:
-        errors.append("overall is not part of the assessment.v6 contract")
+        errors.append("overall is not part of the assessment.v7 contract")
     if isinstance(source, dict) and "path" in source:
         errors.append("source must not expose an absolute path")
     return errors
