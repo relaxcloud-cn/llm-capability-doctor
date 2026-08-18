@@ -309,20 +309,7 @@ fn resolve_request_url(url: &url::Url, protocol: Protocol, stream: bool) -> url:
 
     let mut resolved = url.clone();
     resolved.set_path(&resolved_path);
-    let mut query: Vec<&str> = url
-        .query()
-        .into_iter()
-        .flat_map(|query| query.split('&'))
-        .filter(|pair| !pair.is_empty())
-        .filter(|pair| {
-            let key = pair.split_once('=').map_or(*pair, |(key, _)| key);
-            url::form_urlencoded::parse(key.as_bytes())
-                .next()
-                .is_none_or(|(key, _)| key != "alt")
-        })
-        .collect();
-    query.push("alt=sse");
-    resolved.set_query(Some(&query.join("&")));
+    resolved.set_query(Some("alt=sse"));
     resolved
 }
 
@@ -380,7 +367,7 @@ mod tests {
 
         assert_eq!(
             resolved.as_str(),
-            "https://example.test/v1beta/models/gemini:streamGenerateContent?key=value&alt=sse#result"
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse#result"
         );
     }
 
@@ -395,7 +382,7 @@ mod tests {
 
         assert_eq!(
             resolved.as_str(),
-            "https://example.test/v1beta/models/gemini:streamGenerateContent?key=value&alt=sse#result"
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse#result"
         );
     }
 
@@ -417,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn google_streaming_discards_empty_query_components_without_reencoding_pairs() {
+    fn google_streaming_discards_existing_query_components() {
         let url = Url::parse(
             "https://example.test/v1beta/models/gemini:generateContent?&&key=%2Fvalue&&alt=json&",
         )
@@ -427,7 +414,7 @@ mod tests {
 
         assert_eq!(
             resolved.as_str(),
-            "https://example.test/v1beta/models/gemini:streamGenerateContent?key=%2Fvalue&alt=sse"
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse"
         );
     }
 

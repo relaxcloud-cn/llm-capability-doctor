@@ -153,6 +153,8 @@ fn anthropic_stop_reason_is_a_fallback_success() {
         ),
         StreamControl::Continue
     );
+    assert_eq!(inspector.state(), StreamState::Pending);
+    assert_eq!(inspector.finish(), StreamControl::Continue);
     assert_eq!(inspector.state(), StreamState::Success);
 }
 
@@ -165,6 +167,83 @@ fn google_usage_object_is_a_fallback_success() {
         StreamControl::Continue
     );
     assert_eq!(inspector.state(), StreamState::Success);
+}
+
+#[test]
+fn chat_and_google_only_accept_a_terminal_from_the_first_result() {
+    for (protocol, record) in [
+        (
+            Protocol::OpenAiChat,
+            &b"data: {\"choices\":[{\"finish_reason\":null},{\"finish_reason\":\"stop\"}]}\n\n"[..],
+        ),
+        (
+            Protocol::GeminiGenerateContent,
+            &b"data: {\"candidates\":[{}, {\"finishReason\":\"STOP\"}]}\n\n"[..],
+        ),
+    ] {
+        let mut inspector = StreamInspector::new(protocol);
+
+        assert_eq!(inspector.push(record), StreamControl::Continue);
+        assert_eq!(inspector.finish(), StreamControl::Continue);
+        assert_eq!(inspector.state(), StreamState::Pending, "{protocol}");
+    }
+}
+
+#[test]
+fn opencodex_incomplete_finish_reasons_are_errors() {
+    for (protocol, record) in [
+        (
+            Protocol::OpenAiChat,
+            &b"data: {\"choices\":[{\"finish_reason\":\"length\"}]}\n\n"[..],
+        ),
+        (
+            Protocol::OpenAiChat,
+            &b"data: {\"choices\":[{\"finish_reason\":\"content_filter\"}]}\n\n"[..],
+        ),
+        (
+            Protocol::AnthropicMessages,
+            &b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"[..],
+        ),
+        (
+            Protocol::AnthropicMessages,
+            &b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"content_filter\"}}\n\ndata: {\"type\":\"message_stop\"}\n\n"[..],
+        ),
+        (
+            Protocol::GeminiGenerateContent,
+            &b"data: {\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}]}\n\n"[..],
+        ),
+        (
+            Protocol::GeminiGenerateContent,
+            &b"data: {\"candidates\":[{\"finishReason\":\"SAFETY\"}]}\n\n"[..],
+        ),
+    ] {
+        let mut inspector = StreamInspector::new(protocol);
+
+        assert_eq!(inspector.push(record), StreamControl::Continue);
+        assert_eq!(inspector.finish(), StreamControl::Continue);
+        assert_eq!(inspector.state(), StreamState::Error, "{protocol}");
+        assert!(inspector.error_message().is_some(), "{protocol}");
+    }
+}
+
+#[test]
+fn anthropic_refusal_is_incomplete_only_when_message_stop_is_missing() {
+    let stop_reason =
+        b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"refusal\"}}\n\n";
+    let mut fallback = StreamInspector::new(Protocol::AnthropicMessages);
+    assert_eq!(fallback.push(stop_reason), StreamControl::Continue);
+    assert_eq!(fallback.state(), StreamState::Pending);
+    assert_eq!(fallback.finish(), StreamControl::Continue);
+    assert_eq!(fallback.state(), StreamState::Error);
+
+    let mut message_stop = StreamInspector::new(Protocol::AnthropicMessages);
+    assert_eq!(message_stop.push(stop_reason), StreamControl::Continue);
+    assert_eq!(
+        message_stop.push(b"data: {\"type\":\"message_stop\"}\n\n"),
+        StreamControl::Continue
+    );
+    assert_eq!(message_stop.finish(), StreamControl::Continue);
+    assert_eq!(message_stop.state(), StreamState::Success);
 }
 
 #[test]

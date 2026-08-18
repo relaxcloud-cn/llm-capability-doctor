@@ -25,6 +25,8 @@ pub(crate) struct StreamInspector {
     scan_cursor: usize,
     state: StreamState,
     error_message: Option<&'static str>,
+    anthropic_stop_reason: Option<String>,
+    anthropic_message_stopped: bool,
 }
 
 impl StreamInspector {
@@ -36,6 +38,8 @@ impl StreamInspector {
             scan_cursor: 0,
             state: StreamState::Pending,
             error_message: None,
+            anthropic_stop_reason: None,
+            anthropic_message_stopped: false,
         }
     }
 
@@ -71,18 +75,25 @@ impl StreamInspector {
     }
 
     pub(crate) fn finish(&mut self) -> StreamControl {
-        if self.buffer.is_empty() {
-            return StreamControl::Continue;
+        let control = if self.buffer.is_empty() {
+            StreamControl::Continue
+        } else {
+            let record = std::mem::take(&mut self.buffer);
+            self.scan_cursor = 0;
+            if record.len() > MAX_SSE_RECORD_BYTES {
+                return self.stop_oversized_record();
+            }
+            if record.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
+                StreamControl::Continue
+            } else {
+                self.inspect_record(&record)
+            }
+        };
+        if control == StreamControl::Stop {
+            return control;
         }
-        let record = std::mem::take(&mut self.buffer);
-        self.scan_cursor = 0;
-        if record.len() > MAX_SSE_RECORD_BYTES {
-            return self.stop_oversized_record();
-        }
-        if record.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
-            return StreamControl::Continue;
-        }
-        self.inspect_record(&record)
+        self.finish_anthropic_fallback();
+        StreamControl::Continue
     }
 
     pub(crate) fn state(&self) -> StreamState {
@@ -220,17 +231,17 @@ impl StreamInspector {
             self.mark_error("OpenAI Chat stream returned an error object");
             return StreamControl::Stop;
         }
-        let has_finish_reason =
-            value
-                .get("choices")
-                .and_then(Value::as_array)
-                .is_some_and(|choices| {
-                    choices
-                        .iter()
-                        .any(|choice| non_empty_string(choice.get("finish_reason")))
-                });
+        let finish_reason = value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("finish_reason"))
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty());
         let has_usage = value.get("usage").is_some_and(Value::is_object);
-        if has_finish_reason || has_usage {
+        if finish_reason.is_some_and(|reason| matches!(reason, "length" | "content_filter")) {
+            self.mark_error("OpenAI Chat stream ended with an incomplete finish reason");
+        } else if finish_reason.is_some() || has_usage {
             self.mark_success();
         }
         StreamControl::Continue
@@ -251,13 +262,27 @@ impl StreamInspector {
     }
 
     fn inspect_anthropic(&mut self, event_type: Option<&str>, value: &Value) -> StreamControl {
-        let has_stop_reason = event_type == Some("message_delta")
-            && value
+        if event_type == Some("message_delta")
+            && !self.anthropic_message_stopped
+            && let Some(reason) = value
                 .get("delta")
                 .and_then(|delta| delta.get("stop_reason"))
-                .is_some_and(|reason| non_empty_string(Some(reason)));
-        if event_type == Some("message_stop") || has_stop_reason {
-            self.mark_success();
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+        {
+            self.anthropic_stop_reason = Some(reason.to_owned());
+        }
+        if event_type == Some("message_stop") {
+            self.anthropic_message_stopped = true;
+            if self
+                .anthropic_stop_reason
+                .as_deref()
+                .is_some_and(|reason| matches!(reason, "max_tokens" | "content_filter"))
+            {
+                self.mark_error("Anthropic stream ended with an incomplete stop reason");
+            } else {
+                self.mark_success();
+            }
         }
         StreamControl::Continue
     }
@@ -270,19 +295,47 @@ impl StreamInspector {
             self.mark_error("Google GenerateContent stream returned an error object");
             return StreamControl::Stop;
         }
-        let has_finish_reason = value
+        let finish_reason = value
             .get("candidates")
             .and_then(Value::as_array)
-            .is_some_and(|candidates| {
-                candidates
-                    .iter()
-                    .any(|candidate| non_empty_string(candidate.get("finishReason")))
-            });
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("finishReason"))
+            .and_then(Value::as_str)
+            .filter(|reason| !reason.is_empty());
         let has_usage = value.get("usageMetadata").is_some_and(Value::is_object);
-        if has_finish_reason || has_usage {
+        if finish_reason.is_some_and(|reason| {
+            matches!(
+                reason,
+                "MAX_TOKENS"
+                    | "SAFETY"
+                    | "RECITATION"
+                    | "BLOCKLIST"
+                    | "PROHIBITED_CONTENT"
+                    | "SPII"
+            )
+        }) {
+            self.mark_error("Google stream ended with an incomplete finish reason");
+        } else if finish_reason.is_some() || has_usage {
             self.mark_success();
         }
         StreamControl::Continue
+    }
+
+    fn finish_anthropic_fallback(&mut self) {
+        if self.protocol != Protocol::AnthropicMessages
+            || self.anthropic_message_stopped
+            || self.state != StreamState::Pending
+        {
+            return;
+        }
+        let Some(reason) = self.anthropic_stop_reason.as_deref() else {
+            return;
+        };
+        if matches!(reason, "max_tokens" | "refusal" | "content_filter") {
+            self.mark_error("Anthropic stream ended with an incomplete fallback stop reason");
+        } else {
+            self.mark_success();
+        }
     }
 
     fn mark_success(&mut self) {
@@ -312,10 +365,4 @@ fn find_record_delimiter(buffer: &[u8], start: usize) -> Option<(usize, usize)> 
 
 fn is_explicit_error_event(event: &str) -> bool {
     event == "error" || event.ends_with(".error")
-}
-
-fn non_empty_string(value: Option<&Value>) -> bool {
-    value
-        .and_then(Value::as_str)
-        .is_some_and(|text| !text.is_empty())
 }

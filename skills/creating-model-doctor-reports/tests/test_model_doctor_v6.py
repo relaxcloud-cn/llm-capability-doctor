@@ -2025,6 +2025,16 @@ test_manifest_count: 1
             "and Google record a stream error",
             stream_rules,
         )
+        self.assertIn(
+            "OpenAI Chat reads only `choices[0]` and Google reads only "
+            "`candidates[0]`",
+            stream_rules,
+        )
+        self.assertIn(
+            "uses exactly `?alt=sse` and discards any existing query",
+            stream_rules,
+        )
+        self.assertIn("Custom paths remain unchanged", stream_rules)
 
         terminal_rules = section("### 006 流结束完整性", "### 007 Token usage")
         self.assertIn("stops parsing at an immediate terminal", terminal_rules)
@@ -2036,6 +2046,13 @@ test_manifest_count: 1
         )
         self.assertNotIn("outside the collected evidence", terminal_rules)
         self.assertNotIn("content after an immediate terminal", terminal_rules)
+        for marker in (
+            "Chat `length` or `content_filter`",
+            "Anthropic `max_tokens` or `content_filter`",
+            "Google `MAX_TOKENS`, `SAFETY`, `RECITATION`, `BLOCKLIST`, "
+            "`PROHIBITED_CONTENT`, or `SPII`",
+        ):
+            self.assertIn(marker, terminal_rules)
 
         single_tool_rules = section("### 040 单工具调用", "### 041 工具选择")
         for marker in (
@@ -2072,6 +2089,9 @@ test_manifest_count: 1
             "OpenAI Responses",
             "Anthropic Messages",
             "Gemini GenerateContent",
+            "首个 choice/candidate",
+            "`response.incomplete`",
+            "`?alt=sse`",
             "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
             "python3 -m unittest discover",
         ):

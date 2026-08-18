@@ -96,7 +96,7 @@ export MODEL_API_KEY
 `--url` 必须是完整模型接口地址，CLI 通常不会自动补充或改写路径。唯一例外是已识别的
 Google 流式请求：当路径以官方方法 `:generateContent` 或
 `:streamGenerateContent` 结尾时，CLI 会派生 `:streamGenerateContent` 并设置
-`alt=sse`。自定义路径（包括方法后的尾随斜杠）保持不变。模型接口 URL 不接受
+`?alt=sse`，且不保留原查询参数。自定义路径（包括方法后的尾随斜杠）保持不变。模型接口 URL 不接受
 fragment，包括空的 `#`。未指定
 `--log-file` 时，日志写入当前目录下的
 `model-doctor-YYYYMMDD-HHMMSS.log`；Unix 平台会将日志权限设置为 `0600`。
@@ -140,7 +140,9 @@ OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个
 兼容性只支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和
 Gemini GenerateContent 四类协议。Ollama Chat 仍可被协议探测识别，但会得到
 OpenCodex 数据格式不兼容。历史 v1/v2 日志缺少新合同，结果固定为
-`NOT_ASSESSED`，不会倒推兼容性。该结论的范围边界是：
+`NOT_ASSESSED`，不会倒推兼容性。流式合同只读取首个 choice/candidate，并将
+OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败；Google
+官方流式方法的查询串固定为 `?alt=sse`。该结论的范围边界是：
 `仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。`
 因此它不是整个项目或完整 ClawOps 运行链路的可用性判定。
 
