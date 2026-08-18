@@ -2,7 +2,11 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+pub mod stream;
 pub mod tools;
+
+#[cfg(test)]
+mod stream_tests;
 
 #[cfg(test)]
 mod tests;
