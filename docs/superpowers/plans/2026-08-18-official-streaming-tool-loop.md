@@ -719,19 +719,21 @@ git commit -m "feat: parse official Gemini tool streams"
 - Create: `src/protocol/fixtures/ollama_truncated.ndjson`
 - Create: `src/protocol/fixtures/ollama_error.ndjson`
 - Create: `src/protocol/fixtures/ollama_incomplete.ndjson`
+- Modify: `src/protocol/stream/framing.rs`
+- Modify: `src/protocol/stream/gemini.rs`
 - Modify: `src/protocol/stream/mod.rs`
 
-- [ ] **Step 1: Add failing Ollama tests.**
+- [x] **Step 1: Add failing Ollama tests.**
 
 Cover accumulation of `message.thinking`, `message.content`, and
 `message.tool_calls`; assistant history needed for the follow-up;
 object-valued `function.arguments`; optional unique
-`message.tool_calls[].function.index`; no required call ID; `done:true`;
+`message.tool_calls[].function.index`; optional unique call IDs; `done:true`;
 optional `done_reason`; `done_reason:length`; error objects; clean EOF without
 `done:true`; and a partial final JSON object. The Python analyzer retains
 exhaustive object-envelope mutations.
 
-- [ ] **Step 2: Run Ollama tests.**
+- [x] **Step 2: Run Ollama tests.**
 
 ```bash
 cargo test --locked --lib protocol::stream::ollama::tests -- --nocapture
@@ -739,9 +741,24 @@ cargo test --locked --lib protocol::stream::ollama::tests -- --nocapture
 
 Expected: module missing.
 
-- [ ] **Step 3: Implement NDJSON turn accumulation.**
+- [x] **Step 3: Implement NDJSON turn accumulation.**
 
-Require every streamed object to have type-correct `model`, `created_at`, `message`, and `done` fields when those fields are part of that official event shape, and require `message.role == "assistant"`. Use `message.tool_calls[].function.index` when present, reject duplicate indexes, and use array order otherwise. Require a function name and object arguments. Store `ToolCorrelation::None`. Preserve the accumulated assistant message in `ProtocolHistory::Ollama` without inserting an OpenAI call ID.
+Require every normal streamed object to have a non-empty `model`, RFC 3339
+`created_at`, object `message`, and boolean `done`, and require
+`message.role == "assistant"` plus string `content`. Treat `{ "error": ... }`
+as its separate official error shape. Validate the six optional timing/count
+fields independently as non-negative integers, while accepting unknown
+top-level and message extensions.
+
+Each `message.tool_calls[]` entry is a complete call: append it rather than
+merging argument fragments. Require a non-empty function name and object
+arguments. If every function has an index, require unique non-negative indexes
+and order normalized calls by index without allocating by the index value. If
+none has an index, use encounter order; reject a mixed indexed/unindexed turn as
+ambiguous. Preserve an optional unique `tool_calls[].id` as
+`ToolCorrelation::Optional(Some(id))`, and use `Optional(None)` when absent.
+Preserve the accumulated assistant message, including optional IDs, indexes,
+images, `tool_call_id`, and extension fields, in `ProtocolHistory::Ollama`.
 
 Require `done:true`. Treat absent `done_reason` and `done_reason:stop` as normal; treat `length` as `model_incomplete`; treat an error object as `protocol_error`; treat EOF without `done:true` as `missing_terminal_event`.
 
@@ -756,7 +773,7 @@ Route each known protocol to its matching parser. `Protocol::Unknown` returns
 stable `protocol.unknown:/` contract error. Add
 `stream::tests::dispatcher_routes_all_protocols_and_rejects_unknown`.
 
-- [ ] **Step 4: Verify Ollama fixtures.**
+- [x] **Step 4: Verify Ollama fixtures.**
 
 ```bash
 cargo test --locked --lib protocol::stream::ollama::tests -- --nocapture
@@ -764,10 +781,10 @@ cargo test --locked --lib protocol::stream::ollama::tests -- --nocapture
 
 Expected: structured arguments remain objects, the final signal is `done:true`, and every abnormal ending is classified.
 
-- [ ] **Step 5: Commit Ollama parsing.**
+- [x] **Step 5: Commit Ollama parsing.**
 
 ```bash
-git add src/protocol/stream/mod.rs src/protocol/stream/ollama.rs src/protocol/fixtures/ollama_*.ndjson
+git add src/protocol/stream/framing.rs src/protocol/stream/gemini.rs src/protocol/stream/mod.rs src/protocol/stream/ollama.rs src/protocol/fixtures/ollama_*.ndjson
 git diff --cached --check
 git commit -m "feat: parse official Ollama tool streams"
 ```
@@ -789,7 +806,7 @@ OpenAI Chat: assistant tool_calls then role=tool with matching tool_call_id
 OpenAI Responses: previous_response_id plus function_call_output with matching call_id
 Anthropic: assistant content then one user content array containing all tool_result blocks first
 Gemini: model content then functionResponse with matching name and optional matching ID
-Ollama: assistant message then role=tool with tool_name and no OpenAI-only fields
+Ollama: assistant message then role=tool; echo optional call ID as tool_call_id when present, otherwise send only tool_name; never add OpenAI-only fields
 ```
 
 Also assert that only Anthropic uses `is_error:true`, Gemini uses `response:{"error":"timeout"}`, and the other three carry `ERROR: timeout` in their documented text/output field.

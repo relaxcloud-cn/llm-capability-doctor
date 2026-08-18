@@ -412,7 +412,7 @@ fn process_part(
                             !state.seen_function_ids.insert(id.clone())
                         }
                         ToolCorrelation::Optional(None) => false,
-                        ToolCorrelation::Required(_) | ToolCorrelation::None => {
+                        ToolCorrelation::Required(_) => {
                             unreachable!("Gemini calls always use optional correlation")
                         }
                     };

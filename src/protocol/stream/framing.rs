@@ -20,6 +20,12 @@ pub(crate) struct DecodedSse {
     pub trailing_incomplete_frame: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct DecodedNdjson {
+    pub records: Vec<Value>,
+    pub trailing_error: Option<FramingError>,
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub(crate) enum FramingError {
     #[error("invalid SSE framing: {message}")]
@@ -65,8 +71,16 @@ pub(crate) async fn decode_sse_chunks(chunks: Vec<Vec<u8>>) -> Result<DecodedSse
 }
 
 pub(crate) fn decode_ndjson_chunks(chunks: Vec<Vec<u8>>) -> Result<Vec<Value>, FramingError> {
+    let decoded = decode_ndjson_chunks_partial(chunks);
+    match decoded.trailing_error {
+        Some(error) => Err(error),
+        None => Ok(decoded.records),
+    }
+}
+
+pub(crate) fn decode_ndjson_chunks_partial(chunks: Vec<Vec<u8>>) -> DecodedNdjson {
     let bytes = chunks.concat();
-    let mut values = Vec::new();
+    let mut records = Vec::new();
     let mut line_start = 0;
     let mut line_number = 1;
 
@@ -77,7 +91,15 @@ pub(crate) fn decode_ndjson_chunks(chunks: Vec<Vec<u8>>) -> Result<Vec<Value>, F
 
         let line = strip_carriage_return(&bytes[line_start..index]);
         if !is_blank_line(line) {
-            values.push(parse_ndjson_object(line, line_number, false)?);
+            match parse_ndjson_object(line, line_number, false) {
+                Ok(value) => records.push(value),
+                Err(error) => {
+                    return DecodedNdjson {
+                        records,
+                        trailing_error: Some(error),
+                    };
+                }
+            }
         }
         line_start = index + 1;
         line_number += 1;
@@ -86,11 +108,22 @@ pub(crate) fn decode_ndjson_chunks(chunks: Vec<Vec<u8>>) -> Result<Vec<Value>, F
     if line_start < bytes.len() {
         let tail = strip_carriage_return(&bytes[line_start..]);
         if !is_blank_line(tail) {
-            values.push(parse_ndjson_object(tail, line_number, true)?);
+            match parse_ndjson_object(tail, line_number, true) {
+                Ok(value) => records.push(value),
+                Err(error) => {
+                    return DecodedNdjson {
+                        records,
+                        trailing_error: Some(error),
+                    };
+                }
+            }
         }
     }
 
-    Ok(values)
+    DecodedNdjson {
+        records,
+        trailing_error: None,
+    }
 }
 
 fn strip_initial_utf8_bom(mut chunks: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
