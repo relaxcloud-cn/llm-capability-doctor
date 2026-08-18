@@ -1,5 +1,6 @@
 /docs/
 /tests/
+.worktrees/
 target/
 .DS_Store
 *.log
