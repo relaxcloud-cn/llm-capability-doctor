@@ -965,7 +965,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -1447,11 +1447,11 @@ test_manifest_count: 1
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["$id"],
         )
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
@@ -1783,7 +1783,7 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertIn('<section class="final-conclusion"', html)
