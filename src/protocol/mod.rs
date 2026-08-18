@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 pub(crate) mod stream;
+pub(crate) mod tool_loop;
 pub mod tools;
 
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
