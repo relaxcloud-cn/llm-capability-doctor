@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -463,6 +464,24 @@ def _validate_v3_request_metadata(
         )
 
 
+def _redact_v3_dynamic_metadata(
+    metadata: Dict[str, str],
+    secrets: Set[str],
+) -> Dict[str, str]:
+    redacted = dict(metadata)
+    for field in ("stream_end_signal", "model_stop_reason"):
+        redacted[field] = redact_text(metadata[field], secrets)
+
+    errors = strict_json_loads(metadata["tool_contract_errors_json"])
+    assert isinstance(errors, list)
+    redacted["tool_contract_errors_json"] = json.dumps(
+        [redact_text(error, secrets) for error in errors],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return redacted
+
+
 def parse_log(path: Path) -> Dict[str, object]:
     """Parse one supported evidence log without retaining its absolute path."""
 
@@ -511,6 +530,7 @@ def parse_log(path: Path) -> Dict[str, object]:
             )
         if contract == V3_CONTRACT:
             _validate_v3_request_metadata(metadata, identifier)
+            metadata = _redact_v3_dynamic_metadata(metadata, secrets)
         requests[identifier] = {
             **metadata,
             "request_id": identifier,

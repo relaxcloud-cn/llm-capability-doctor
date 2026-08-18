@@ -898,7 +898,7 @@ git commit -m "feat: build official tool follow-up requests"
 - Create: `src/protocol/tool_loop.rs`
 - Modify: `src/protocol/mod.rs`
 
-- [ ] **Step 1: Add failing pure state-machine tests.**
+- [x] **Step 1: Add failing pure state-machine tests.**
 
 Add exactly these tests:
 
@@ -914,7 +914,7 @@ fourth_assistant_tool_turn_exceeds_the_bound_without_execution
 
 Assert no filesystem, network, clock, or environment access occurs.
 
-- [ ] **Step 2: Run the loop tests.**
+- [x] **Step 2: Run the loop tests.**
 
 ```bash
 cargo test --locked --lib protocol::tool_loop::tests -- --nocapture
@@ -922,7 +922,7 @@ cargo test --locked --lib protocol::tool_loop::tests -- --nocapture
 
 Expected: module missing.
 
-- [ ] **Step 3: Implement the bounded state machine.**
+- [x] **Step 3: Implement the bounded state machine.**
 
 Use this public contract inside the crate:
 
@@ -949,7 +949,7 @@ impl ToolLoopState {
 
 Allow only exact object arguments `{"city":"Beijing"}` for `get_weather` and `{"zone":"UTC"}` for `get_time`. Return `WEATHER_SUNNY` and `TIME_UTC_12:00`. For check 049, the first valid weather call returns `ERROR: timeout` with `is_error=true`; later valid weather calls return `WEATHER_SUNNY`. If assistant turn four contains any tool call, return `MaxTurnsExceeded` before dispatching it.
 
-- [ ] **Step 4: Verify deterministic behavior.**
+- [x] **Step 4: Verify deterministic behavior.**
 
 ```bash
 cargo test --locked --lib protocol::tool_loop::tests -- --nocapture
@@ -957,7 +957,7 @@ cargo test --locked --lib protocol::tool_loop::tests -- --nocapture
 
 Expected: exact outputs and the four-turn no-execution boundary pass.
 
-- [ ] **Step 5: Commit the state machine.**
+- [x] **Step 5: Commit the state machine.**
 
 ```bash
 git add src/protocol/mod.rs src/protocol/tool_loop.rs
@@ -975,7 +975,7 @@ git commit -m "feat: add bounded deterministic tool loop"
 - Modify: `src/test_support.rs`
 - Modify: `src/protocol/tools.rs`
 
-- [ ] **Step 1: Add failing runner tests for generic stream enrichment.**
+- [x] **Step 1: Add failing runner tests for generic stream enrichment.**
 
 Add `#[cfg(test)] mod tests;` at the bottom of `src/runner.rs` before creating
 `src/runner/tests.rs`, so the tracked test module is compiled.
@@ -999,7 +999,7 @@ The first two cover check 006 behavior without entering a tool loop. Run at
 least the first test with `--exact` before the module-wide command so a missing
 module declaration cannot produce a false green result.
 
-- [ ] **Step 2: Add failing end-to-end tool-loop matrix tests.**
+- [x] **Step 2: Add failing end-to-end tool-loop matrix tests.**
 
 Use the raw scripted server and the tracked protocol fixtures. For every one of the five protocols, run checks 046, 047, 048, and 049 through `Runner::execute_tool_loop`. Assert:
 
@@ -1048,7 +1048,7 @@ supplies the per-check time turn and final text needed by the 20 loop cases.
 
 Add separate tests for malformed arguments, missing terminal, upstream disconnect, timeout, client cancellation, and four consecutive tool turns. Each must audit the last attempted turn and stop without an extra request. Every case where no valid response envelope can be parsed must also assert `tool_contract_status == non_conformant` and a non-empty stable contract-error array.
 
-- [ ] **Step 3: Run runner tests and confirm the one-follow-up implementation fails.**
+- [x] **Step 3: Run runner tests and confirm the one-follow-up implementation fails.**
 
 ```bash
 cargo test --locked --lib runner::tests::ordinary_stream_request_records_official_terminal -- --exact
@@ -1057,7 +1057,7 @@ cargo test --locked --lib runner::tests -- --nocapture
 
 Expected: request IDs are not turn-based, streams are not parsed, and checks stop after one follow-up.
 
-- [ ] **Step 4: Refactor collection before audit append.**
+- [x] **Step 4: Refactor collection before audit append.**
 
 Replace immediate append inside the HTTP call path with this sequence:
 
@@ -1084,7 +1084,7 @@ terminated response with no outgoing or incoming violations is conformant.
 Delete the temporary `build_follow_up` compatibility adapter and the old
 runner import/single-follow-up branch in the same step.
 
-- [ ] **Step 5: Replace the 047-049 special case with the reusable loop.**
+- [x] **Step 5: Replace the 047-049 special case with the reusable loop.**
 
 Add:
 
@@ -1109,7 +1109,7 @@ report guard must reject PASS because there is no official turn sequence.
 
 When cancellation wins, append and flush the partial request, then return `RunnerError::Interrupted` before manifest and run-summary creation. The cancellation integration test must call the real `run()`, wait on the TCP checkpoint after partial body bytes are sent, cancel, await the runner, then read the log and assert the request block and partial body exist with `client_cancelled`, while no TEST manifest or RUN SUMMARY exists. The between-turn test waits for the test-only `turn_committed` notification, cancels the token, releases `resume`, and asserts no extra turn reaches the server.
 
-- [ ] **Step 6: Run runner and Rust library tests.**
+- [x] **Step 6: Run runner and Rust library tests.**
 
 ```bash
 cargo test --locked --lib runner::tests -- --nocapture
@@ -1118,7 +1118,7 @@ cargo test --locked --lib
 
 Expected: all 20 protocol/check combinations complete with official request bodies and ordered evidence; every abnormal fixture stops at exactly the recorded request.
 
-- [ ] **Step 7: Commit runner integration.**
+- [x] **Step 7: Commit runner integration.**
 
 ```bash
 git add src/runner.rs src/runner/tests.rs src/http.rs src/test_support.rs src/protocol/tools.rs
@@ -1136,7 +1136,7 @@ git commit -m "feat: collect complete streaming tool loops"
 - Preserve: `skills/creating-model-doctor-reports/tests/test_model_doctor_v6.py`
 - Preserve: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
 
-- [ ] **Step 1: Add a failing evidence.v3 contract suite.**
+- [x] **Step 1: Add a failing evidence.v3 contract suite.**
 
 Create `test_model_doctor_evidence_v3.py` with class
 `ModelDoctorEvidenceV3Tests`. Reuse public fixture-building helpers where they
@@ -1159,7 +1159,7 @@ test_contract_key_rejects_non_mapping_run_without_crashing
 
 The metadata test must independently mutate each required field, enum, integer, and JSON error-array shape.
 
-- [ ] **Step 2: Run the focused parser tests.**
+- [x] **Step 2: Run the focused parser tests.**
 
 ```bash
 python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
@@ -1171,7 +1171,7 @@ python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3
 
 Expected: v3 is unsupported.
 
-- [ ] **Step 3: Centralize exact contract definitions.**
+- [x] **Step 3: Centralize exact contract definitions.**
 
 Define these constants and helpers in `model_doctor_contracts.py`:
 
@@ -1219,13 +1219,13 @@ CONTRACT_VERDICT_PARTITIONS = {
 exact `(log_schema, script_version)` pair. Every malformed value raises
 `ValueError`, never `AttributeError` or `TypeError`.
 
-- [ ] **Step 4: Validate all v3 request metadata.**
+- [x] **Step 4: Validate all v3 request metadata.**
 
 In `_validate_v3_request_metadata`, require the nine evidence fields on every request. Keep all flat metadata as strings in parsed evidence. Validate integer fields with the canonical non-negative decimal pattern `^(0|[1-9][0-9]*)$`, approved enums, `stream_end_signal` exact fixed values or non-empty `finishReason:<value>`, and `tool_contract_errors_json` as a JSON array whose elements are non-empty strings. Rust producer tests own the finite stable error-code forms; the Python parser must not attempt to infer stability from arbitrary text. Enforce `conformant` implies an empty error array and `non_conformant` implies at least one error string.
 
 Before accepting each TEST block, restrict its ID to `CONTRACT_TEST_IDS[contract]`. Keep v1 profile rules unchanged, including the exact legacy full set, and reject 046 even for a v1 custom profile. Require v2 to contain exactly the original 46 manifests and reject 046. Require v3 to contain exactly 47 manifests including 046. Reject `collection_profile` for v2 and v3.
 
-- [ ] **Step 5: Run parser compatibility tests and commit.**
+- [x] **Step 5: Run parser compatibility tests and commit.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
@@ -1254,7 +1254,7 @@ Expected: v1/v2 compatibility tests and new v3 tests all pass.
 - Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
 - Test: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
 
-- [ ] **Step 1: Add failing verdict and schema tests.**
+- [x] **Step 1: Add failing verdict and schema tests.**
 
 Add these tests:
 
@@ -1274,7 +1274,7 @@ test_combined_v7_schema_requires_conformance_and_contract_totals
 test_combined_v7_validator_rechecks_both_invariant_families
 ```
 
-- [ ] **Step 2: Run verdict tests and confirm fixed-46 failures.**
+- [x] **Step 2: Run verdict tests and confirm fixed-46 failures.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py -v
@@ -1287,7 +1287,7 @@ Expected: the existing assessment.v7 and protocol-conformance tests remain
 green, while the new evidence.v3 totals/combined-invariant tests fail because
 47/32/15 is not yet supported.
 
-- [ ] **Step 3: Make verdict derivation contract-aware.**
+- [x] **Step 3: Make verdict derivation contract-aware.**
 
 Change the API to:
 
@@ -1311,7 +1311,7 @@ keep `validate_protocol_conformance(...)` in independent validation, and keep
 invalid assessment-owned run contract must produce a validation error instead
 of crashing or silently choosing a denominator.
 
-- [ ] **Step 4: Extend the existing v7 schema and HTML fallback.**
+- [x] **Step 4: Extend the existing v7 schema and HTML fallback.**
 
 Keep `ASSESSMENT_SCHEMA_VERSION`, schema `$id`, and schema `const` at
 `llm-capability-doctor.assessment.v7`. Preserve the required top-level
@@ -1331,7 +1331,7 @@ For v3 request rows, render `transport_outcome`, `stream_termination`,
 `tool_contract_errors_json` beside the request output. Leave historical rows
 unchanged when those fields are absent.
 
-- [ ] **Step 5: Verify and commit assessment.v7.**
+- [x] **Step 5: Verify and commit assessment.v7.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py -v
@@ -1361,7 +1361,7 @@ git commit -m "feat: extend assessment v7 for evidence v3"
 - Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
 - Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
 
-- [ ] **Step 1: Add failing guard tests.**
+- [x] **Step 1: Add failing guard tests.**
 
 Add exactly these tests:
 
@@ -1384,7 +1384,7 @@ test_v3_tool_transition_matrix_rejects_all_five_correlation_mutations
 test_protocol_differences_remain_diagnostic_only_for_legacy_and_non_tool_checks
 ```
 
-- [ ] **Step 2: Run the guard tests and confirm false PASS is currently accepted.**
+- [x] **Step 2: Run the guard tests and confirm false PASS is currently accepted.**
 
 ```bash
 python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
@@ -1396,7 +1396,7 @@ python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3
 
 Expected: all three fail because validation currently checks only document shape/evidence references.
 
-- [ ] **Step 3: Implement the v3-only structural guard twice.**
+- [x] **Step 3: Implement the v3-only structural guard twice.**
 
 Define:
 
@@ -1509,7 +1509,7 @@ The request validator must require at least the per-check minimum, exact IDs `te
 
 Apply this only to exact v3/0.11.0 PASS reviews in `validate_reviews`. Repeat the same validation using assessment-owned `run` and `tests[].requests` in `validate_assessment`, so post-assembly tampering cannot bypass it. Do not apply it to v1/v2.
 
-- [ ] **Step 4: Add independent raw cross-turn protocol validation.**
+- [x] **Step 4: Add independent raw cross-turn protocol validation.**
 
 Create this public, side-effect-free API:
 
@@ -1570,7 +1570,7 @@ a v3 PASS for 046-049 when any associated result is absent or not
 from assessment-owned `protocolConformance.results`. Historical inputs and
 non-tool checks keep Issue #2's diagnostic-only behavior.
 
-- [ ] **Step 5: Run all guard, transition, and assessment tests.**
+- [x] **Step 5: Run all guard, transition, and assessment tests.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
@@ -1582,7 +1582,7 @@ python3 -m unittest \
 Expected: complete ordered loops for all five protocols pass; every structural
 or cross-turn mutation is rejected; v2 and non-tool behavior are unchanged.
 
-- [ ] **Step 6: Commit the PASS guard and transition audit.**
+- [x] **Step 6: Commit the PASS guard and transition audit.**
 
 ```bash
 git add skills/creating-model-doctor-reports/scripts/model_doctor_tool_loop_conformance.py \
@@ -1605,11 +1605,11 @@ git commit -m "feat: audit and guard v3 tool loop transitions"
 - Test: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
 - Modify: `README.md`
 
-- [ ] **Step 1: Read and apply `superpowers:writing-skills`.**
+- [x] **Step 1: Read and apply `superpowers:writing-skills`.**
 
 Read that skill completely before editing this repository skill. Keep the existing evidence-first, binary PASS/FAIL workflow and only add the v3 contract branch.
 
-- [ ] **Step 2: Add failing documentation contract tests.**
+- [x] **Step 2: Add failing documentation contract tests.**
 
 Add:
 
@@ -1621,7 +1621,7 @@ test_rules_do_not_rescore_legacy_047_049_with_v3_final_answer_rules
 test_readme_describes_011_evidence_v3_and_47_checks
 ```
 
-- [ ] **Step 3: Run the documentation tests.**
+- [x] **Step 3: Run the documentation tests.**
 
 ```bash
 python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
@@ -1635,7 +1635,7 @@ Expected: Issue #2's assessment.v7 and `protocolConformance` documentation is
 present, while evidence.v3, collector 0.11.0, 47 checks, and the v3-only
 046-049 hard gate are not yet documented.
 
-- [ ] **Step 4: Document exact v3 assessment rules.**
+- [x] **Step 4: Document exact v3 assessment rules.**
 
 The Skill and evaluation rules must state:
 
@@ -1656,7 +1656,7 @@ totals: historical 46/31/15; v3 47/32/15
 
 Update README release names to `v0.11.0`, evidence to v3, default/list count to 47, tool coverage to include official structure and full loops, and log-file wording to evidence-v3. Replace the blanket URL statement with the precise rule that configured endpoints are preserved except Gemini streaming normalizes `:generateContent` to `:streamGenerateContent` and sets `alt=sse`.
 
-- [ ] **Step 5: Verify and commit documentation.**
+- [x] **Step 5: Verify and commit documentation.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
@@ -1674,7 +1674,7 @@ git commit -m "docs: define evidence v3 tool loop assessment"
 
 - Modify only files required by failures attributable to this implementation.
 
-- [ ] **Step 1: Run format, Rust tests, lint, and release build in the isolated worktree.**
+- [x] **Step 1: Run format, Rust tests, lint, and release build in the isolated worktree.**
 
 ```bash
 cargo fmt --check
@@ -1685,7 +1685,7 @@ cargo build --release --locked
 
 Expected: all commands exit 0. If the ignored stale root `tests/` directory appears, stop and correct the worktree setup; do not delete user files to make tests pass.
 
-- [ ] **Step 2: Run the complete report suite and syntax checks.**
+- [x] **Step 2: Run the complete report suite and syntax checks.**
 
 ```bash
 python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 'test_*.py'
@@ -1694,7 +1694,7 @@ python3 -m compileall -q skills/creating-model-doctor-reports/scripts
 
 Expected: every Python test passes and compileall is silent.
 
-- [ ] **Step 3: Scan for stale active-contract text and placeholders.**
+- [x] **Step 3: Scan for stale active-contract text and placeholders.**
 
 ```bash
 rg -n "assessment\.v6|Run all 46|46-item|默认执行全部 46|evidence-v2|v0\.10\.0" \
@@ -1705,7 +1705,7 @@ rg -n "$PLACEHOLDER_PATTERN" src skills/creating-model-doctor-reports docs/super
 
 Expected: the first search only finds explicit v1/v2 historical compatibility statements and tests for them; the second finds no implementation placeholders added by this work.
 
-- [ ] **Step 4: Review Issue #3 acceptance evidence.**
+- [x] **Step 4: Review Issue #3 acceptance evidence.**
 
 Confirm from automated tests, not inspection alone:
 
@@ -1721,7 +1721,7 @@ evidence.v3 parser and assessment.v7 compatibility matrix
 programmatic false-PASS guard
 ```
 
-- [ ] **Step 5: Inspect the final diff and commit verification fixes.**
+- [x] **Step 5: Inspect the final diff and commit verification fixes.**
 
 ```bash
 git diff --check

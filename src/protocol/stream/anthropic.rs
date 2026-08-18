@@ -261,13 +261,6 @@ fn process_message_start(
         );
         return;
     }
-    if event_index != 0 {
-        push_error(
-            &mut state.contract_errors,
-            "message_start_not_first",
-            &format!("/events/{event_index}/event"),
-        );
-    }
     state.saw_message_start = true;
     state.message_identity_valid = true;
 
@@ -1358,7 +1351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn requires_message_start_first_and_only_once() {
+    async fn rejects_duplicate_message_start() {
         let start = first_frame(TOOL_STREAM);
         let body = format!("{start}\n\n{}", std::str::from_utf8(TOOL_STREAM).unwrap());
         let parsed = parse(&complete_fixture(body.as_bytes())).await;
@@ -1369,17 +1362,24 @@ mod tests {
                 .contract_errors
                 .contains(&"anthropic.duplicate_message_start:/events/1/event".to_owned())
         );
+    }
 
-        let ping_first = format!(
-            "event: ping\ndata: {{\"type\":\"ping\"}}\n\n{}",
-            std::str::from_utf8(FINAL_STREAM).unwrap()
-        );
-        let parsed = parse(&complete_fixture(ping_first.as_bytes())).await;
-        assert!(
-            parsed
-                .contract_errors
-                .contains(&"anthropic.message_start_not_first:/events/1/event".to_owned())
-        );
+    #[tokio::test]
+    async fn ignores_ping_and_unknown_events_before_message_start() {
+        for extension in [
+            "event: ping\ndata: {\"type\":\"ping\"}\n\n",
+            "event: future_event\ndata: {\"type\":\"future_event\",\"future\":true}\n\n",
+        ] {
+            let body = format!("{extension}{}", std::str::from_utf8(FINAL_STREAM).unwrap());
+            let parsed = parse(&complete_fixture(body.as_bytes())).await;
+
+            assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+            assert!(
+                parsed.contract_errors.is_empty(),
+                "{:?}",
+                parsed.contract_errors
+            );
+        }
     }
 
     #[tokio::test]

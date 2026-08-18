@@ -413,12 +413,7 @@ def validate_anthropic_stream(ctx: _Context, events: Sequence[_SseEvent]) -> Non
                 "different event name",
             )
         if event_type not in _ANTHROPIC_EVENT_TYPES:
-            _enum(
-                ctx,
-                event_type,
-                _join(data_location, "type"),
-                _ANTHROPIC_EVENT_TYPES,
-            )
+            # Anthropic may add event variants; matching named events are extensions.
             continue
         if event_type == "ping":
             _shape(ctx, value, data_location, ("type",))

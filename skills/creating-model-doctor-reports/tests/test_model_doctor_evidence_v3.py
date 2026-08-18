@@ -788,6 +788,38 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                     "invalid-status-errors.log",
                 )
 
+    def test_parser_redacts_discovered_secrets_from_v3_dynamic_metadata(self) -> None:
+        secret = "sk-v3-metadata-secret-123456"
+        metadata = valid_v3_request_metadata()
+        metadata.update({
+            "stream_end_signal": f"finishReason:STOP-{secret}",
+            "model_stop_reason": f"stop-{secret}",
+            "tool_contract_status": "non_conformant",
+            "tool_contract_errors_json": json.dumps([
+                f"anthropic.dynamic_error:{secret}"
+            ]),
+        })
+        log = build_evidence_log(request_metadata=metadata).replace(
+            "script_version: 0.11.0\n",
+            f"script_version: 0.11.0\napi_key: {secret}\n",
+            1,
+        )
+
+        parsed = self.parse_text_log(log, "v3-dynamic-metadata-secret.log")
+        request = parsed["requests"]["test-046-turn-1"]
+
+        self.assertNotIn(secret, json.dumps(parsed, ensure_ascii=False))
+        self.assertEqual("[REDACTED]", parsed["run"]["api_key"])
+        self.assertEqual(
+            "finishReason:STOP-[REDACTED]",
+            request["stream_end_signal"],
+        )
+        self.assertEqual("stop-[REDACTED]", request["model_stop_reason"])
+        self.assertEqual(
+            ["anthropic.dynamic_error:[REDACTED]"],
+            json.loads(request["tool_contract_errors_json"]),
+        )
+
     def test_parser_accepts_complete_profile_free_v2(self) -> None:
         parsed = self.parse_text_log(
             build_evidence_log(

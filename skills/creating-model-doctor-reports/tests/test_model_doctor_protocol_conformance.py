@@ -3987,6 +3987,29 @@ class ProtocolConformanceTests(unittest.TestCase):
         )
         self.assertEqual("CONSISTENT", result["status"], result["differences"])
 
+    def test_anthropic_stream_ignores_unknown_forward_compatible_events(self) -> None:
+        events = self._anthropic_stream_events()
+        events.insert(
+            1,
+            (
+                "future_event",
+                {
+                    "type": "future_event",
+                    "future_payload": {"enabled": True},
+                },
+            ),
+        )
+        result = self._single_result(
+            self._request(
+                "req-anthropic-forward-compatible-event",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
     def test_anthropic_stream_delta_type_matches_open_block(self) -> None:
         events = self._anthropic_stream_events()
         events[2][1]["delta"] = {"type": "text_delta", "text": "wrong"}
