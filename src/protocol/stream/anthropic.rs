@@ -43,6 +43,7 @@ struct BlockAccumulator {
     thinking: String,
     signature: String,
     citations: Vec<Value>,
+    write_citations_array: bool,
     closed: bool,
     invalid: bool,
 }
@@ -493,8 +494,11 @@ fn block_accumulator(
                 }
             }
             match native.get("citations") {
-                None => {}
-                Some(Value::Array(citations)) => block.citations = citations.clone(),
+                None | Some(Value::Null) => {}
+                Some(Value::Array(citations)) => {
+                    block.citations = citations.clone();
+                    block.write_citations_array = true;
+                }
                 Some(_) => {
                     block.invalid = true;
                     push_error(
@@ -606,6 +610,7 @@ fn process_block_delta(state: &mut ParserState, payload: &Map<String, Value>, ev
         (Some("text"), Some("citations_delta")) => {
             if let Some(citation) = delta.get("citation").filter(|value| value.is_object()) {
                 block.citations.push(citation.clone());
+                block.write_citations_array = true;
             } else {
                 block.invalid = true;
                 push_error(
@@ -715,7 +720,7 @@ fn finalize_block(block: &mut BlockAccumulator) {
             block
                 .native
                 .insert("text".into(), Value::String(block.text.clone()));
-            if block.native.contains_key("citations") || !block.citations.is_empty() {
+            if block.write_citations_array {
                 block
                     .native
                     .insert("citations".into(), Value::Array(block.citations.clone()));
@@ -1075,6 +1080,23 @@ mod tests {
                 tool_calls: vec![],
                 final_text: "MODEL_DOCTOR_CASE_046_OK".into(),
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_null_citations_without_a_citation_delta() {
+        let body = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_null_citations\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-test\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\",\"citations\":null}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let parsed = parse(body).await;
+
+        assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+        assert!(parsed.contract_errors.is_empty());
+        assert_eq!(
+            parsed.assistant_turn.expect("assistant turn").history,
+            ProtocolHistory::Anthropic(vec![json!({
+                "type": "text",
+                "text": "done",
+                "citations": null
+            })])
         );
     }
 
