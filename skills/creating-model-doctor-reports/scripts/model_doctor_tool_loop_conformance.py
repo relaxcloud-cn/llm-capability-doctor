@@ -545,7 +545,77 @@ def _validate_responses_input(value: object, audit: _Audit) -> None:
             audit.require_string(item["output"], f"{path}/output")
 
 
-def _validate_request_body(request_id: str, request: object) -> tuple[Optional[dict], list[dict]]:
+def _non_empty_content(value: object) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict)):
+        return bool(value)
+    return False
+
+
+def _validate_initial_prompt(protocol: str, body: dict, audit: _Audit) -> None:
+    if protocol != "gemini_generate_content":
+        model = body.get("model")
+        if not isinstance(model, str) or not model.strip():
+            kind = "MISSING_FIELD" if "model" not in body else "VALUE_MISMATCH"
+            audit.add("/requestBody/model", kind, "non-empty model string")
+    if protocol == "openai_responses" and "previous_response_id" in body:
+        audit.add(
+            "/requestBody/previous_response_id",
+            "UNEXPECTED_FIELD",
+            "absent from the initial request",
+        )
+
+    if protocol in {"openai_chat", "anthropic_messages", "ollama_chat"}:
+        messages = body.get("messages")
+        first = messages[0] if isinstance(messages, list) and messages else None
+        if not (
+            isinstance(first, dict)
+            and first.get("role") == "user"
+            and _non_empty_content(first.get("content"))
+        ):
+            audit.add(
+                "/requestBody/messages",
+                "VALUE_MISMATCH",
+                "first user message with non-empty prompt content",
+            )
+        return
+    if protocol == "openai_responses":
+        if not _non_empty_content(body.get("input")):
+            audit.add(
+                "/requestBody/input",
+                "VALUE_MISMATCH",
+                "non-empty initial input prompt",
+            )
+        return
+    if protocol == "gemini_generate_content":
+        contents = body.get("contents")
+        first = contents[0] if isinstance(contents, list) and contents else None
+        parts = first.get("parts") if isinstance(first, dict) else None
+        has_text = isinstance(parts, list) and any(
+            isinstance(part, dict)
+            and isinstance(part.get("text"), str)
+            and bool(part["text"].strip())
+            for part in parts
+        )
+        if not (
+            isinstance(first, dict)
+            and first.get("role") == "user"
+            and has_text
+        ):
+            audit.add(
+                "/requestBody/contents",
+                "VALUE_MISMATCH",
+                "first user content with a non-empty text part",
+            )
+
+
+def _validate_request_body(
+    request_id: str,
+    request: object,
+    *,
+    initial: bool,
+) -> tuple[Optional[dict], list[dict]]:
     protocol = request.get("protocol") if isinstance(request, dict) else None
     protocol = protocol if isinstance(protocol, str) else None
     audit = _Audit(request_id, protocol)
@@ -560,7 +630,7 @@ def _validate_request_body(request_id: str, request: object) -> tuple[Optional[d
     if protocol == "gemini_generate_content":
         audit.reject(
             body,
-            {"input", "messages", "parallel_tool_calls", "previous_response_id", "stream", "tool_choice"},
+            {"input", "messages", "parallel_tool_calls", "previous_response_id", "store", "stream", "tool_choice"},
             "/requestBody",
         )
         _validate_contents(body, audit)
@@ -573,21 +643,30 @@ def _validate_request_body(request_id: str, request: object) -> tuple[Optional[d
             _validate_messages(protocol, body, audit)
         elif protocol == "openai_responses":
             audit.reject(body, {"contents", "messages"}, "/requestBody")
+            if body.get("store") is not True:
+                kind = "MISSING_FIELD" if "store" not in body else "VALUE_MISMATCH"
+                audit.add("/requestBody/store", kind, "true")
             if "input" not in body:
                 audit.add("/requestBody/input", "MISSING_FIELD", "string or function_call_output array")
             else:
                 _validate_responses_input(body["input"], audit)
         elif protocol == "anthropic_messages":
-            audit.reject(body, {"contents", "input", "parallel_tool_calls", "previous_response_id"}, "/requestBody")
+            audit.reject(
+                body,
+                {"contents", "input", "parallel_tool_calls", "previous_response_id", "store"},
+                "/requestBody",
+            )
             _validate_messages(protocol, body, audit)
         elif protocol == "ollama_chat":
             audit.reject(
                 body,
-                {"contents", "input", "parallel_tool_calls", "previous_response_id", "tool_choice"},
+                {"contents", "input", "parallel_tool_calls", "previous_response_id", "store", "tool_choice"},
                 "/requestBody",
             )
             _validate_messages(protocol, body, audit)
     _validate_tools(protocol, body, audit)
+    if initial:
+        _validate_initial_prompt(protocol, body, audit)
     return body, audit.differences
 
 
@@ -956,11 +1035,15 @@ def _validate_transition(
         if user.get("role") != "user":
             audit.add(f"/requestBody/messages/{len(before) + 1}/role", "VALUE_MISMATCH", '"user"')
         results = user.get("content")
-        if not isinstance(results, list) or len(results) != len(calls):
-            audit.add(f"/requestBody/messages/{len(before) + 1}/content", "VALUE_MISMATCH", "one tool_result per streamed tool_use")
+        if not isinstance(results, list) or len(results) < len(calls):
+            audit.add(
+                f"/requestBody/messages/{len(before) + 1}/content",
+                "VALUE_MISMATCH",
+                "one leading tool_result per streamed tool_use",
+            )
             return
         timeout = test_id == "049" and transition == 1
-        for index, (call, result) in enumerate(zip(calls, results)):
+        for index, (call, result) in enumerate(zip(calls, results[: len(calls)])):
             path = f"/requestBody/messages/{len(before) + 1}/content/{index}"
             item = audit.require_mapping(result, path)
             if item is None:
@@ -973,6 +1056,14 @@ def _validate_transition(
                 audit.add(f"{path}/is_error", kind, "true for the timeout result")
             if not timeout and "is_error" in item and item.get("is_error") is not False:
                 audit.add(f"{path}/is_error", "VALUE_MISMATCH", "absent or false for a successful result")
+        for index, result in enumerate(results[len(calls) :], start=len(calls)):
+            path = f"/requestBody/messages/{len(before) + 1}/content/{index}"
+            if not isinstance(result, dict) or result.get("type") != "text":
+                audit.add(
+                    path,
+                    "VALUE_MISMATCH",
+                    "only text blocks after all tool_result blocks",
+                )
         return
 
     if protocol == "gemini_generate_content":
@@ -1072,9 +1163,13 @@ def validate_tool_loop_transitions(
         if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
             continue
         decoded: dict[str, Optional[dict]] = {}
-        for request_id in refs:
+        for position, request_id in enumerate(refs):
             request = requests.get(request_id)
-            body, body_differences = _validate_request_body(request_id, request)
+            body, body_differences = _validate_request_body(
+                request_id,
+                request,
+                initial=position == 0,
+            )
             decoded[request_id] = body
             if body_differences:
                 _append_unique(differences.setdefault(request_id, []), body_differences)

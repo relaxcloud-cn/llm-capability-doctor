@@ -19,6 +19,10 @@ from model_doctor_protocol_conformance import (  # noqa: E402
     analyze_protocol_conformance,
     validate_protocol_conformance,
 )
+from model_doctor_assessment import (  # noqa: E402
+    CAPABILITY_SCOPE_BOUNDARY,
+    validate_reviews,
+)
 
 
 class ProtocolConformanceTests(unittest.TestCase):
@@ -943,6 +947,90 @@ class ProtocolConformanceTests(unittest.TestCase):
             },
         }
 
+    def _v3_pass_gate_fixture(self, protocol: str) -> tuple[dict, dict]:
+        parsed = self._tool_loop_parsed(protocol)
+        parsed["tests"]["046"].update(
+            {"name": "Official tool loop", "category": "Core"}
+        )
+        end_signal = {
+            "openai_chat": "[DONE]",
+            "openai_responses": "response.completed",
+            "anthropic_messages": "message_stop",
+            "gemini_generate_content": "finishReason:STOP",
+            "ollama_chat": "done:true",
+        }[protocol]
+        for turn in (1, 2):
+            request = parsed["requests"][f"test-046-turn-{turn}"]
+            request.update({
+                "transport_outcome": "completed_eof",
+                "stream_termination": "completed",
+                "stream_end_signal": end_signal,
+                "model_stop_reason": "stop" if turn == 2 else "tool_calls",
+                "stream_event_count": "1",
+                "tool_contract_status": "conformant",
+                "tool_contract_errors_json": "[]",
+                "tool_loop_turn": str(turn),
+                "tool_loop_outcome": "completed" if turn == 2 else "continued",
+            })
+        reviews = {
+            "schemaVersion": "llm-capability-doctor.reviews.v2",
+            "tests": {
+                "046": {
+                    "testId": "046",
+                    "reviewedStatus": "PASS",
+                    "conclusion": "The complete official tool loop passed.",
+                    "logic": {
+                        "purpose": "Check a complete tool loop.",
+                        "method": "Inspect every ordered request.",
+                        "passCriteria": ["Every official turn completes."],
+                        "failCriteria": ["Any official turn is invalid."],
+                        "capabilityBoundary": "This conclusion covers this run.",
+                    },
+                    "evidenceRefs": [
+                        "request:test-046-turn-1",
+                        "request:test-046-turn-2",
+                    ],
+                    "evidenceExcerpts": ["The official loop completed."],
+                    "limitations": [],
+                    "retestInstructions": [],
+                }
+            },
+            "capabilitySummary": {
+                "headline": "The collected capability evidence was reviewed.",
+                "verifiedFacts": {
+                    "interfaceProtocol": {
+                        "evidenceState": "NOT_COLLECTED",
+                        "family": "UNKNOWN",
+                        "requestFormat": "No interface request format was collected.",
+                        "responseFormat": "No interface response format was collected.",
+                        "statement": "No interface protocol fact was collected.",
+                        "evidenceRefs": [],
+                        "boundary": "No protocol can be inferred without evidence.",
+                    },
+                    "contextWindow": {
+                        "evidenceState": "NOT_COLLECTED",
+                        "highestVerifiedTier": None,
+                        "highestVerifiedInputTokens": None,
+                        "firstFailedTier": None,
+                        "firstFailedInputTokens": None,
+                        "statement": "No context tier evidence was collected.",
+                        "evidenceRefs": [],
+                        "boundary": "No context limit can be inferred.",
+                    },
+                    "concurrency": {
+                        "evidenceState": "NOT_COLLECTED",
+                        "highestVerifiedConcurrentRequests": None,
+                        "statement": "No concurrency wave was collected.",
+                        "evidenceRefs": [],
+                        "boundary": "No concurrency limit can be inferred.",
+                    },
+                },
+                "issues": [],
+                "scopeBoundary": CAPABILITY_SCOPE_BOUNDARY,
+            },
+        }
+        return parsed, reviews
+
     def _single_result(self, request: dict) -> dict:
         report = analyze_protocol_conformance(
             self._parsed({request["request_id"]: request})
@@ -1067,6 +1155,31 @@ class ProtocolConformanceTests(unittest.TestCase):
                     result["differences"],
                 )
 
+    def test_v3_pass_gate_rejects_empty_initial_prompt_for_all_protocols(self) -> None:
+        def clear_prompt(protocol: str, body: dict) -> None:
+            if protocol in {"openai_chat", "anthropic_messages", "ollama_chat"}:
+                body["messages"][0]["content"] = ""
+            elif protocol == "openai_responses":
+                body["input"] = ""
+            else:
+                body["contents"][0]["parts"] = []
+
+        for protocol in SUPPORTED_PROTOCOLS:
+            with self.subTest(protocol=protocol):
+                parsed, reviews = self._v3_pass_gate_fixture(protocol)
+                self.assertEqual([], validate_reviews(parsed, reviews))
+                for request in parsed["requests"].values():
+                    body = json.loads(request["requestBody"])
+                    clear_prompt(protocol, body)
+                    request["requestBody"] = json.dumps(body)
+
+                errors = validate_reviews(parsed, reviews)
+
+                self.assertTrue(
+                    any("official protocol" in error for error in errors),
+                    errors,
+                )
+
     def test_v3_tool_transition_rejects_adjacent_protocol_switch(self) -> None:
         parsed = self._tool_loop_parsed("openai_chat")
         parsed["requests"]["test-046-turn-2"]["protocol"] = "ollama_chat"
@@ -1126,6 +1239,37 @@ class ProtocolConformanceTests(unittest.TestCase):
             if item["requestId"] == "test-049-turn-2"
         )
         self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_anthropic_transition_allows_text_only_after_tool_results(self) -> None:
+        parsed = self._tool_loop_parsed("anthropic_messages")
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        content = body["messages"][-1]["content"]
+        content.append({"type": "text", "text": "continue"})
+        follow["requestBody"] = json.dumps(body)
+
+        accepted = analyze_protocol_conformance(parsed)
+        result = next(
+            item for item in accepted["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        content.reverse()
+        follow["requestBody"] = json.dumps(body)
+        rejected = analyze_protocol_conformance(parsed)
+        result = next(
+            item for item in rejected["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self.assertEqual("DIFFERENT", result["status"])
+        self.assertTrue(
+            any(
+                difference["differenceKind"] == "VALUE_MISMATCH"
+                for difference in result["differences"]
+            ),
+            result["differences"],
+        )
 
     def test_gemini_transition_accepts_omitted_optional_call_id(self) -> None:
         parsed = self._tool_loop_parsed("gemini_generate_content")
