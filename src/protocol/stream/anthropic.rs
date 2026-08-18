@@ -150,6 +150,10 @@ pub(crate) async fn parse(body: &[u8]) -> StreamParseResult {
             continue;
         }
 
+        if data_type == "message_stop" {
+            state.saw_message_stop = true;
+        }
+
         if state.terminal.is_some() {
             record_event_after_terminal(&mut state, event_index, explicit_error);
             if explicit_error {
@@ -644,7 +648,7 @@ fn process_block_delta(state: &mut ParserState, payload: &Map<String, Value>, ev
                 );
             }
         }
-        (Some("redacted_thinking"), _) | (None, _) => {
+        (_, Some(delta_type)) if is_known_delta_type(delta_type) => {
             block.invalid = true;
             push_error(
                 &mut state.contract_errors,
@@ -662,6 +666,17 @@ fn process_block_delta(state: &mut ParserState, payload: &Map<String, Value>, ev
             );
         }
     }
+}
+
+fn is_known_delta_type(delta_type: &str) -> bool {
+    matches!(
+        delta_type,
+        "text_delta"
+            | "citations_delta"
+            | "input_json_delta"
+            | "thinking_delta"
+            | "signature_delta"
+    )
 }
 
 fn process_block_stop(state: &mut ParserState, payload: &Map<String, Value>, event_index: usize) {
@@ -1125,6 +1140,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_known_delta_types_that_do_not_match_the_open_block() {
+        let tool_fixture = std::str::from_utf8(TOOL_STREAM).expect("fixture UTF-8");
+        let tool_with_text_delta = tool_fixture.replacen(
+            "{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"\"}",
+            "{\"type\":\"text_delta\",\"text\":\"wrong\"}",
+            1,
+        );
+        let final_fixture = std::str::from_utf8(FINAL_STREAM).expect("fixture UTF-8");
+        let text_with_input_delta = final_fixture.replacen(
+            "{\"type\":\"text_delta\",\"text\":\"MODEL_DOCTOR_CASE_\"}",
+            "{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}",
+            1,
+        );
+
+        for (body, expected) in [
+            (
+                tool_with_text_delta,
+                "anthropic.unexpected_block_delta:/events/7/data/delta/type",
+            ),
+            (
+                text_with_input_delta,
+                "anthropic.unexpected_block_delta:/events/2/data/delta/type",
+            ),
+        ] {
+            let parsed = parse(&complete_fixture(body.as_bytes())).await;
+            assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+            assert!(
+                parsed.contract_errors.contains(&expected.to_owned()),
+                "missing {expected}: {:?}",
+                parsed.contract_errors
+            );
+            assert!(
+                parsed
+                    .assistant_turn
+                    .expect("assistant turn")
+                    .tool_calls
+                    .is_empty()
+            );
+        }
+
+        let extension_delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"future_delta\",\"future_value\":true}}\n\n";
+        let body = tool_fixture.replacen(
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1",
+            &format!(
+                "{extension_delta}event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":1"
+            ),
+            1,
+        );
+        let parsed = parse(&complete_fixture(body.as_bytes())).await;
+        assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+        assert!(parsed.contract_errors.is_empty());
+        assert_eq!(
+            parsed
+                .assistant_turn
+                .expect("assistant turn")
+                .tool_calls
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn rejects_duplicate_tool_use_ids_across_distinct_blocks() {
         let fixture = std::str::from_utf8(TOOL_STREAM).expect("fixture UTF-8");
         let duplicate = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_weather_046\",\"name\":\"get_time\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n";
@@ -1319,6 +1396,31 @@ mod tests {
             ]
         );
         assert!(!format!("{parsed:?}").contains("PRIVATE"));
+    }
+
+    #[tokio::test]
+    async fn observes_a_valid_message_stop_after_an_error_without_accepting_forgeries() {
+        let error = "event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"PRIVATE\"}}\n\n";
+        let parsed = parse(
+            format!("{error}event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n")
+                .as_bytes(),
+        )
+        .await;
+        assert_eq!(parsed.stream_termination, StreamTermination::ProtocolError);
+        assert_eq!(
+            parsed.stream_end_signal,
+            StreamEndSignal::AnthropicMessageStop
+        );
+        assert!(!format!("{parsed:?}").contains("PRIVATE"));
+
+        for forged in [
+            "event: model_doctor.extension\ndata: {\"type\":\"message_stop\"}\n\n",
+            "event: message_stop\ndata: {\"type\":\"model_doctor.extension\"}\n\n",
+        ] {
+            let parsed = parse(format!("{error}{forged}").as_bytes()).await;
+            assert_eq!(parsed.stream_termination, StreamTermination::ProtocolError);
+            assert_eq!(parsed.stream_end_signal, StreamEndSignal::None);
+        }
     }
 
     #[tokio::test]
