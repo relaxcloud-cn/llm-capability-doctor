@@ -4,7 +4,7 @@
 
 **Goal:** Collect and report an official, normally terminated, fully correlated streaming tool loop for checks 046 through 049 across OpenAI Chat Completions, OpenAI Responses, Anthropic Messages, Gemini GenerateContent, and Ollama Chat.
 
-**Architecture:** Keep HTTP transport, protocol parsing, tool-loop orchestration, and report assessment separate. HTTP retains raw and partial bytes plus a transport outcome; protocol-specific parsers normalize one assistant turn while preserving native history; a deterministic four-turn state machine builds official follow-ups; evidence.v3 and assessment.v7 enforce the new contract without reinterpreting evidence.v1 or evidence.v2.
+**Architecture:** Keep HTTP transport, runtime protocol parsing, tool-loop orchestration, and report assessment separate. HTTP retains raw and partial bytes plus a transport outcome; lean protocol-specific Rust parsers normalize the fields required to execute one assistant turn while preserving native history; a deterministic four-turn state machine builds official follow-ups. The existing Python `protocolConformance` analyzer remains the exhaustive official-structure authority and gains raw cross-turn request/response correlation; evidence.v3 and the combined assessment.v7 enforce the new contract without reinterpreting evidence.v1 or evidence.v2.
 
 **Tech Stack:** Rust 1.85, Tokio, reqwest, serde/serde_json, eventsource-stream 0.2.3, Python 3 unittest, JSON Schema, raw TCP test fixtures.
 
@@ -12,9 +12,11 @@
 
 ## Execution Notes
 
-- After this plan is force-added and committed on `codex/issue-3-stream-tool-loop`, run `superpowers:using-git-worktrees` and create an isolated worktree on a new branch named `codex/issue-3-stream-tool-loop-impl` from that commit. The current branch is already checked out in the original worktree. The ignored legacy files under the current root `tests/` do not belong to this change and must not be copied, edited, or deleted.
+- Execute from the isolated `codex/issue-3-integrated-tool-loop` worktree. Its base is the completed Issue #2 branch `codex/official-protocol-conformance` at `4f24212`, merged with the approved Issue #3 design/plan at `ca37159`. Preserve the untracked reports in the original `main` worktree and do not copy, edit, or delete the ignored legacy root `tests/` directory.
+- Before Task 1, require the merged baseline to pass `cargo build --locked`, `cargo test --locked`, and `python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 'test_*.py'`. The verified baseline on 2026-08-18 is Rust build/test exit 0 and Python 153/153.
 - Preserve the untracked `deepseek-v4-pro-1m-*` reports in the original worktree.
 - Read `docs/superpowers/specs/2026-08-18-issue-3-official-streaming-tool-loop-design.md` before Task 1. It is the normative design for classifications, provider contracts, and check semantics.
+- Preserve Issue #2's `model_doctor_protocol_conformance.py`, three streaming analyzer modules, `protocolConformance` assessment/schema/HTML/CSS output, and their tests. Rust validates only the official subset required to run a safe live loop; Python owns exhaustive response validation and cross-turn raw request/response validation. Do not invoke Python from Rust.
 - Use `superpowers:test-driven-development` for every implementation task. Use `superpowers:writing-skills` for Task 16 and `superpowers:verification-before-completion` for Task 17.
 - During implementation, update the checkboxes in this file after each bounded step. Append `git add -f docs/superpowers/plans/2026-08-18-official-streaming-tool-loop.md` to every task's listed staging command so the ignored plan update is included in that task's code commit.
 
@@ -486,7 +488,10 @@ implement it as `pub(crate) async fn parse`. Tests call that parser
 directly. Do not add the central five-protocol dispatcher until Task 9, after
 all parser modules exist.
 
-Test argument fragments, assistant history, `finish_reason`, `[DONE]`, final text, missing `[DONE]`, malformed event JSON, API error objects, malformed accumulated arguments, and `envelope_mutation_matrix_rejects_non_official_chat_chunks`.
+Test argument fragments, assistant history, `finish_reason`, `[DONE]`, final text,
+missing `[DONE]`, malformed event JSON, API error objects, malformed accumulated
+arguments, and mismatched tool-call indexes/IDs needed by the runtime loop. Do
+not duplicate Issue #2's exhaustive response-envelope mutation matrix in Rust.
 
 - [ ] **Step 2: Run Chat parser tests and confirm failure.**
 
@@ -546,7 +551,14 @@ git commit -m "feat: parse official OpenAI chat tool streams"
 
 - [ ] **Step 1: Add failing Responses event-sequence tests.**
 
-Cover `response.created`, `response.output_item.added`, `response.function_call_arguments.delta`, `response.function_call_arguments.done`, `response.output_item.done`, and `response.completed`. Assert every SSE event name equals `data.type`, response identity remains stable, output indexes/item IDs/call IDs are unique and correlated, and the retained response ID is available for `previous_response_id`. Add `envelope_mutation_matrix_rejects_non_official_responses_events` for missing/wrong envelope fields, conflicting duplicates, and event/data type mismatch.
+Cover `response.created`, `response.output_item.added`,
+`response.function_call_arguments.delta`,
+`response.function_call_arguments.done`, `response.output_item.done`, and
+`response.completed`. Assert the event/data types and IDs needed to reconstruct
+the call are correlated, and retain the response ID for
+`previous_response_id`. Limit Rust negatives to missing/conflicting runtime
+identity, call ID, output index, argument fragments, and terminal fields; the
+Python analyzer retains exhaustive envelope coverage.
 
 - [ ] **Step 2: Run the parser tests.**
 
@@ -593,7 +605,12 @@ git commit -m "feat: parse official OpenAI responses tool streams"
 
 - [ ] **Step 1: Add failing Anthropic lifecycle tests.**
 
-Assert `message_start`, content-block start/delta/stop ordering, `message_delta`, and `message_stop`. Require every known SSE event name to equal `data.type`, stable message identity, unique integer content indexes, and type-correct blocks/deltas. Cover a `tool_use` block with fragmented `input_json_delta.partial_json`, a final text block, ping/extension events, an official error event, missing terminal, invalid block order, duplicate indexes, and `envelope_mutation_matrix_rejects_non_official_anthropic_events`.
+Assert `message_start`, content-block start/delta/stop ordering, `message_delta`,
+and `message_stop`. Require the event/data types, content indexes, tool-use ID,
+name, input fragments, stop reason, and native assistant blocks needed by the
+loop. Cover a final text block, ping/extension events, an official error event,
+missing terminal, invalid tool-block order, and duplicate runtime indexes. The
+Python analyzer retains exhaustive event-envelope mutations.
 
 - [ ] **Step 2: Run the Anthropic tests.**
 
@@ -642,7 +659,11 @@ git commit -m "feat: parse official Anthropic tool streams"
 
 - [ ] **Step 1: Add failing Gemini parser and URL tests.**
 
-Test both an optional `functionCall.id` and no ID, structured object `functionCall.args`, complete model content with thought signatures, `finishReason: STOP`, a non-normal finish reason, missing finish reason, API error, and truncated SSE. Add `envelope_mutation_matrix_rejects_non_official_gemini_responses` for a non-array `candidates`, duplicate/non-integer candidate indexes when present, non-model content roles, and malformed parts.
+Test both an optional `functionCall.id` and no ID, structured object
+`functionCall.args`, complete model content with thought signatures,
+`finishReason: STOP`, a non-normal finish reason, missing finish reason, API
+error, truncated SSE, malformed tool parts, and ambiguous runtime candidate
+selection. The Python analyzer retains exhaustive candidate/part mutations.
 
 Add URL tests for all of these exact transforms:
 
@@ -701,7 +722,13 @@ git commit -m "feat: parse official Gemini tool streams"
 
 - [ ] **Step 1: Add failing Ollama tests.**
 
-Cover accumulation of `message.thinking`, `message.content`, and `message.tool_calls`; required `message.role == "assistant"`; object-valued `function.arguments`; optional unique `message.tool_calls[].function.index`; no required call ID; `done:true`; optional `done_reason`; `done_reason:length`; error objects; clean EOF without `done:true`; a partial final JSON object; and `envelope_mutation_matrix_rejects_non_official_ollama_objects`.
+Cover accumulation of `message.thinking`, `message.content`, and
+`message.tool_calls`; assistant history needed for the follow-up;
+object-valued `function.arguments`; optional unique
+`message.tool_calls[].function.index`; no required call ID; `done:true`;
+optional `done_reason`; `done_reason:length`; error objects; clean EOF without
+`done:true`; and a partial final JSON object. The Python analyzer retains
+exhaustive object-envelope mutations.
 
 - [ ] **Step 2: Run Ollama tests.**
 
@@ -1087,18 +1114,16 @@ git commit -m "feat: collect complete streaming tool loops"
 
 - Create: `skills/creating-model-doctor-reports/scripts/model_doctor_contracts.py`
 - Modify: `skills/creating-model-doctor-reports/scripts/model_doctor_log.py`
-- Rename: `skills/creating-model-doctor-reports/tests/test_model_doctor_v6.py` to `skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py`
+- Create: `skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py`
+- Preserve: `skills/creating-model-doctor-reports/tests/test_model_doctor_v6.py`
+- Preserve: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
 
-- [ ] **Step 1: Add failing contract-matrix tests.**
+- [ ] **Step 1: Add a failing evidence.v3 contract suite.**
 
-Rename the existing suite and class first:
-
-```bash
-git mv skills/creating-model-doctor-reports/tests/test_model_doctor_v6.py \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py
-```
-
-Rename `ModelDoctorV6Tests` to `ModelDoctorV7Tests`, then add the tests below.
+Create `test_model_doctor_evidence_v3.py` with class
+`ModelDoctorEvidenceV3Tests`. Reuse public fixture-building helpers where they
+already exist, but do not rename or absorb Issue #2's v6 or assessment-v7
+suites. Add the tests below.
 
 Add exactly these tests to the renamed v7 suite:
 
@@ -1119,11 +1144,11 @@ The metadata test must independently mutate each required field, enum, integer, 
 - [ ] **Step 2: Run the focused parser tests.**
 
 ```bash
-python3 skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py \
-  ModelDoctorV7Tests.test_parser_accepts_complete_profile_free_v3_with_47_manifests \
-  ModelDoctorV7Tests.test_parser_rejects_v3_missing_046 \
-  ModelDoctorV7Tests.test_parser_rejects_mixed_v3_contract_variants \
-  ModelDoctorV7Tests.test_parser_validates_v3_request_metadata -v
+python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
+  ModelDoctorEvidenceV3Tests.test_parser_accepts_complete_profile_free_v3_with_47_manifests \
+  ModelDoctorEvidenceV3Tests.test_parser_rejects_v3_missing_046 \
+  ModelDoctorEvidenceV3Tests.test_parser_rejects_mixed_v3_contract_variants \
+  ModelDoctorEvidenceV3Tests.test_parser_validates_v3_request_metadata -v
 ```
 
 Expected: v3 is unsupported.
@@ -1185,18 +1210,20 @@ Before accepting each TEST block, restrict its ID to `CONTRACT_TEST_IDS[contract
 - [ ] **Step 5: Run parser compatibility tests and commit.**
 
 ```bash
-python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py -v
+python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
+python3 -m unittest \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py -v
 git add skills/creating-model-doctor-reports/scripts/model_doctor_contracts.py \
   skills/creating-model-doctor-reports/scripts/model_doctor_log.py \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v6.py \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py
+  skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py
 git diff --cached --check
 git commit -m "feat: parse evidence v3 contract"
 ```
 
 Expected: v1/v2 compatibility tests and new v3 tests all pass.
 
-## Task 14: Generate assessment.v7 with Contract-Specific Totals
+## Task 14: Extend the Combined assessment.v7 with Contract-Specific Totals
 
 **Files:**
 
@@ -1205,7 +1232,9 @@ Expected: v1/v2 compatibility tests and new v3 tests all pass.
 - Modify: `skills/creating-model-doctor-reports/scripts/model_doctor_html.py`
 - Modify: `skills/creating-model-doctor-reports/references/assessment-schema.json`
 - Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py`
-- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
+- Test: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
 
 - [ ] **Step 1: Add failing verdict and schema tests.**
 
@@ -1220,15 +1249,25 @@ test_v1_partial_uses_legacy_46_denominator
 test_assessment_v7_schema_allows_only_contract_total_combinations
 test_assessment_validator_rejects_contract_total_mismatch
 test_html_renders_v3_stream_and_tool_metadata
+test_combined_v7_v3_has_protocol_conformance_and_47_32_15_totals
+test_combined_v7_v2_preserves_protocol_conformance_and_46_31_15_totals
+test_v3_tool_turns_appear_once_in_protocol_conformance_with_check_ids
+test_combined_v7_schema_requires_conformance_and_contract_totals
+test_combined_v7_validator_rechecks_both_invariant_families
 ```
 
 - [ ] **Step 2: Run verdict tests and confirm fixed-46 failures.**
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py -v
+python3 -m unittest \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py -v
 ```
 
-Expected: v3 totals and assessment.v7 are unsupported.
+Expected: the existing assessment.v7 and protocol-conformance tests remain
+green, while the new evidence.v3 totals/combined-invariant tests fail because
+47/32/15 is not yet supported.
 
 - [ ] **Step 3: Make verdict derivation contract-aware.**
 
@@ -1247,9 +1286,19 @@ Update every direct `derive_general_verdict` call. Give partial/custom fixtures 
 V1 pair, complete 46-check fixtures the V2 pair, and complete 47-check fixtures
 the V3 pair; no test fixture may rely on a missing schema/version default.
 
-- [ ] **Step 4: Upgrade schema and HTML fallback.**
+Keep `protocolConformance = analyze_protocol_conformance(parsed)` in assembly,
+keep `validate_protocol_conformance(...)` in independent validation, and keep
+`protocolConformance` in `ASSESSMENT_FIELDS`. Change
+`_validate_assessment_summary` to receive the exact contract explicitly. An
+invalid assessment-owned run contract must produce a validation error instead
+of crashing or silently choosing a denominator.
 
-Set `ASSESSMENT_SCHEMA_VERSION`, schema `$id`, and schema `const` to `llm-capability-doctor.assessment.v7`. Define `generalVerdict` with `oneOf` branches that allow only these complete combinations:
+- [ ] **Step 4: Extend the existing v7 schema and HTML fallback.**
+
+Keep `ASSESSMENT_SCHEMA_VERSION`, schema `$id`, and schema `const` at
+`llm-capability-doctor.assessment.v7`. Preserve the required top-level
+`protocolConformance` field and all of its `$defs`. Extend `generalVerdict`
+with `oneOf` branches that allow only these complete combinations:
 
 ```text
 totalTests=46, totalCoreTests=31, totalEnhancedTests=15
@@ -1268,23 +1317,31 @@ unchanged when those fields are absent.
 
 ```bash
 python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py -v
-python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py -v
+python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
+python3 -m unittest \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py -v
 git add skills/creating-model-doctor-reports/scripts/model_doctor_general_verdict.py \
   skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py \
   skills/creating-model-doctor-reports/scripts/model_doctor_html.py \
   skills/creating-model-doctor-reports/references/assessment-schema.json \
   skills/creating-model-doctor-reports/tests/test_model_doctor_general_verdict.py \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py
+  skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py
 git diff --cached --check
-git commit -m "feat: generate contract-aware assessment v7"
+git commit -m "feat: extend assessment v7 for evidence v3"
 ```
 
-## Task 15: Reject Structurally Incomplete PASS Reviews for 046-049
+## Task 15: Reject Incomplete or Protocol-Different PASS Reviews for 046-049
 
 **Files:**
 
+- Create: `skills/creating-model-doctor-reports/scripts/model_doctor_tool_loop_conformance.py`
+- Modify: `skills/creating-model-doctor-reports/scripts/model_doctor_protocol_conformance.py`
 - Modify: `skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py`
-- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py`
 
 - [ ] **Step 1: Add failing guard tests.**
 
@@ -1303,15 +1360,20 @@ test_v3_tool_pass_guard_rejects_integer_turn_metadata
 test_assessment_validator_reports_a_damaged_run_contract_without_crashing
 test_v2_tool_reviews_are_not_rescored_by_v3_guard
 test_assessment_validator_independently_rejects_tampered_v3_tool_pass
+test_v3_tool_pass_guard_rejects_protocol_difference
+test_v3_tool_transition_matrix_accepts_all_five_official_follow_ups
+test_v3_tool_transition_matrix_rejects_all_five_correlation_mutations
+test_protocol_differences_remain_diagnostic_only_for_legacy_and_non_tool_checks
 ```
 
 - [ ] **Step 2: Run the guard tests and confirm false PASS is currently accepted.**
 
 ```bash
-python3 skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py \
-  ModelDoctorV7Tests.test_v3_tool_pass_guard_rejects_non_contiguous_turn_ids \
-  ModelDoctorV7Tests.test_v3_tool_pass_guard_rejects_incomplete_stream \
-  ModelDoctorV7Tests.test_assessment_validator_independently_rejects_tampered_v3_tool_pass -v
+python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
+  ModelDoctorEvidenceV3Tests.test_v3_tool_pass_guard_rejects_non_contiguous_turn_ids \
+  ModelDoctorEvidenceV3Tests.test_v3_tool_pass_guard_rejects_incomplete_stream \
+  ModelDoctorEvidenceV3Tests.test_assessment_validator_independently_rejects_tampered_v3_tool_pass \
+  ModelDoctorEvidenceV3Tests.test_v3_tool_pass_guard_rejects_protocol_difference -v
 ```
 
 Expected: all three fail because validation currently checks only document shape/evidence references.
@@ -1429,21 +1491,89 @@ The request validator must require at least the per-check minimum, exact IDs `te
 
 Apply this only to exact v3/0.11.0 PASS reviews in `validate_reviews`. Repeat the same validation using assessment-owned `run` and `tests[].requests` in `validate_assessment`, so post-assembly tampering cannot bypass it. Do not apply it to v1/v2.
 
-- [ ] **Step 4: Run all guard and assessment tests.**
+- [ ] **Step 4: Add independent raw cross-turn protocol validation.**
 
-```bash
-python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py -v
+Create this public, side-effect-free API:
+
+```python
+def validate_tool_loop_transitions(
+    parsed: Mapping[str, object],
+) -> dict[str, list[dict[str, str]]]:
+    """Return bounded official-shape differences keyed by follow-up request ID."""
 ```
 
-Expected: complete ordered loops pass; every structural mutation is rejected; v2 behavior is unchanged.
+Only inspect exact evidence.v3 checks 046 through 049. Read each ordered pair
+from `tests[test_id].requestRefs`; parse the preceding raw streamed
+`responseBody`, then inspect the next raw JSON `requestBody`. Return
+`CORRELATION`, `MISSING_FIELD`, `TYPE_MISMATCH`, `UNEXPECTED_FIELD`, or
+`VALUE_MISMATCH` entries with RFC 6901 request-body locations and bounded
+actual values. Validate these transitions:
 
-- [ ] **Step 5: Commit the PASS guard.**
+Before transition matching, validate every referenced request body for the
+provider's tool-loop request subset: JSON object shape, `stream: true`, official
+tool declaration nesting and parameter schema, provider-native conversation
+roles/items/parts, and absence of fields belonging only to another protocol.
+The initial request must pass this validation as well as every follow-up.
+
+```text
+openai_chat:
+  assistant tool_calls[].id/name/arguments
+  -> assistant history plus role=tool, matching tool_call_id, string content
+
+openai_responses:
+  response ID plus function_call.call_id/name/arguments
+  -> matching previous_response_id and function_call_output.call_id/output
+
+anthropic_messages:
+  assistant tool_use id/name/input
+  -> immediately following user tool_result with matching tool_use_id;
+     all tool_result blocks precede any text; timeout uses is_error=true
+
+gemini_generate_content:
+  complete model Content including thoughtSignature and functionCall
+  -> preserved model Content plus user functionResponse with matching name,
+     matching optional id when present, and object response
+
+ollama_chat:
+  accumulated assistant thinking/content/tool_calls
+  -> preserved assistant message plus role=tool, matching tool_name, content;
+     reject OpenAI-only tool_call_id, tool_choice, parallel_tool_calls, strict
+```
+
+Call this function from `analyze_protocol_conformance`. Attach returned
+differences to the existing result for the follow-up request, recompute that
+result's `status`, and build the summary only after transition differences are
+merged. Do not add a second top-level report section.
+
+In `validate_reviews`, compute the deterministic conformance report and reject
+a v3 PASS for 046-049 when any associated result is absent or not
+`CONSISTENT`. In `validate_assessment`, independently enforce the same rule
+from assessment-owned `protocolConformance.results`. Historical inputs and
+non-tool checks keep Issue #2's diagnostic-only behavior.
+
+- [ ] **Step 5: Run all guard, transition, and assessment tests.**
 
 ```bash
-git add skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py
+python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
+python3 -m unittest \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py -v
+```
+
+Expected: complete ordered loops for all five protocols pass; every structural
+or cross-turn mutation is rejected; v2 and non-tool behavior are unchanged.
+
+- [ ] **Step 6: Commit the PASS guard and transition audit.**
+
+```bash
+git add skills/creating-model-doctor-reports/scripts/model_doctor_tool_loop_conformance.py \
+  skills/creating-model-doctor-reports/scripts/model_doctor_protocol_conformance.py \
+  skills/creating-model-doctor-reports/scripts/model_doctor_assessment.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py \
+  skills/creating-model-doctor-reports/tests/test_model_doctor_assessment_v7.py
 git diff --cached --check
-git commit -m "feat: guard v3 tool loop pass decisions"
+git commit -m "feat: audit and guard v3 tool loop transitions"
 ```
 
 ## Task 16: Update the Report Skill and User Documentation
@@ -1452,7 +1582,8 @@ git commit -m "feat: guard v3 tool loop pass decisions"
 
 - Modify: `skills/creating-model-doctor-reports/SKILL.md`
 - Modify: `skills/creating-model-doctor-reports/references/evaluation-rules.md`
-- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py`
+- Modify: `skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py`
+- Test: `skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py`
 - Modify: `README.md`
 
 - [ ] **Step 1: Read and apply `superpowers:writing-skills`.**
@@ -1474,14 +1605,16 @@ test_readme_describes_011_evidence_v3_and_47_checks
 - [ ] **Step 3: Run the documentation tests.**
 
 ```bash
-python3 skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py \
-  ModelDoctorV7Tests.test_skill_documents_v3_contract_and_assessment_v7 \
-  ModelDoctorV7Tests.test_rules_define_strict_v3_tool_loop_checks \
-  ModelDoctorV7Tests.test_rules_preserve_legacy_contract_interpretation \
-  ModelDoctorV7Tests.test_readme_describes_011_evidence_v3_and_47_checks -v
+python3 skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py \
+  ModelDoctorEvidenceV3Tests.test_skill_documents_v3_contract_and_assessment_v7 \
+  ModelDoctorEvidenceV3Tests.test_rules_define_strict_v3_tool_loop_checks \
+  ModelDoctorEvidenceV3Tests.test_rules_preserve_legacy_contract_interpretation \
+  ModelDoctorEvidenceV3Tests.test_readme_describes_011_evidence_v3_and_47_checks -v
 ```
 
-Expected: active docs still describe only evidence.v2, assessment.v6, and 46 checks.
+Expected: Issue #2's assessment.v7 and `protocolConformance` documentation is
+present, while evidence.v3, collector 0.11.0, 47 checks, and the v3-only
+046-049 hard gate are not yet documented.
 
 - [ ] **Step 4: Document exact v3 assessment rules.**
 
@@ -1495,7 +1628,9 @@ v3 check 046: complete official protocol call/result/final cycle and final marke
 v3 check 047: weather, then time, then MODEL_DOCTOR_CASE_047_OK
 v3 check 048: final marker plus exact WEATHER_SUNNY preservation
 v3 check 049: exactly one timeout retry, successful result, final marker
-v3 046-049: every ordered request completed and conformant, final loop completed
+v3 046-049: every ordered request completed and runtime-conformant, final loop completed
+v3 046-049: every associated protocolConformance result is CONSISTENT,
+            including raw response -> follow-up request correlation
 historical v1/v2: retain their original evidence and tool-check rules
 totals: historical 46/31/15; v3 47/32/15
 ```
@@ -1505,10 +1640,11 @@ Update README release names to `v0.11.0`, evidence to v3, default/list count to 
 - [ ] **Step 5: Verify and commit documentation.**
 
 ```bash
-python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py -v
+python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py -v
+python3 -m unittest skills/creating-model-doctor-reports/tests/test_model_doctor_protocol_conformance.py -v
 git add skills/creating-model-doctor-reports/SKILL.md \
   skills/creating-model-doctor-reports/references/evaluation-rules.md \
-  skills/creating-model-doctor-reports/tests/test_model_doctor_v7.py README.md
+  skills/creating-model-doctor-reports/tests/test_model_doctor_evidence_v3.py README.md
 git diff --cached --check
 git commit -m "docs: define evidence v3 tool loop assessment"
 ```
@@ -1559,6 +1695,8 @@ five official streaming protocol parsers
 normal terminal distinct from EOF/timeout/disconnect/cancel
 046-049 bounded full loop with ordered manifest refs
 official outgoing request/result shape validated
+Issue #2 exhaustive protocolConformance retained for every raw response
+v3 046-049 raw response -> follow-up request correlation is CONSISTENT
 raw/partial response retained
 evidence.v3 parser and assessment.v7 compatibility matrix
 programmatic false-PASS guard

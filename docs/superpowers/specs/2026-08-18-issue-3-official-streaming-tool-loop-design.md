@@ -6,6 +6,11 @@ Approved interactively on 2026-08-18. This design implements GitHub Issue #3
 for all five protocols supported by the collector and restores check 046 as a
 dedicated official tool-protocol conformance check.
 
+Integrated on 2026-08-18 with the unreleased Issue #2 implementation from
+`codex/official-protocol-conformance`. The combined release uses one
+`assessment.v7`: Issue #2 supplies exhaustive report-time protocol auditing,
+while Issue #3 supplies live tool-loop collection and evidence.v3 gates.
+
 Issue: <https://github.com/relaxcloud-cn/llm-capability-doctor/issues/3>
 
 ## Problem
@@ -74,9 +79,13 @@ The compatibility matrix is:
 The new contract uses `llm-capability-doctor.evidence.v3` because the required
 manifest set and the meaning of checks 047 through 049 change, not merely
 because additive request fields are present. The parsed-evidence and authored
-review shapes remain compatible. The assembled report moves from
-`assessment.v6` to `assessment.v7` because the deterministic verdict changes
-from 46 checks and 31 core checks to 47 checks and 32 core checks.
+review shapes remain compatible. Issue #2 already introduced the unreleased
+`assessment.v7` on a branch from `assessment.v6`. Because both issues ship
+together, the combined output stays `assessment.v7` and supports
+contract-specific totals: historical inputs use 46 checks and 31 core checks,
+while evidence.v3 uses 47 checks and 32 core checks. `assessment.v8` is not
+emitted unless a v7 contract is published separately before this combined
+change lands.
 
 The current report tooling continues accepting evidence.v1 and evidence.v2.
 Assessment v7 represents historical inputs with their contract-specific
@@ -97,6 +106,18 @@ HTTP byte stream
     -> next streamed assistant turn
     -> final assistant answer or explicit bounded failure
 ```
+
+The integration has two deliberately different validation layers:
+
+- Rust validates the streaming, terminal, tool-call, correlation, native
+  history, and follow-up fields required to safely execute the live loop.
+- The existing Python `protocolConformance` analyzer independently audits the
+  complete recorded request/response shapes against pinned official baselines,
+  including fields not needed by the runtime state machine.
+
+The Rust layer must not invoke Python or duplicate the Python analyzer's full
+field-mutation matrix. The Python layer additionally checks cross-turn tool
+correlation from raw response bodies to raw follow-up request bodies.
 
 ### Transport Layer
 
@@ -145,11 +166,15 @@ such as Gemini thought signatures, instead of reconstructing a lossy generic
 message. Tool arguments are executed only after every fragment has been
 assembled into valid JSON and the stream has an official normal terminal.
 
-The parser accepts documented optional fields and forward-compatible extension
-events. "Officially conformant" means required field names, types, event
-relationships, event ordering, correlation values, argument JSON, and terminal
-semantics are valid. It does not mean byte-for-byte equality, fixed JSON field
-order, or rejection of documented extensions.
+The runtime parser accepts documented optional fields and forward-compatible
+extension events. `tool_contract_status: conformant` means the observed turn
+contains the official interoperability subset required to continue safely:
+valid framing, terminal semantics, tool name and arguments, correlation,
+native assistant history, and outgoing tool-result shape. It is not the
+exhaustive official structure verdict. Exhaustive field names, types, enums,
+event relationships, event ordering, and extensions are owned by the Python
+`protocolConformance` result. Neither layer requires byte-for-byte equality or
+fixed JSON field order.
 
 ## Official Protocol Contracts
 
@@ -443,6 +468,14 @@ schema/collector version pair.
   contract is not `conformant`, or the final request does not record
   `tool_loop_outcome: completed`. Human semantic review still evaluates the
   exact expected calls, results, retry count, and final markers.
+- For evidence.v3 checks 046 through 049, every associated
+  `protocolConformance` request result must also be `CONSISTENT`. The analyzer
+  validates each complete official response and the raw cross-turn mapping from
+  the preceding tool call to the next official tool-result request. A
+  `DIFFERENT` result blocks PASS for these four checks only.
+- For evidence.v1/evidence.v2 and all non-tool checks,
+  `protocolConformance` remains an independent diagnostic and does not rewrite
+  the historical manifest verdict.
 - Reviews remain `reviews.v2`. The assembled output becomes assessment.v7 and
   derives contract-specific totals. New complete runs use 47 total, 32 core,
   and 15 enhanced checks. Historical evidence.v2 runs remain 46/31/15.
@@ -493,9 +526,10 @@ Assert that partial response bytes and the correct classification are retained.
 
 Rust tests verify every new evidence field, ordered manifest references, 47
 selected manifests, redaction, and incomplete cancellation output. Python Skill
-tests verify all three supported evidence contracts, v3 required-manifest
-validation, assessment.v7 totals, strict 046-049 evaluation guidance, and
-historical v2 compatibility.
+tests retain the Issue #2 exhaustive protocol fixtures and verify all three
+supported evidence contracts, v3 required-manifest validation, request/response
+cross-turn correlation, combined assessment.v7 totals, strict 046-049 gates,
+and historical v2 compatibility.
 
 Because the repository ignores the root `tests/` directory, new Rust fixtures
 and test modules live under tracked `src/` paths. Existing tracked Skill tests
@@ -542,9 +576,10 @@ The implementation snapshot uses the official documentation available on
   dispatch shell commands, network calls, or filesystem operations.
 - Raw request and response evidence continues through the existing credential
   redactor before it is written.
-- Tool-contract validation reports observable wire-format violations. It does
-  not attribute the violation to the model, gateway, proxy, or provider without
-  separate evidence.
+- Runtime tool-contract validation reports the executable interoperability
+  subset. Python `protocolConformance` reports exhaustive observable
+  wire-format differences. Neither attributes a difference to the model,
+  gateway, proxy, or provider without separate evidence.
 - A structurally conformant tool call proves API compatibility for the observed
   request only. It does not prove reliability across untested models, gateways,
   or traffic conditions.
