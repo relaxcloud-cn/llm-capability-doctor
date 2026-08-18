@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl-final","object":"chat.completion.chunk","created":1787041141,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"MODEL_DOCTOR_CASE_"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-final","object":"chat.completion.chunk","created":1787041141,"model":"gpt-test","choices":[{"index":0,"delta":{"content":"046_OK"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-final","object":"chat.completion.chunk","created":1787041141,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

@@ -435,7 +435,7 @@ git commit -m "feat: add structured stream framing"
 - Create: `src/protocol/fixtures/openai_chat_error.sse`
 - Create: `src/protocol/fixtures/openai_chat_invalid_arguments.sse`
 
-- [ ] **Step 1: Add the normalized result types and failing Chat tests.**
+- [x] **Step 1: Add the normalized result types and failing Chat tests.**
 
 Use these shared types:
 
@@ -493,7 +493,7 @@ missing `[DONE]`, malformed event JSON, API error objects, malformed accumulated
 arguments, and mismatched tool-call indexes/IDs needed by the runtime loop. Do
 not duplicate Issue #2's exhaustive response-envelope mutation matrix in Rust.
 
-- [ ] **Step 2: Run Chat parser tests and confirm failure.**
+- [x] **Step 2: Run Chat parser tests and confirm failure.**
 
 ```bash
 cargo test --locked --lib protocol::stream::openai_chat::tests -- --nocapture
@@ -501,7 +501,7 @@ cargo test --locked --lib protocol::stream::openai_chat::tests -- --nocapture
 
 Expected: parser module and normalized types are missing.
 
-- [ ] **Step 3: Implement Chat delta accumulation.**
+- [x] **Step 3: Implement Chat delta accumulation.**
 
 Require each chunk envelope to contain a stable string `id`, `object == "chat.completion.chunk"`, integer `created`, string `model`, and a `choices` array whose selected choice has integer `index` and object `delta`. Require stable envelope identity across chunks and reject conflicting duplicate choice/tool indexes. Merge `choices[0].delta.tool_calls` by `index`. Carry forward `id`, require `type == "function"`, carry `function.name`, append every string `function.arguments` fragment, then decode one JSON object. Preserve an official assistant message with `role: "assistant"` and complete `tool_calls`.
 
@@ -519,7 +519,7 @@ valid terminal plus malformed tool arguments    -> completed + contract error
 
 Use stable contract errors formatted as `chat.<code>:/json/pointer`; do not include model-supplied values.
 
-- [ ] **Step 4: Verify parser fixtures.**
+- [x] **Step 4: Verify parser fixtures.**
 
 ```bash
 cargo test --locked --lib protocol::stream::openai_chat::tests -- --nocapture
@@ -527,7 +527,7 @@ cargo test --locked --lib protocol::stream::openai_chat::tests -- --nocapture
 
 Expected: the tool fixture yields `get_weather`, `{"city":"Beijing"}`, required call ID, `tool_calls`, and `[DONE]`; every failure fixture has the designed classification.
 
-- [ ] **Step 5: Commit Chat parsing.**
+- [x] **Step 5: Commit Chat parsing.**
 
 ```bash
 git add src/protocol/stream/mod.rs src/protocol/stream/openai_chat.rs src/protocol/fixtures/openai_chat_*.sse
