@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::evidence::{StreamEndSignal, StreamTermination};
 
+pub(crate) mod anthropic;
 pub(crate) mod framing;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;

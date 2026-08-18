@@ -603,7 +603,7 @@ git commit -m "feat: parse official OpenAI responses tool streams"
 - Create: `src/protocol/fixtures/anthropic_invalid_order.sse`
 - Modify: `src/protocol/stream/mod.rs`
 
-- [ ] **Step 1: Add failing Anthropic lifecycle tests.**
+- [x] **Step 1: Add failing Anthropic lifecycle tests.**
 
 Assert `message_start`, content-block start/delta/stop ordering, `message_delta`,
 and `message_stop`. Require the event/data types, content indexes, tool-use ID,
@@ -612,7 +612,7 @@ loop. Cover a final text block, ping/extension events, an official error event,
 missing terminal, invalid tool-block order, and duplicate runtime indexes. The
 Python analyzer retains exhaustive event-envelope mutations.
 
-- [ ] **Step 2: Run the Anthropic tests.**
+- [x] **Step 2: Run the Anthropic tests.**
 
 ```bash
 cargo test --locked --lib protocol::stream::anthropic::tests -- --nocapture
@@ -620,13 +620,13 @@ cargo test --locked --lib protocol::stream::anthropic::tests -- --nocapture
 
 Expected: module missing.
 
-- [ ] **Step 3: Implement Anthropic block reconstruction.**
+- [x] **Step 3: Implement Anthropic block reconstruction.**
 
 Require each `tool_use` block to have `id`, `name`, object input, and matching block indices. Preserve the complete ordered assistant content array in `ProtocolHistory::Anthropic`. Accept ping and unknown documented extension event names without changing the lifecycle state.
 
 Require `stop_reason: tool_use` for a tool turn and `stop_reason: end_turn` for a final turn, followed by `message_stop`. An `event: error` frame is `protocol_error`; missing `message_stop` is `missing_terminal_event`; lifecycle/input errors are stable `anthropic.<code>:/path` contract errors.
 
-- [ ] **Step 4: Verify Anthropic fixtures.**
+- [x] **Step 4: Verify Anthropic fixtures.**
 
 ```bash
 cargo test --locked --lib protocol::stream::anthropic::tests -- --nocapture
@@ -634,7 +634,7 @@ cargo test --locked --lib protocol::stream::anthropic::tests -- --nocapture
 
 Expected: fragmented input becomes `{"city":"Beijing"}`, the assistant blocks are preserved, and all terminal/error cases are distinct.
 
-- [ ] **Step 5: Commit Anthropic parsing.**
+- [x] **Step 5: Commit Anthropic parsing.**
 
 ```bash
 git add src/protocol/stream/mod.rs src/protocol/stream/anthropic.rs src/protocol/fixtures/anthropic_*.sse
