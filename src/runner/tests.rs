@@ -230,6 +230,8 @@ async fn official_tool_loop_matrix_completes_all_protocols_and_checks() {
             if protocol == Protocol::GeminiGenerateContent {
                 runner.config.url =
                     server.url_with_path("/v1/models/test:generateContent?key=fixture&alt=json");
+            } else if protocol == Protocol::OllamaChat {
+                runner.config.url = server.url_with_path("/api/chat");
             }
             let spec = tool_request(
                 protocol,
@@ -327,6 +329,13 @@ async fn official_tool_loop_matrix_completes_all_protocols_and_checks() {
                         .starts_with("POST /v1/models/test:streamGenerateContent?")
                         && request.head.matches("alt=sse").count() == 1
                 }));
+            }
+            if protocol == Protocol::OllamaChat {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| request.head.starts_with("POST /api/chat "))
+                );
             }
         }
     }
