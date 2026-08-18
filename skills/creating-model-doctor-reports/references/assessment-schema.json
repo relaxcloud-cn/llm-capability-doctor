@@ -651,15 +651,39 @@
             "通用能力未评定"
           ]
         },
-        "collectedTests": {"type": "integer", "minimum": 0, "maximum": 46},
-        "passedTests": {"type": "integer", "minimum": 0, "maximum": 46},
-        "totalTests": {"const": 46},
-        "passedCoreTests": {"type": "integer", "minimum": 0, "maximum": 31},
-        "totalCoreTests": {"const": 31},
-        "passedEnhancedTests": {"type": "integer", "minimum": 0, "maximum": 15},
-        "totalEnhancedTests": {"const": 15},
+        "collectedTests": {"type": "integer", "minimum": 0},
+        "passedTests": {"type": "integer", "minimum": 0},
+        "totalTests": {"type": "integer"},
+        "passedCoreTests": {"type": "integer", "minimum": 0},
+        "totalCoreTests": {"type": "integer"},
+        "passedEnhancedTests": {"type": "integer", "minimum": 0},
+        "totalEnhancedTests": {"type": "integer"},
         "statement": {"type": "string", "minLength": 1}
       },
+      "oneOf": [
+        {
+          "properties": {
+            "collectedTests": {"maximum": 46},
+            "passedTests": {"maximum": 46},
+            "totalTests": {"const": 46},
+            "passedCoreTests": {"maximum": 31},
+            "totalCoreTests": {"const": 31},
+            "passedEnhancedTests": {"maximum": 15},
+            "totalEnhancedTests": {"const": 15}
+          }
+        },
+        {
+          "properties": {
+            "collectedTests": {"maximum": 47},
+            "passedTests": {"maximum": 47},
+            "totalTests": {"const": 47},
+            "passedCoreTests": {"maximum": 32},
+            "totalCoreTests": {"const": 32},
+            "passedEnhancedTests": {"maximum": 15},
+            "totalEnhancedTests": {"const": 15}
+          }
+        }
+      ],
       "additionalProperties": false
     },
     "capabilitySummary": {

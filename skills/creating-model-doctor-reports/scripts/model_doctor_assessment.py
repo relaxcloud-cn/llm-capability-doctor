@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
+from model_doctor_contracts import contract_key
 from model_doctor_general_verdict import derive_general_verdict
 from model_doctor_protocol_conformance import (
     analyze_protocol_conformance,
@@ -559,6 +560,10 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
     errors = validate_reviews(parsed, reviews)
     if errors:
         raise ValueError("Invalid reviews:\n" + "\n".join(errors))
+    try:
+        contract = contract_key(parsed.get("run"))
+    except ValueError as error:
+        raise ValueError(f"Invalid parsed run contract: {error}") from error
 
     test_reviews = reviews["tests"]
     items: List[dict] = []
@@ -587,7 +592,8 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
 
     capability_summary = deepcopy(reviews["capabilitySummary"])
     capability_summary["generalVerdict"] = derive_general_verdict(
-        {item["testId"]: item["reviewedStatus"] for item in items}
+        {item["testId"]: item["reviewedStatus"] for item in items},
+        contract,
     )
 
     return {
@@ -741,7 +747,11 @@ def _validate_assessment_failure_analysis(
     return errors
 
 
-def _validate_assessment_summary(items: List[dict], summary: object) -> List[str]:
+def _validate_assessment_summary(
+    items: List[dict],
+    summary: object,
+    contract: tuple[str, str],
+) -> List[str]:
     errors: List[str] = []
     if not isinstance(summary, dict):
         return ["capabilitySummary must be an object"]
@@ -753,7 +763,7 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
         if isinstance(item, dict)
     }
     try:
-        expected_verdict = derive_general_verdict(statuses)
+        expected_verdict = derive_general_verdict(statuses, contract)
     except ValueError:
         errors.append(
             "capabilitySummary generalVerdict cannot be derived from test statuses"
@@ -912,6 +922,11 @@ def validate_assessment(assessment: object) -> List[str]:
     run = assessment.get("run")
     if not isinstance(run, dict):
         errors.append("run must be an object")
+    try:
+        contract = contract_key(run)
+    except ValueError:
+        errors.append("run contract is invalid")
+        contract = ("", "")
 
     items = assessment.get("tests")
     if not isinstance(items, list):
@@ -992,6 +1007,7 @@ def validate_assessment(assessment: object) -> List[str]:
         _validate_assessment_summary(
             valid_items,
             assessment.get("capabilitySummary"),
+            contract,
         )
     )
     if "overall" in assessment:

@@ -195,12 +195,12 @@ def _general_verdict(summary: dict) -> str:
     if level == "NOT_ASSESSED":
         result_value = (
             f'已采集 {verdict.get("collectedTests", 0)}/'
-            f'{verdict.get("totalTests", 46)}'
+            f'{verdict.get("totalTests", 0)}'
         )
     else:
         result_value = (
             f'{verdict.get("passedTests", 0)}/'
-            f'{verdict.get("totalTests", 46)} 通过'
+            f'{verdict.get("totalTests", 0)} 通过'
         )
 
     protocol_value = "未确认"
@@ -474,6 +474,18 @@ def _request_evidence(requests: List[dict]) -> str:
     turns = []
     for index, request in enumerate(requests, start=1):
         metrics = request.get("metrics", {})
+        v3_metadata = tuple(
+            f"{field}={request[field]}"
+            for field in (
+                "transport_outcome",
+                "stream_termination",
+                "stream_end_signal",
+                "tool_contract_status",
+                "tool_loop_turn",
+                "tool_loop_outcome",
+            )
+            if field in request
+        )
         meta = " · ".join(
             value
             for value in (
@@ -487,6 +499,7 @@ def _request_evidence(requests: List[dict]) -> str:
                 else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",
                 f"{metrics.get('size_download')} bytes" if metrics.get("size_download") else "",
+                *v3_metadata,
             )
             if value
         )
@@ -494,6 +507,15 @@ def _request_evidence(requests: List[dict]) -> str:
         if request.get("stderr"):
             output_parts.append("curl stderr:\n" + str(request["stderr"]))
         output = "\n\n".join(part for part in output_parts if part)
+        tool_contract_errors = request.get("tool_contract_errors_json")
+        rendered_tool_contract_errors = ""
+        if tool_contract_errors not in (None, "", "[]"):
+            rendered_tool_contract_errors = (
+                '<div class="tool-contract-errors">'
+                "<h5>tool_contract_errors_json</h5>"
+                f"<pre><code>{_e(tool_contract_errors)}</code></pre>"
+                "</div>"
+            )
         turns.append(
             '<section class="turn-evidence">'
             f'<h4>Turn {index}<span>{_e(meta)}</span></h4>'
@@ -501,6 +523,7 @@ def _request_evidence(requests: List[dict]) -> str:
             f"<pre><code>{_e(request.get('requestBody'))}</code></pre>"
             "<h5>请求输出</h5>"
             f"<pre><code>{_e(output)}</code></pre>"
+            f"{rendered_tool_contract_errors}"
             "</section>"
         )
     return "".join(turns)

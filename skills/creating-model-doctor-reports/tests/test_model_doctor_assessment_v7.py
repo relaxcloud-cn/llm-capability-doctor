@@ -19,6 +19,12 @@ from model_doctor_assessment import (  # noqa: E402
     assemble_assessment,
     validate_assessment,
 )
+from model_doctor_contracts import (  # noqa: E402
+    CONTRACT_TEST_IDS,
+    V1_CONTRACT,
+    V2_CONTRACT,
+    V3_CONTRACT,
+)
 from model_doctor_protocol_conformance import (  # noqa: E402
     BASELINE_DATE,
     DIFFERENCE_KINDS,
@@ -26,7 +32,11 @@ from model_doctor_protocol_conformance import (  # noqa: E402
     SUPPORTED_PROTOCOLS,
     analyze_protocol_conformance,
 )
-from model_doctor_html import _protocol_difference, render_report  # noqa: E402
+from model_doctor_html import (  # noqa: E402
+    _protocol_difference,
+    _request_evidence,
+    render_report,
+)
 
 
 ASSESSMENT_V7 = "llm-capability-doctor.assessment.v7"
@@ -113,6 +123,23 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             "metrics": {"http_status": "200", "curl_exit_code": "0"},
         }
 
+    def _v3_request(self, request_id: str, response: dict) -> dict:
+        request = self._request(request_id, response)
+        request.update(
+            {
+                "transport_outcome": "completed_eof",
+                "stream_termination": "completed",
+                "stream_end_signal": "[DONE]",
+                "model_stop_reason": "stop",
+                "stream_event_count": "3",
+                "tool_contract_status": "conformant",
+                "tool_contract_errors_json": "[]",
+                "tool_loop_turn": "1",
+                "tool_loop_outcome": "completed",
+            }
+        )
+        return request
+
     def _fixture(self, *, second_request_is_different: bool = True) -> tuple[dict, dict]:
         referenced_id = "request-referenced"
         unreferenced_id = "request-unreferenced"
@@ -128,7 +155,12 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                 "size": 1,
                 "sha256": "0" * 64,
             },
-            "run": {"model": "fixture-model", "api_key": "[MASKED]"},
+            "run": {
+                "model": "fixture-model",
+                "api_key": "[MASKED]",
+                "log_schema": V1_CONTRACT[0],
+                "script_version": V1_CONTRACT[1],
+            },
             "tokenTotals": {},
             "warnings": [],
             "tests": {
@@ -167,6 +199,61 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                 "scopeBoundary": CAPABILITY_SCOPE_BOUNDARY,
             },
         }
+        return parsed, reviews
+
+    def _complete_fixture(
+        self,
+        contract: tuple[str, str],
+    ) -> tuple[dict, dict]:
+        parsed, reviews = self._fixture(second_request_is_different=False)
+        parsed["run"]["log_schema"], parsed["run"]["script_version"] = contract
+        parsed["tests"] = {}
+        reviews["tests"] = {}
+        for test_id in sorted(CONTRACT_TEST_IDS[contract]):
+            request_refs = ["request-referenced"] if test_id == "001" else []
+            parsed["tests"][test_id] = {
+                "category": "Core",
+                "name": f"Capability check {test_id}",
+                "requestRefs": request_refs,
+            }
+            evidence_refs = (
+                ["request:request-referenced"]
+                if request_refs
+                else [f"test:{test_id}:manifest"]
+            )
+            reviews["tests"][test_id] = {
+                "testId": test_id,
+                "reviewedStatus": "PASS",
+                "conclusion": "The recorded capability check passes.",
+                "logic": self._logic(),
+                "evidenceRefs": evidence_refs,
+                "evidenceExcerpts": ["The evidence satisfies this check."],
+                "limitations": [],
+                "retestInstructions": [],
+            }
+        if contract == V3_CONTRACT:
+            parsed["requests"] = {
+                request_id: self._v3_request(
+                    request_id,
+                    self._chat_response(request_id),
+                )
+                for request_id in parsed["requests"]
+            }
+        return parsed, reviews
+
+    def _v3_tool_turn_fixture(self) -> tuple[dict, dict]:
+        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+        parsed["requests"] = {}
+        for test_id in ("046", "047", "048", "049"):
+            request_id = f"test-{test_id}-turn-1"
+            parsed["requests"][request_id] = self._v3_request(
+                request_id,
+                self._chat_response(request_id),
+            )
+            parsed["tests"][test_id]["requestRefs"] = [request_id]
+            reviews["tests"][test_id]["evidenceRefs"] = [f"request:{request_id}"]
+        parsed["tests"]["001"]["requestRefs"] = []
+        reviews["tests"]["001"]["evidenceRefs"] = ["test:001:manifest"]
         return parsed, reviews
 
     def _schema(self) -> dict:
@@ -499,6 +586,159 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             set(DIFFERENCE_KINDS),
             set(difference["properties"]["differenceKind"]["enum"]),
         )
+
+    def test_assessment_v7_schema_allows_only_contract_total_combinations(self) -> None:
+        verdict_schema = self._schema()["$defs"]["generalVerdict"]
+
+        combinations = set()
+        maxima = set()
+        for branch in verdict_schema["oneOf"]:
+            properties = branch["properties"]
+            combinations.add(
+                (
+                    properties["totalTests"]["const"],
+                    properties["totalCoreTests"]["const"],
+                    properties["totalEnhancedTests"]["const"],
+                )
+            )
+            maxima.add(
+                (
+                    properties["collectedTests"]["maximum"],
+                    properties["passedTests"]["maximum"],
+                    properties["passedCoreTests"]["maximum"],
+                    properties["passedEnhancedTests"]["maximum"],
+                )
+            )
+        self.assertEqual({(46, 31, 15), (47, 32, 15)}, combinations)
+        self.assertEqual({(46, 46, 31, 15), (47, 47, 32, 15)}, maxima)
+
+    def test_assessment_validator_rejects_contract_total_mismatch(self) -> None:
+        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+        assessment = assemble_assessment(parsed, reviews)
+        mismatched = deepcopy(assessment)
+        mismatched["run"]["log_schema"] = V2_CONTRACT[0]
+        mismatched["run"]["script_version"] = V2_CONTRACT[1]
+
+        self.assertTrue(
+            any(
+                "generalVerdict cannot be derived" in error
+                for error in validate_assessment(mismatched)
+            )
+        )
+
+        malformed_runs = (
+            {},
+            [],
+            {
+                "log_schema": V3_CONTRACT[0],
+                "script_version": V2_CONTRACT[1],
+            },
+            {
+                "log_schema": [V3_CONTRACT[0]],
+                "script_version": V3_CONTRACT[1],
+            },
+        )
+        for run in malformed_runs:
+            with self.subTest(run=run):
+                malformed = deepcopy(assessment)
+                malformed["run"] = run
+                try:
+                    errors = validate_assessment(malformed)
+                except (AttributeError, TypeError) as error:
+                    self.fail(f"invalid assessment run crashed: {error}")
+                self.assertTrue(any("run contract" in error for error in errors), errors)
+
+    def test_html_renders_v3_stream_and_tool_metadata(self) -> None:
+        request = self._v3_request(
+            "test-046-turn-1",
+            self._chat_response("test-046-turn-1"),
+        )
+        request["tool_contract_status"] = "non_conformant"
+        request["tool_contract_errors_json"] = '["tool.call:<invalid>"]'
+
+        html = _request_evidence([request])
+
+        for field in (
+            "transport_outcome",
+            "stream_termination",
+            "stream_end_signal",
+            "tool_contract_status",
+            "tool_loop_turn",
+            "tool_loop_outcome",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, html)
+                self.assertIn(escape(request[field]), html)
+                self.assertLess(html.index(escape(request[field])), html.index("请求输入"))
+        self.assertIn("tool_contract_errors_json", html)
+        self.assertIn("tool.call:&lt;invalid&gt;", html)
+        self.assertGreater(html.index("tool.call:&lt;invalid&gt;"), html.index("请求输出"))
+
+    def test_combined_v7_v3_has_protocol_conformance_and_47_32_15_totals(self) -> None:
+        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        verdict = assessment["capabilitySummary"]["generalVerdict"]
+        self.assertEqual((47, 32, 15), (
+            verdict["totalTests"],
+            verdict["totalCoreTests"],
+            verdict["totalEnhancedTests"],
+        ))
+        self.assertEqual(analyze_protocol_conformance(parsed), assessment["protocolConformance"])
+        self.assertEqual([], validate_assessment(assessment))
+
+    def test_combined_v7_v2_preserves_protocol_conformance_and_46_31_15_totals(self) -> None:
+        parsed, reviews = self._complete_fixture(V2_CONTRACT)
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        verdict = assessment["capabilitySummary"]["generalVerdict"]
+        self.assertEqual((46, 31, 15), (
+            verdict["totalTests"],
+            verdict["totalCoreTests"],
+            verdict["totalEnhancedTests"],
+        ))
+        self.assertEqual(analyze_protocol_conformance(parsed), assessment["protocolConformance"])
+        self.assertEqual([], validate_assessment(assessment))
+
+    def test_v3_tool_turns_appear_once_in_protocol_conformance_with_check_ids(self) -> None:
+        parsed, reviews = self._v3_tool_turn_fixture()
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        results = assessment["protocolConformance"]["results"]
+        self.assertEqual(4, len(results))
+        for check_id in ("046", "047", "048", "049"):
+            request_id = f"test-{check_id}-turn-1"
+            matches = [item for item in results if item["requestId"] == request_id]
+            self.assertEqual(1, len(matches), request_id)
+            self.assertEqual([check_id], matches[0]["checkIds"])
+
+    def test_combined_v7_schema_requires_conformance_and_contract_totals(self) -> None:
+        schema = self._schema()
+
+        self.assertEqual(ASSESSMENT_V7, schema["$id"])
+        self.assertEqual(ASSESSMENT_V7, schema["properties"]["schemaVersion"]["const"])
+        self.assertIn("protocolConformance", schema["required"])
+        summary = schema["$defs"]["capabilitySummary"]
+        self.assertIn("generalVerdict", summary["required"])
+        verdict = schema["$defs"]["generalVerdict"]
+        self.assertEqual(2, len(verdict["oneOf"]))
+
+    def test_combined_v7_validator_rechecks_both_invariant_families(self) -> None:
+        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+        tampered = assemble_assessment(parsed, reviews)
+        tampered["capabilitySummary"]["generalVerdict"]["totalTests"] = 46
+        tampered["protocolConformance"]["summary"]["totalRequests"] += 1
+
+        errors = validate_assessment(tampered)
+
+        self.assertIn(
+            "capabilitySummary generalVerdict does not match test statuses",
+            errors,
+        )
+        self.assertIn("summary totalRequests does not match results", errors)
 
     def test_report_places_official_conformance_before_capability_table(self) -> None:
         parsed, reviews = self._fixture()
