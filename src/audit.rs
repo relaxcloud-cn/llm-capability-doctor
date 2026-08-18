@@ -588,6 +588,26 @@ mod tests {
         assert!(!output.contains("\nforged_reason:"));
     }
 
+    #[test]
+    fn cancelled_request_flushes_without_run_summary() {
+        let (mut audit, directory) = test_audit("");
+        let mut request = sample_request();
+        request.transport_outcome = TransportOutcome::ClientCancelled;
+        request.stream_termination = StreamTermination::ClientCancelled;
+        request.response_body = b"partial".to_vec();
+        request.metrics.size_download = request.response_body.len();
+
+        audit.append_request(&request).expect("append cancellation");
+
+        let output = fs::read_to_string(directory.path().join("audit.log"))
+            .expect("read flushed cancellation evidence");
+        assert!(output.contains("========== REQUEST request-1 BEGIN =========="));
+        assert!(output.contains("transport_outcome: client_cancelled\n"));
+        assert!(output.contains("stream_termination: client_cancelled\n"));
+        assert!(output.contains("cGFydGlhbA=="));
+        assert!(!output.contains("========== RUN SUMMARY =========="));
+    }
+
     fn test_audit(api_key: &str) -> (AuditWriter, tempfile::TempDir) {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("audit.log");

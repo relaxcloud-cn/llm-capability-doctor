@@ -246,7 +246,7 @@ git commit -m "feat: serialize evidence v3 stream outcomes"
 - Modify: `src/http.rs`
 - Modify: `src/audit.rs`
 
-- [ ] **Step 1: Add a raw TCP response fixture.**
+- [x] **Step 1: Add a raw TCP response fixture.**
 
 Create a test-only helper that binds `127.0.0.1:0`, accepts one or more requests, records request head/body, and executes a script made from these actions:
 
@@ -266,7 +266,7 @@ pub struct RecordedRequest {
 
 The helper must support a declared `Content-Length` larger than emitted bytes, delayed headers, delayed body chunks, and a clean complete response. A checkpoint notifies the test after all preceding actions have finished, so cancellation tests wait for a deterministic request/header/partial-body boundary instead of sleeping.
 
-- [ ] **Step 2: Add failing transport tests.**
+- [x] **Step 2: Add failing transport tests.**
 
 Add exactly these tests under `http::tests`:
 
@@ -287,7 +287,7 @@ http_500_beats_a_later_body_disconnect
 
 Also add `audit::tests::cancelled_request_flushes_without_run_summary` to prove an appended cancellation block is durable before `finish` is called.
 
-- [ ] **Step 3: Run the focused tests and observe the classification failures.**
+- [x] **Step 3: Run the focused tests and observe the classification failures.**
 
 ```bash
 cargo test --locked --lib http::tests -- --nocapture
@@ -296,7 +296,7 @@ cargo test --locked --lib audit::tests::cancelled_request_flushes_without_run_su
 
 Expected: tests fail because transport errors all share one legacy path and partial timeout/cancellation evidence is not classified.
 
-- [ ] **Step 4: Implement classification with cancellation priority.**
+- [x] **Step 4: Implement classification with cancellation priority.**
 
 Keep `HttpExecutor::execute` public signature unchanged. Use `biased;` in both cancellation selects. Classify the two fields independently:
 
@@ -330,7 +330,7 @@ HTTP 500 plus body timeout       -> transport timeout, termination timeout
 HTTP 500 plus body disconnect    -> transport upstream_disconnect, termination http_error
 ```
 
-- [ ] **Step 5: Verify and commit transport evidence.**
+- [x] **Step 5: Verify and commit transport evidence.**
 
 ```bash
 cargo test --locked --lib http::tests -- --nocapture

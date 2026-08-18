@@ -7,3 +7,6 @@ pub mod http;
 pub mod protocol;
 pub mod redaction;
 pub mod runner;
+
+#[cfg(test)]
+pub(crate) mod test_support;
