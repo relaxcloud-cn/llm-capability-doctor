@@ -2,7 +2,7 @@
 
 用于客户现场采集大模型接口能力证据，为判断模型是否满足项目要求提供依据。
 Rust CLI 在现场一次性采集完整请求与响应，生成
-`llm-capability-doctor.evidence.v2` 日志；日志带回分析环境后，由 Model Doctor
+`llm-capability-doctor.evidence.v3` 日志；日志带回分析环境后，由 Model Doctor
 Report Skill 逐项判定并生成 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
@@ -17,8 +17,8 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 | 客户机器 | Release 文件 |
 | --- | --- |
-| Linux x86_64 | `model-capability-doctor-v0.10.0-linux-x86_64` |
-| Linux ARM64 | `model-capability-doctor-v0.10.0-linux-arm64` |
+| Linux x86_64 | `model-capability-doctor-v0.11.0-linux-x86_64` |
+| Linux ARM64 | `model-capability-doctor-v0.11.0-linux-arm64` |
 
 Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
 执行权限，不需要创建软链接。
@@ -26,7 +26,7 @@ Release 文件不是压缩包。下载后将对应文件重命名为 `model-capa
 Linux x86_64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-linux-x86_64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.11.0-linux-x86_64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -35,7 +35,7 @@ sha256sum ./model-capability-doctor
 Linux ARM64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-linux-arm64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.11.0-linux-arm64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -92,13 +92,14 @@ export MODEL_API_KEY
 ./model-capability-doctor --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file "$MODEL_DOCTOR_OUTPUT/your-model-model-doctor.log"
 ```
 
-`--url` 必须是完整模型接口地址，CLI 不会自动补充或改写路径。未指定
+`--url` 必须是完整模型接口地址。CLI 保留配置的端点；仅在 Gemini 流式请求中将
+`:generateContent` 规范化为 `:streamGenerateContent`，并设置 `alt=sse`。未指定
 `--log-file` 时，日志写入当前目录下的
 `model-doctor-YYYYMMDD-HHMMSS.log`；Unix 平台会将日志权限设置为 `0600`。
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
 自动使用 Bearer、`api-key`、`x-api-key` 或 `x-goog-api-key` 等对应认证头。
 
-默认执行全部 46 个检测项，不需要也不接受检测模式或检测项 ID 参数。
+默认执行全部 47 个检测项，不需要也不接受检测模式或检测项 ID 参数。
 
 检测结束后清除当前 Shell 中的密钥：
 
@@ -130,7 +131,8 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON 和自包含 HTML
 报告，并对每个已采集检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
 协议响应结构，覆盖成功与错误响应以及流式与非流式响应，并逐项列出差异和固定官方
-参考。CLI 只负责采集证据，不在客户现场给出结论；Skill 也不会自动给出
+参考。工具检测同时验证官方协议结构、调用与结果关联以及完整工具闭环。CLI 只负责
+采集证据，不在客户现场给出结论；Skill 也不会自动给出
 整个项目是否可用的总判定，实施人员应将项目必需项与逐项结果进行对照。
 
 一份结构完整的日志可以直接完成一次报告分析。如果日志版本不匹配、结构校验
@@ -138,7 +140,7 @@ Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON �
 
 ## 检测范围
 
-46 个核心检测项覆盖以下能力：
+47 个检测项覆盖以下能力：
 
 | 领域 | 主要检查内容 |
 | --- | --- |
@@ -147,7 +149,7 @@ Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON �
 | 上下文 | 用约 3.2 万至 51.2 万字符近似测试 8K 至 128K Token 档位，并检查多轮修正记忆。 |
 | 指令与文本 | 精确输出、组合格式、多字段抽取和限长摘要。 |
 | Thinking 与推理 | Thinking 档位、推理 Token、思考与答案分离、流式事件和逻辑推理。 |
-| 工具调用 | 工具选择、参数约束、并行与串行调用、结果忠实性及失败恢复。 |
+| 工具调用 | 官方协议结构、完整工具闭环、工具选择、参数约束、并行与串行调用、结果忠实性及失败恢复。 |
 | 性能与稳定性 | 首字节、完整响应、重复成功率、P50/P95 延迟和并发响应时间。 |
 | 护栏与词汇 | 告警、分诊、漏洞等中英文安全业务词汇是否可正常用于项目任务。 |
 
@@ -170,12 +172,12 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 
 | 参数 | 说明 |
 | --- | --- |
-| `--url URL` | 完整模型接口 URL，不自动改写路径。 |
+| `--url URL` | 完整模型接口 URL；仅 Gemini 流式请求规范化方法后缀并设置 SSE 查询参数。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
-| `--log-file PATH` | 指定 evidence-v2 日志路径。 |
+| `--log-file PATH` | 指定 evidence-v3 日志路径。 |
 | `--timeout SECONDS` | 单次请求超时，默认 120 秒。 |
-| `--list-tests` | 输出完整 46 项目录并退出。 |
+| `--list-tests` | 输出完整 47 项目录并退出。 |
 | `--insecure` | 跳过 HTTPS 证书和主机身份校验。 |
 
 ### `--insecure` 安全提示

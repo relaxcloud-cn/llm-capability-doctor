@@ -438,6 +438,119 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertEqual([], validate_reviews(parsed, reviews))
 
+    def test_skill_documents_v3_contract_and_assessment_v7(self) -> None:
+        skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        for required in (
+            "collector v0.11.0 with `llm-capability-doctor.evidence.v3`",
+            "require all 47 manifests",
+            "llm-capability-doctor.assessment.v7",
+            "every accepted historical and current input",
+            "evidence.v1 and evidence.v2 retain their original assessment rules",
+            "Outside the explicit evidence.v3 checks 046-049 PASS gate",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, skill)
+
+        self.assertNotIn(
+            "This generated `protocolConformance` result never changes a manifest's "
+            "PASS/FAIL or the general capability verdict.",
+            skill,
+        )
+
+    def test_rules_define_strict_v3_tool_loop_checks(self) -> None:
+        rules = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+        heading = "### Evidence v3 tool-loop rules"
+        next_heading = "### 050 大工具目录"
+        self.assertIn(heading, rules)
+        v3_rules_with_tail = rules.partition(heading)[2]
+        self.assertIn(next_heading, v3_rules_with_tail)
+        v3_rules = v3_rules_with_tail.partition(next_heading)[0]
+
+        for required in (
+            "`stream_termination=completed`",
+            "MODEL_DOCTOR_CASE_046_OK",
+            "weather, then time, then `MODEL_DOCTOR_CASE_047_OK`",
+            "`MODEL_DOCTOR_CASE_048_OK` plus the exact `WEATHER_SUNNY`",
+            "exactly one timeout retry",
+            "MODEL_DOCTOR_CASE_049_OK",
+            "every ordered request",
+            "runtime-conformant",
+            "final loop is completed",
+            "associated `protocolConformance` result is `CONSISTENT`",
+            "raw response -> follow-up request correlation",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, v3_rules)
+
+        self.assertIn(
+            "Except for the explicit evidence.v3 checks 046-049 PASS gate",
+            rules,
+        )
+        self.assertNotIn(
+            "Generate `llm-capability-doctor.assessment.v7.protocolConformance` "
+            "deterministically and keep it independent from manifest PASS/FAIL and "
+            "the general capability verdict.",
+            rules,
+        )
+
+    def test_rules_preserve_legacy_contract_interpretation(self) -> None:
+        rules = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+        heading = "### Historical evidence.v1/v2 rules"
+        next_heading = "### Evidence v3 tool-loop rules"
+        self.assertIn(heading, rules)
+        legacy_rules_with_tail = rules.partition(heading)[2]
+        self.assertIn(next_heading, legacy_rules_with_tail)
+        legacy_rules = legacy_rules_with_tail.partition(next_heading)[0]
+
+        for required in (
+            "retain their original evidence and tool-check rules",
+            "46 checks: 31 core and 15 enhanced",
+            "47 checks: 32 core and 15 enhanced",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, legacy_rules)
+
+    def test_rules_do_not_rescore_legacy_047_049_with_v3_final_answer_rules(
+        self,
+    ) -> None:
+        rules = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+        heading = "### Historical evidence.v1/v2 rules"
+        next_heading = "### Evidence v3 tool-loop rules"
+        self.assertIn(heading, rules)
+        legacy_rules_with_tail = rules.partition(heading)[2]
+        self.assertIn(next_heading, legacy_rules_with_tail)
+        legacy_rules = legacy_rules_with_tail.partition(next_heading)[0]
+
+        self.assertIn(
+            "Do not rescore historical 047-049 with evidence.v3 final-answer rules",
+            legacy_rules,
+        )
+
+    def test_readme_describes_011_evidence_v3_and_47_checks(self) -> None:
+        readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
+
+        for required in (
+            "v0.11.0",
+            "`llm-capability-doctor.evidence.v3`",
+            "默认执行全部 47 个检测项",
+            "输出完整 47 项目录",
+            "evidence-v3 日志路径",
+            "官方协议结构",
+            "完整工具闭环",
+            "`:generateContent`",
+            "`:streamGenerateContent`",
+            "`alt=sse`",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, readme)
+
     def test_assessment_validator_independently_rejects_tampered_v3_tool_pass(self) -> None:
         parsed, reviews = self._guard_fixture()
         assessment = assemble_assessment(parsed, reviews)
