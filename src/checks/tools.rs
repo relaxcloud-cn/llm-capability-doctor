@@ -14,7 +14,10 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
 
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{AuthMode, Protocol};
+    use url::Url;
+
+    use crate::protocol::tools::{ToolRequestPhase, validate_tool_request};
+    use crate::protocol::{AuthMode, Protocol, normalize_request_url};
 
     use super::*;
 
@@ -46,5 +49,46 @@ mod tests {
                         == Some("get_weather")
                 }))
         );
+    }
+
+    #[test]
+    fn tool_loop_seeds_validate_for_all_official_protocols() {
+        for id in ["046", "047", "048", "049"] {
+            for protocol in [
+                Protocol::OpenAiChat,
+                Protocol::OpenAiResponses,
+                Protocol::AnthropicMessages,
+                Protocol::GeminiGenerateContent,
+                Protocol::OllamaChat,
+            ] {
+                let context = PlanContext {
+                    protocol,
+                    auth_mode: AuthMode::Bearer,
+                    model: "test-model",
+                };
+                let plan = super::super::plan(id, &context).expect("tool check is supported");
+                let request = &plan.groups[0].requests()[0];
+                let configured = if protocol == Protocol::GeminiGenerateContent {
+                    Url::parse("https://example.com/v1/models/gemini:generateContent?key=test")
+                } else {
+                    Url::parse("https://example.com/v1/chat")
+                }
+                .expect("valid endpoint");
+                let endpoint = normalize_request_url(protocol, &configured, request.stream);
+
+                assert!(request.stream, "{protocol:?} check {id}");
+                assert_eq!(
+                    validate_tool_request(
+                        protocol,
+                        &endpoint,
+                        request.stream,
+                        request.body.json(),
+                        ToolRequestPhase::Initial,
+                    ),
+                    Vec::<String>::new(),
+                    "{protocol:?} check {id}"
+                );
+            }
+        }
     }
 }

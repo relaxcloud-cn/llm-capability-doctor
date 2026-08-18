@@ -797,7 +797,7 @@ git commit -m "feat: parse official Ollama tool streams"
 - Modify: `src/protocol/mod.rs`
 - Modify: `src/checks/tools.rs`
 
-- [ ] **Step 1: Replace legacy follow-up tests with a five-protocol request matrix.**
+- [x] **Step 1: Replace legacy follow-up tests with a five-protocol request matrix.**
 
 Add tests that assert exact initial and follow-up shapes for all protocols:
 
@@ -811,7 +811,7 @@ Ollama: assistant message then role=tool; echo optional call ID as tool_call_id 
 
 Also assert that only Anthropic uses `is_error:true`, Gemini uses `response:{"error":"timeout"}`, and the other three carry `ERROR: timeout` in their documented text/output field.
 
-- [ ] **Step 2: Run the tool protocol tests and confirm legacy-shape failures.**
+- [x] **Step 2: Run the tool protocol tests and confirm legacy-shape failures.**
 
 ```bash
 cargo test --locked --lib protocol::tools::tests -- --nocapture
@@ -819,7 +819,7 @@ cargo test --locked --lib protocol::tools::tests -- --nocapture
 
 Expected: Gemini wrongly requires an ID, Ollama contains OpenAI-only fields, and the legacy builder cannot append more than one follow-up.
 
-- [ ] **Step 3: Implement conversation and validation APIs.**
+- [x] **Step 3: Implement conversation and validation APIs.**
 
 Add these APIs as the replacement path for `build_follow_up` and response
 re-parsing:
@@ -875,7 +875,7 @@ Keep the existing `build_follow_up` symbol as a temporary compatibility adapter
 so the pre-Task-12 runner still compiles. Do not use it in new tests. Task 12
 removes the adapter and its runner import after the state-machine path is live.
 
-- [ ] **Step 4: Verify the five-protocol request matrix.**
+- [x] **Step 4: Verify the five-protocol request matrix.**
 
 ```bash
 cargo test --locked --lib protocol::tools::tests -- --nocapture
@@ -883,7 +883,7 @@ cargo test --locked --lib protocol::tools::tests -- --nocapture
 
 Expected: every generated request validates with zero errors, while one mutation of every required correlation/path produces the expected stable error.
 
-- [ ] **Step 5: Commit official request generation.**
+- [x] **Step 5: Commit official request generation.**
 
 ```bash
 git add src/protocol/tools.rs src/protocol/mod.rs src/checks/tools.rs
