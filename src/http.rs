@@ -270,6 +270,7 @@ mod tests {
     use url::Url;
 
     use super::{HttpExecutor, RequestInput};
+    use crate::protocol::stream::MAX_SSE_RECORD_BYTES;
     use crate::protocol::{AuthMode, Protocol};
 
     struct SseFixture {
@@ -397,6 +398,29 @@ mod tests {
 
         assert_eq!(evidence.metrics.transport_exit_code, 1);
         assert!(evidence.error.contains("error event"), "{}", evidence.error);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_stream_record_is_fully_recorded_before_immediate_failure() {
+        let mut oversized = b"data: ".to_vec();
+        oversized.resize(MAX_SSE_RECORD_BYTES + 1, b'x');
+        let fixture = SseFixture::start(&oversized, true).await;
+        let executor = HttpExecutor::new(Duration::from_secs(10), false).unwrap();
+
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(2),
+            executor.execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("an oversized SSE record should stop before server EOF");
+
+        assert_eq!(evidence.metrics.transport_exit_code, 1);
+        assert_eq!(evidence.response_body, oversized);
+        assert!(evidence.error.contains("1 MiB"), "{}", evidence.error);
         fixture.close().await;
     }
 

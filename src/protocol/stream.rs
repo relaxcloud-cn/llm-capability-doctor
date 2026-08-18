@@ -2,6 +2,10 @@ use serde_json::Value;
 
 use super::Protocol;
 
+pub(crate) const MAX_SSE_RECORD_BYTES: usize = 1024 * 1024;
+const MAX_SSE_DELIMITER_BYTES: usize = 4;
+const SSE_RECORD_DELIMITERS: [&[u8]; 4] = [b"\r\n\r\n", b"\r\n\n", b"\n\r\n", b"\n\n"];
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StreamControl {
     Continue,
@@ -18,6 +22,7 @@ pub(crate) enum StreamState {
 pub(crate) struct StreamInspector {
     protocol: Protocol,
     buffer: Vec<u8>,
+    scan_cursor: usize,
     state: StreamState,
     error_message: Option<&'static str>,
 }
@@ -28,6 +33,7 @@ impl StreamInspector {
         Self {
             protocol,
             buffer: Vec::new(),
+            scan_cursor: 0,
             state: StreamState::Pending,
             error_message: None,
         }
@@ -43,13 +49,22 @@ impl StreamInspector {
         )
     }
 
-    pub(crate) fn push(&mut self, chunk: &[u8]) -> StreamControl {
-        self.buffer.extend_from_slice(chunk);
-        while let Some((record_end, delimiter_len)) = find_record_delimiter(&self.buffer) {
-            let record = self.buffer[..record_end].to_vec();
-            self.buffer.drain(..record_end + delimiter_len);
-            if self.inspect_record(&record) == StreamControl::Stop {
+    pub(crate) fn push(&mut self, mut chunk: &[u8]) -> StreamControl {
+        while !chunk.is_empty() {
+            let available =
+                (MAX_SSE_RECORD_BYTES + MAX_SSE_DELIMITER_BYTES).saturating_sub(self.buffer.len());
+            if available == 0 {
+                return self.stop_oversized_record();
+            }
+            let copied = available.min(chunk.len());
+            self.buffer.extend_from_slice(&chunk[..copied]);
+            chunk = &chunk[copied..];
+
+            if self.inspect_complete_records() == StreamControl::Stop {
                 return StreamControl::Stop;
+            }
+            if self.residual_exceeds_limit() {
+                return self.stop_oversized_record();
             }
         }
         StreamControl::Continue
@@ -60,6 +75,10 @@ impl StreamInspector {
             return StreamControl::Continue;
         }
         let record = std::mem::take(&mut self.buffer);
+        self.scan_cursor = 0;
+        if record.len() > MAX_SSE_RECORD_BYTES {
+            return self.stop_oversized_record();
+        }
         if record.iter().all(|byte| matches!(byte, b'\r' | b'\n')) {
             return StreamControl::Continue;
         }
@@ -72,6 +91,51 @@ impl StreamInspector {
 
     pub(crate) fn error_message(&self) -> Option<&'static str> {
         self.error_message
+    }
+
+    fn inspect_complete_records(&mut self) -> StreamControl {
+        let mut buffer = std::mem::take(&mut self.buffer);
+        let mut record_start = 0;
+        let mut scan_cursor = self.scan_cursor.min(buffer.len());
+
+        while let Some((record_end, delimiter_len)) = find_record_delimiter(&buffer, scan_cursor) {
+            if record_end - record_start > MAX_SSE_RECORD_BYTES {
+                self.scan_cursor = 0;
+                return self.stop_oversized_record();
+            }
+            if self.inspect_record(&buffer[record_start..record_end]) == StreamControl::Stop {
+                self.scan_cursor = 0;
+                return StreamControl::Stop;
+            }
+            record_start = record_end + delimiter_len;
+            scan_cursor = record_start;
+        }
+
+        if record_start > 0 {
+            let remaining = buffer.len() - record_start;
+            buffer.copy_within(record_start.., 0);
+            buffer.truncate(remaining);
+        }
+        self.scan_cursor = buffer.len().saturating_sub(MAX_SSE_DELIMITER_BYTES - 1);
+        self.buffer = buffer;
+        StreamControl::Continue
+    }
+
+    fn residual_exceeds_limit(&self) -> bool {
+        if self.buffer.len() <= MAX_SSE_RECORD_BYTES {
+            return false;
+        }
+        let possible_delimiter = &self.buffer[MAX_SSE_RECORD_BYTES..];
+        !SSE_RECORD_DELIMITERS
+            .iter()
+            .any(|delimiter| delimiter.starts_with(possible_delimiter))
+    }
+
+    fn stop_oversized_record(&mut self) -> StreamControl {
+        self.buffer = Vec::new();
+        self.scan_cursor = 0;
+        self.mark_error("SSE record exceeded the 1 MiB safety limit");
+        StreamControl::Stop
     }
 
     fn inspect_record(&mut self, record: &[u8]) -> StreamControl {
@@ -235,9 +299,9 @@ impl StreamInspector {
     }
 }
 
-fn find_record_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
-    for index in 0..buffer.len() {
-        for delimiter in [b"\r\n\r\n".as_slice(), b"\r\n\n", b"\n\r\n", b"\n\n"] {
+fn find_record_delimiter(buffer: &[u8], start: usize) -> Option<(usize, usize)> {
+    for index in start..buffer.len() {
+        for delimiter in SSE_RECORD_DELIMITERS {
             if buffer[index..].starts_with(delimiter) {
                 return Some((index, delimiter.len()));
             }

@@ -1,4 +1,4 @@
-use super::stream::{StreamControl, StreamInspector, StreamState};
+use super::stream::{MAX_SSE_RECORD_BYTES, StreamControl, StreamInspector, StreamState};
 use crate::protocol::Protocol;
 
 fn fallback_record(protocol: Protocol) -> &'static [u8] {
@@ -26,6 +26,34 @@ fn buffers_lf_records_split_across_chunks() {
         inspector.push(b"reason\":\"stop\"}]}\n"),
         StreamControl::Continue
     );
+    assert_eq!(inspector.state(), StreamState::Pending);
+    assert_eq!(inspector.push(b"\n"), StreamControl::Continue);
+    assert_eq!(inspector.state(), StreamState::Success);
+}
+
+#[test]
+fn oversized_delimiter_free_record_stops_with_an_error() {
+    let mut inspector = StreamInspector::new(Protocol::OpenAiResponses);
+    let mut record = b"data: ".to_vec();
+    record.resize(MAX_SSE_RECORD_BYTES + 1, b'x');
+
+    assert_eq!(inspector.push(&record), StreamControl::Stop);
+    assert_eq!(inspector.state(), StreamState::Error);
+    assert!(
+        inspector
+            .error_message()
+            .is_some_and(|message| message.contains("1 MiB"))
+    );
+}
+
+#[test]
+fn long_record_accepts_a_crlf_delimiter_split_across_chunks() {
+    let mut inspector = StreamInspector::new(Protocol::OpenAiResponses);
+    let padding = "x".repeat(512 * 1024);
+    let partial =
+        format!("data: {{\"padding\":\"{padding}\",\"type\":\"response.completed\"}}\r\n\r");
+
+    assert_eq!(inspector.push(partial.as_bytes()), StreamControl::Continue);
     assert_eq!(inspector.state(), StreamState::Pending);
     assert_eq!(inspector.push(b"\n"), StreamControl::Continue);
     assert_eq!(inspector.state(), StreamState::Success);
