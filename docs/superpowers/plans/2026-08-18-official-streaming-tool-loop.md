@@ -657,7 +657,7 @@ git commit -m "feat: parse official Anthropic tool streams"
 - Modify: `src/protocol/stream/mod.rs`
 - Modify: `src/protocol/mod.rs`
 
-- [ ] **Step 1: Add failing Gemini parser and URL tests.**
+- [x] **Step 1: Add failing Gemini parser and URL tests.**
 
 Test both an optional `functionCall.id` and no ID, structured object
 `functionCall.args`, complete model content with thought signatures,
@@ -673,7 +673,7 @@ Add URL tests for all of these exact transforms:
 non-stream request -> byte-for-byte equivalent URL
 ```
 
-- [ ] **Step 2: Run Gemini tests and confirm failure.**
+- [x] **Step 2: Run Gemini tests and confirm failure.**
 
 ```bash
 cargo test --locked --lib protocol::stream::gemini::tests -- --nocapture
@@ -682,15 +682,15 @@ cargo test --locked --lib protocol::tests::gemini_stream_url_is_normalized -- --
 
 Expected: parser and URL normalizer are absent.
 
-- [ ] **Step 3: Implement official GenerateContent behavior.**
+- [x] **Step 3: Implement official GenerateContent behavior.**
 
-Require a candidates array and type-correct content/parts. Require model content role `model`; validate candidate index as a unique non-negative integer when present. Accumulate candidate model parts without converting structured `args` into string deltas. Preserve the complete model content and thought signatures in `ProtocolHistory::Gemini`. Map a present ID to `ToolCorrelation::Optional(Some(id))`; map its absence to `ToolCorrelation::Optional(None)` and never invent an ID.
+Accept a `promptFeedback`-only response as a legal envelope; without a selected candidate `finishReason`, it remains non-executable and terminates as `missing_terminal_event`. Require type-correct candidate content/parts when present. Treat content role as optional; when present require `model`, and never invent it in `ProtocolHistory::Gemini`. Validate candidate index as a unique non-negative integer when present. Accumulate candidate model parts without converting structured `args` into string deltas. Preserve the complete model content and thought signatures in `ProtocolHistory::Gemini`. `functionCall.args` is optional in the official schema, but this collector's declared tools require object arguments before a call is executable; missing or non-object `args` produces a stable contract error. Map a present ID to `ToolCorrelation::Optional(Some(id))`; map its absence to `ToolCorrelation::Optional(None)` and never invent an ID.
 
 Normal completion requires `finishReason: STOP` plus clean EOF. A different non-empty reason is `model_incomplete` and renders `finishReason:<reason>`; no finish reason is `missing_terminal_event`; an error object is `protocol_error`.
 
 Implement `normalize_request_url(protocol, configured, stream)` for every Gemini stream request, preserving non-`alt` query pairs and setting exactly one `alt=sse` pair.
 
-- [ ] **Step 4: Verify parser and URL behavior.**
+- [x] **Step 4: Verify parser and URL behavior.**
 
 ```bash
 cargo test --locked --lib protocol::stream::gemini::tests -- --nocapture
@@ -699,10 +699,11 @@ cargo test --locked --lib protocol::tests -- --nocapture
 
 Expected: both ID forms are conformant, URL queries are preserved, and non-STOP endings never report completion.
 
-- [ ] **Step 5: Commit Gemini support.**
+- [x] **Step 5: Commit Gemini support.**
 
 ```bash
 git add src/protocol/mod.rs src/protocol/stream/mod.rs src/protocol/stream/gemini.rs src/protocol/fixtures/gemini_*.sse
+git add -f docs/superpowers/plans/2026-08-18-official-streaming-tool-loop.md
 git diff --cached --check
 git commit -m "feat: parse official Gemini tool streams"
 ```

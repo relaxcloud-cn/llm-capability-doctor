@@ -6,6 +6,7 @@ use crate::evidence::{StreamEndSignal, StreamTermination};
 
 pub(crate) mod anthropic;
 pub(crate) mod framing;
+pub(crate) mod gemini;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
 
