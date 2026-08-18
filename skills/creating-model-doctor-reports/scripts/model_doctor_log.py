@@ -6,7 +6,6 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
-import json
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -21,6 +20,7 @@ from model_doctor_contracts import (
     V3_TEST_IDS,
     contract_key,
 )
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
@@ -438,8 +438,8 @@ def _validate_v3_request_metadata(
 
     errors_raw = metadata["tool_contract_errors_json"]
     try:
-        errors = json.loads(errors_raw)
-    except (json.JSONDecodeError, TypeError) as error:
+        errors = strict_json_loads(errors_raw)
+    except JSON_LOAD_ERRORS as error:
         raise ValueError(
             f"Request {request_id} has invalid tool_contract_errors_json"
         ) from error

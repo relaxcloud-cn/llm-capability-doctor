@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from typing import Callable, Mapping, Optional, Sequence
 
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 from model_doctor_protocol_streaming import (
     _Context,
     _JsonFrame,
@@ -574,8 +574,8 @@ def validate_anthropic_stream(ctx: _Context, events: Sequence[_SseEvent]) -> Non
                     fragments = block_state.get("fragments")
                     if isinstance(fragments, list) and fragments:
                         try:
-                            tool_input = json.loads("".join(fragments))
-                        except (TypeError, ValueError):
+                            tool_input = strict_json_loads("".join(fragments))
+                        except JSON_LOAD_ERRORS:
                             tool_input = None
                         if not isinstance(tool_input, dict):
                             ctx.add(

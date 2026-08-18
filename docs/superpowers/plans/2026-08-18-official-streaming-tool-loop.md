@@ -806,7 +806,7 @@ OpenAI Chat: assistant tool_calls then role=tool with matching tool_call_id
 OpenAI Responses: previous_response_id plus function_call_output with matching call_id
 Anthropic: assistant content then one user content array containing all tool_result blocks first
 Gemini: model content then functionResponse with matching name and optional matching ID
-Ollama: assistant message then role=tool; echo optional call ID as tool_call_id when present, otherwise send only tool_name; never add OpenAI-only fields
+Ollama: assistant message then role=tool; echo optional call ID as tool_call_id when present, otherwise send only tool_name; never add OpenAI-only tool_choice, parallel_tool_calls, or strict fields
 ```
 
 Also assert that only Anthropic uses `is_error:true`, Gemini uses `response:{"error":"timeout"}`, and the other three carry `ERROR: timeout` in their documented text/output field.
@@ -1554,8 +1554,9 @@ gemini_generate_content:
 
 ollama_chat:
   accumulated assistant thinking/content/tool_calls
-  -> preserved assistant message plus role=tool, matching tool_name, content;
-     reject OpenAI-only tool_call_id, tool_choice, parallel_tool_calls, strict
+  -> preserved assistant message plus role=tool, matching tool_name, content,
+     and matching optional tool_call_id when present; reject OpenAI-only
+     tool_choice, parallel_tool_calls, strict
 ```
 
 Call this function from `analyze_protocol_conformance`. Attach returned

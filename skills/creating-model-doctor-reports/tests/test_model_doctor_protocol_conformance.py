@@ -947,6 +947,29 @@ class ProtocolConformanceTests(unittest.TestCase):
             },
         }
 
+    def _ollama_tool_loop_with_ids(self) -> dict:
+        parsed = self._tool_loop_parsed("ollama_chat")
+        first = parsed["requests"]["test-046-turn-1"]
+        records = [
+            json.loads(line)
+            for line in first["responseBody"].splitlines()
+            if line.strip()
+        ]
+        calls = records[0]["message"]["tool_calls"]
+        calls[0]["id"] = "call-time"
+        calls[0]["function"]["index"] = 0
+        calls[1]["id"] = "call-weather"
+        calls[1]["function"]["index"] = 1
+        first["responseBody"] = self._encode_ndjson(records)
+
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["messages"][1]["tool_calls"] = copy.deepcopy(calls)
+        body["messages"][2]["tool_call_id"] = "call-time"
+        body["messages"][3]["tool_call_id"] = "call-weather"
+        follow["requestBody"] = json.dumps(body)
+        return parsed
+
     def _v3_pass_gate_fixture(self, protocol: str) -> tuple[dict, dict]:
         parsed = self._tool_loop_parsed(protocol)
         parsed["tests"]["046"].update(
@@ -1080,6 +1103,74 @@ class ProtocolConformanceTests(unittest.TestCase):
                     results["test-046-turn-2"]["differences"],
                 )
 
+    def test_v3_ollama_optional_ids_follow_the_pinned_native_contract(self) -> None:
+        parsed = self._ollama_tool_loop_with_ids()
+        report = analyze_protocol_conformance(parsed)
+        self.assertEqual([], validate_protocol_conformance(report))
+        self.assertTrue(
+            all(result["status"] == "CONSISTENT" for result in report["results"]),
+            report["results"],
+        )
+
+        mismatched = copy.deepcopy(parsed)
+        follow = mismatched["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["messages"][2]["tool_call_id"] = "wrong-call"
+        follow["requestBody"] = json.dumps(body)
+        mismatch_report = analyze_protocol_conformance(mismatched)
+        mismatch_result = next(
+            item for item in mismatch_report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self._assert_difference(
+            mismatch_result,
+            "/requestBody/messages/2/tool_call_id",
+            "CORRELATION",
+        )
+
+        invented = self._tool_loop_parsed("ollama_chat")
+        follow = invented["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["messages"][2]["tool_call_id"] = "invented-call"
+        follow["requestBody"] = json.dumps(body)
+        invented_report = analyze_protocol_conformance(invented)
+        invented_result = next(
+            item for item in invented_report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self._assert_difference(
+            invented_result,
+            "/requestBody/messages/2/tool_call_id",
+            "UNEXPECTED_FIELD",
+        )
+
+    def test_v3_ollama_accepts_native_id_and_index_but_rejects_call_type(self) -> None:
+        parsed = self._ollama_tool_loop_with_ids()
+        first = parsed["requests"]["test-046-turn-1"]
+        records = [
+            json.loads(line)
+            for line in first["responseBody"].splitlines()
+            if line.strip()
+        ]
+        records[0]["message"]["tool_calls"][0]["type"] = "function"
+        first["responseBody"] = self._encode_ndjson(records)
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["messages"][1]["tool_calls"][0]["type"] = "function"
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+        self.assertEqual([], validate_protocol_conformance(report))
+        first_result = next(
+            item for item in report["results"]
+            if item["requestId"] == "test-046-turn-1"
+        )
+        self._assert_difference(
+            first_result,
+            "/records/0/message/tool_calls/0/type",
+            "UNEXPECTED_FIELD",
+        )
+
     def test_v3_tool_transition_matrix_rejects_all_five_correlation_mutations(self) -> None:
         mutations = {
             "openai_chat": lambda body: body["messages"][-1].__setitem__(
@@ -1179,6 +1270,160 @@ class ProtocolConformanceTests(unittest.TestCase):
                     any("official protocol" in error for error in errors),
                     errors,
                 )
+
+    def test_v3_pass_gate_rejects_invalid_provider_native_message_unions(self) -> None:
+        cases = (
+            ("openai_chat", "user-object"),
+            ("ollama_chat", "user-object"),
+            ("anthropic_messages", "tool-result-object"),
+            ("gemini_generate_content", "empty-part"),
+        )
+        for protocol, mutation in cases:
+            with self.subTest(protocol=protocol, mutation=mutation):
+                parsed, reviews = self._v3_pass_gate_fixture(protocol)
+                request_id = (
+                    "test-046-turn-2"
+                    if mutation == "tool-result-object"
+                    else "test-046-turn-1"
+                )
+                request = parsed["requests"][request_id]
+                body = json.loads(request["requestBody"])
+                if mutation == "user-object":
+                    body["messages"][0]["content"] = {"invalid": True}
+                elif mutation == "tool-result-object":
+                    body["messages"][-1]["content"][0]["content"] = {
+                        "invalid": True
+                    }
+                else:
+                    body["contents"][0]["parts"].append({})
+                request["requestBody"] = json.dumps(body)
+
+                errors = validate_reviews(parsed, reviews)
+                self.assertTrue(
+                    any("official protocol" in error for error in errors),
+                    errors,
+                )
+
+    def test_v3_pass_gate_rejects_invalid_required_and_control_fields(self) -> None:
+        cases = (
+            ("anthropic_messages", "missing-max-tokens"),
+            ("anthropic_messages", "boolean-max-tokens"),
+            ("anthropic_messages", "zero-max-tokens"),
+            ("openai_chat", "numeric-parallel"),
+            ("openai_responses", "numeric-parallel"),
+            ("openai_chat", "boolean-tool-choice"),
+            ("openai_responses", "boolean-tool-choice"),
+        )
+        for protocol, mutation in cases:
+            with self.subTest(protocol=protocol, mutation=mutation):
+                parsed, reviews = self._v3_pass_gate_fixture(protocol)
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                if mutation == "missing-max-tokens":
+                    del body["max_tokens"]
+                elif mutation == "boolean-max-tokens":
+                    body["max_tokens"] = True
+                elif mutation == "zero-max-tokens":
+                    body["max_tokens"] = 0
+                elif mutation == "numeric-parallel":
+                    body["parallel_tool_calls"] = 1
+                else:
+                    body["tool_choice"] = True
+                request["requestBody"] = json.dumps(body)
+
+                errors = validate_reviews(parsed, reviews)
+                self.assertTrue(
+                    any("official protocol" in error for error in errors),
+                    errors,
+                )
+
+    def test_v3_json_decoding_rejects_nonfinite_constants(self) -> None:
+        parsed, reviews = self._v3_pass_gate_fixture("openai_chat")
+        for request in parsed["requests"].values():
+            body = json.loads(request["requestBody"])
+            body["nonfinite"] = float("inf")
+            request["requestBody"] = json.dumps(body)
+
+        errors = validate_reviews(parsed, reviews)
+        self.assertTrue(
+            any("official protocol" in error for error in errors),
+            errors,
+        )
+
+    def test_v3_json_decoding_is_total_for_deep_request_sse_and_ndjson(self) -> None:
+        deep_json = "[" * 1200 + "0" + "]" * 1200
+        cases = (
+            ("openai_chat", "request"),
+            ("openai_chat", "sse"),
+            ("ollama_chat", "ndjson"),
+        )
+        for protocol, carrier in cases:
+            with self.subTest(protocol=protocol, carrier=carrier):
+                parsed = self._tool_loop_parsed(protocol)
+                first = parsed["requests"]["test-046-turn-1"]
+                if carrier == "request":
+                    first["requestBody"] = deep_json
+                elif carrier == "sse":
+                    first["responseBody"] = f"data: {deep_json}\n\n"
+                else:
+                    first["responseBody"] = f"{deep_json}\n"
+
+                report = analyze_protocol_conformance(parsed)
+                self.assertEqual([], validate_protocol_conformance(report))
+                self.assertTrue(
+                    any(result["status"] == "DIFFERENT" for result in report["results"]),
+                    report["results"],
+                )
+
+    def test_v3_malformed_protocol_differences_keep_result_ownership(self) -> None:
+        for mutation in ("missing", "null", "boolean", "request-null"):
+            with self.subTest(mutation=mutation):
+                parsed = self._tool_loop_parsed("openai_chat")
+                request_id = "test-046-turn-1"
+                if mutation == "request-null":
+                    parsed["requests"][request_id] = None
+                elif mutation == "missing":
+                    del parsed["requests"][request_id]["protocol"]
+                elif mutation == "null":
+                    parsed["requests"][request_id]["protocol"] = None
+                else:
+                    parsed["requests"][request_id]["protocol"] = True
+
+                report = analyze_protocol_conformance(parsed)
+                self.assertEqual([], validate_protocol_conformance(report))
+                result = next(
+                    item for item in report["results"]
+                    if item["requestId"] == request_id
+                )
+                self.assertTrue(result["differences"], result)
+                self.assertTrue(
+                    all(
+                        difference["protocol"] == result["protocol"]
+                        for difference in result["differences"]
+                    ),
+                    result,
+                )
+
+    def test_v3_transition_deduplicates_diagnostics_by_identity(self) -> None:
+        parsed = self._tool_loop_parsed("openai_chat")
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["stream"] = False
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+        self.assertEqual([], validate_protocol_conformance(report))
+        result = next(
+            item for item in report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        matching = [
+            difference
+            for difference in result["differences"]
+            if difference["location"] == "/requestBody/stream"
+            and difference["differenceKind"] == "VALUE_MISMATCH"
+        ]
+        self.assertEqual(1, len(matching), result["differences"])
 
     def test_v3_tool_transition_rejects_adjacent_protocol_switch(self) -> None:
         parsed = self._tool_loop_parsed("openai_chat")

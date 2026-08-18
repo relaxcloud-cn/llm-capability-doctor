@@ -7,10 +7,10 @@ an assessment.
 
 from __future__ import annotations
 
-import json
 from collections import Counter, defaultdict
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 from model_doctor_tool_loop_conformance import validate_tool_loop_transitions
 
 
@@ -86,13 +86,14 @@ _BASELINES = (
     },
     {
         "protocol": "ollama_chat",
-        "officialVersion": "OpenAPI commit d67ad83426633195089509347ffd4fe795120198",
+        "officialVersion": "API types commit d67ad83426633195089509347ffd4fe795120198",
         "referenceDate": BASELINE_DATE,
         "sourceUrl": (
             "https://github.com/ollama/ollama/blob/"
-            "d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml"
+            "d67ad83426633195089509347ffd4fe795120198/api/types.go"
         ),
         "supportingReferences": [
+            "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml",
             "https://docs.ollama.com/api/chat",
             "https://docs.ollama.com/api/errors",
         ],
@@ -481,8 +482,8 @@ class _ChatValidator:
             )
             return
         try:
-            parsed = json.loads(value)
-        except (TypeError, ValueError):
+            parsed = strict_json_loads(value)
+        except JSON_LOAD_ERRORS:
             self.add(
                 location,
                 "INVALID_JSON",
@@ -1887,8 +1888,8 @@ class _GeminiValidator(_ChatValidator):
         decoded = request_body
         if isinstance(request_body, str):
             try:
-                decoded = json.loads(request_body)
-            except (TypeError, ValueError):
+                decoded = strict_json_loads(request_body)
+            except JSON_LOAD_ERRORS:
                 return set(), False
         if not isinstance(decoded, dict):
             return set(), False
@@ -2478,9 +2479,11 @@ class _OllamaValidator(_ChatValidator):
                     self.string(image, f"{images_path}/{index}")
 
     def validate_tool_call(self, value: object, location: str) -> None:
-        if not self.object_shape(value, location, ("function",)):
+        if not self.object_shape(value, location, ("function",), ("id",)):
             return
         assert isinstance(value, dict)
+        if "id" in value:
+            self.string(value["id"], _path(location, "id"))
         if "function" not in value:
             return
 
@@ -2490,7 +2493,7 @@ class _OllamaValidator(_ChatValidator):
             function,
             function_path,
             ("name",),
-            ("description", "arguments"),
+            ("description", "arguments", "index"),
         ):
             return
         assert isinstance(function, dict)
@@ -2504,6 +2507,8 @@ class _OllamaValidator(_ChatValidator):
                 "object",
                 lambda item: isinstance(item, dict),
             )
+        if "index" in function:
+            self.integer(function["index"], _path(function_path, "index"))
 
     def validate_logprob(self, value: object, location: str) -> None:
         if not self.object_shape(
@@ -2769,8 +2774,8 @@ def _analyze_request(
                     )
                 )
         try:
-            decoded = json.loads(response_body)
-        except (TypeError, ValueError):
+            decoded = strict_json_loads(response_body)
+        except JSON_LOAD_ERRORS:
             differences.append(
                 _difference(
                     request_id,

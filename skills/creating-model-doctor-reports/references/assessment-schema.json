@@ -363,14 +363,15 @@
               "properties": {
                 "protocol": {"const": "ollama_chat"},
                 "officialVersion": {
-                  "const": "OpenAPI commit d67ad83426633195089509347ffd4fe795120198"
+                  "const": "API types commit d67ad83426633195089509347ffd4fe795120198"
                 },
                 "referenceDate": {"const": "2026-08-18"},
                 "sourceUrl": {
-                  "const": "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml"
+                  "const": "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/api/types.go"
                 },
                 "supportingReferences": {
                   "const": [
+                    "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml",
                     "https://docs.ollama.com/api/chat",
                     "https://docs.ollama.com/api/errors"
                   ]

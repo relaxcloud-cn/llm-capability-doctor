@@ -256,10 +256,11 @@ fixed JSON field order.
 - Accumulate assistant `thinking`, `content`, and
   `message.tool_calls[].function` values as documented.
 - Require each function call's name and object arguments. Validate `index` when
-  it is present; otherwise use array order. Ollama does not require an
-  OpenAI-style call ID, so conformance must not invent one.
+  it is present; otherwise use array order. Preserve Ollama's optional call ID;
+  conformance must not invent one when the model omits it.
 - Send the accumulated assistant message followed by `role: "tool"`, matching
-  `tool_name`, and `content`.
+  `tool_name`, `content`, and the matching optional `tool_call_id` when the
+  assistant call supplied one.
 - Require the final NDJSON object to contain `done: true`.
 - Record `done_reason` when present. `stop` is normal; a truncating reason such
   as `length` is model-incomplete. Absence remains valid for Ollama versions
@@ -568,7 +569,8 @@ The implementation snapshot uses the official documentation available on
   <https://ai.google.dev/api/generate-content>
 - Ollama tool calling and streaming:
   <https://docs.ollama.com/capabilities/tool-calling> and
-  <https://docs.ollama.com/api/streaming>
+  <https://docs.ollama.com/api/streaming>; pinned native message and tool-call
+  types: <https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/api/types.go>
 
 ## Security and Evidence Boundaries
 

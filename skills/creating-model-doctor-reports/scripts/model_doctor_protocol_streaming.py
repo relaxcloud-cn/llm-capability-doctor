@@ -8,9 +8,10 @@ stream modules can share one result format without creating import cycles.
 from __future__ import annotations
 
 import inspect
-import json
 from dataclasses import dataclass
 from typing import Callable, List, Optional
+
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 
 
 @dataclass(frozen=True)
@@ -237,8 +238,8 @@ def _parse_ndjson(ctx: _Context) -> List[_JsonFrame]:
             frames.append(_JsonFrame(index=index, value=None))
             continue
         try:
-            value = json.loads(line)
-        except (TypeError, ValueError):
+            value = strict_json_loads(line)
+        except JSON_LOAD_ERRORS:
             ctx.add(
                 f"/records/{index}",
                 "INVALID_JSON",
@@ -273,8 +274,8 @@ def _decode_event_json(
             )
         return None
     try:
-        decoded = json.loads(event.data)
-    except (TypeError, ValueError):
+        decoded = strict_json_loads(event.data)
+    except JSON_LOAD_ERRORS:
         ctx.add(
             f"/events/{event.index}/data",
             "INVALID_JSON",
@@ -546,8 +547,8 @@ def _chat_choice_count(request_body: object) -> Optional[int]:
     decoded = request_body
     if isinstance(decoded, str):
         try:
-            decoded = json.loads(decoded)
-        except (TypeError, ValueError):
+            decoded = strict_json_loads(decoded)
+        except JSON_LOAD_ERRORS:
             return None
     if not isinstance(decoded, dict):
         return None
@@ -614,8 +615,8 @@ def validate_stream_response(
     if not 200 <= evidence.http_status <= 299:
         _validate_content_type(ctx, "application/json")
         try:
-            decoded = json.loads(evidence.response_body)
-        except (TypeError, ValueError):
+            decoded = strict_json_loads(evidence.response_body)
+        except JSON_LOAD_ERRORS:
             ctx.add(
                 "/responseBody",
                 "INVALID_JSON",

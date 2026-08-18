@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import json
 from typing import Mapping, Optional
 
 from model_doctor_contracts import V3_CONTRACT, contract_key
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 
 
 V3_TOOL_TEST_IDS = frozenset({"046", "047", "048", "049"})
@@ -27,7 +27,7 @@ _OFFICIAL_REFERENCES = {
     ),
     "ollama_chat": (
         "https://github.com/ollama/ollama/blob/"
-        "d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml"
+        "d67ad83426633195089509347ffd4fe795120198/api/types.go"
     ),
 }
 
@@ -64,7 +64,7 @@ def _difference(
     location: str,
     kind: str,
     expected: str,
-) -> dict[str, str]:
+) -> dict[str, object]:
     actual = {
         "CORRELATION": "correlated values differ",
         "MISSING_FIELD": "missing",
@@ -74,13 +74,13 @@ def _difference(
     }[kind]
     return {
         "requestId": request_id,
-        "protocol": protocol or "unknown",
+        "protocol": protocol,
         "location": location,
         "differenceKind": kind,
         "expected": expected,
         "actual": actual,
         "officialReference": _OFFICIAL_REFERENCES.get(
-            protocol or "", "https://www.rfc-editor.org/rfc/rfc8259"
+            protocol, "https://www.rfc-editor.org/rfc/rfc8259"
         ),
     }
 
@@ -89,7 +89,7 @@ class _Audit:
     def __init__(self, request_id: str, protocol: Optional[str]) -> None:
         self.request_id = request_id
         self.protocol = protocol
-        self.differences: list[dict[str, str]] = []
+        self.differences: list[dict[str, object]] = []
 
     def add(self, location: str, kind: str, expected: str) -> None:
         self.differences.append(
@@ -149,8 +149,8 @@ def _decode_body(request: object, audit: _Audit) -> Optional[dict]:
         audit.add("/requestBody", "TYPE_MISMATCH", "JSON object encoded as a string")
         return None
     try:
-        value = json.loads(raw)
-    except (TypeError, ValueError):
+        value = strict_json_loads(raw)
+    except JSON_LOAD_ERRORS:
         audit.add("/requestBody", "TYPE_MISMATCH", "valid JSON object")
         return None
     return audit.require_mapping(value, "/requestBody")
@@ -380,6 +380,39 @@ def _validate_anthropic_content(value: object, location: str, audit: _Audit) -> 
                 )
             if "is_error" in part and not isinstance(part["is_error"], bool):
                 audit.add(f"{path}/is_error", "TYPE_MISMATCH", "boolean")
+            if "content" in part:
+                result_content = part["content"]
+                if not isinstance(result_content, (str, list)):
+                    audit.add(
+                        f"{path}/content",
+                        "TYPE_MISMATCH",
+                        "string or provider-native content block array",
+                    )
+                elif isinstance(result_content, list):
+                    allowed_result_types = {"text", "image", "document", "search_result"}
+                    for content_index, content_value in enumerate(result_content):
+                        content_path = f"{path}/content/{content_index}"
+                        content_block = audit.require_mapping(content_value, content_path)
+                        if content_block is None:
+                            continue
+                        content_type = content_block.get("type")
+                        if content_type not in allowed_result_types:
+                            field_kind = (
+                                "MISSING_FIELD"
+                                if "type" not in content_block
+                                else "VALUE_MISMATCH"
+                            )
+                            audit.add(
+                                f"{content_path}/type",
+                                field_kind,
+                                "provider-native tool-result content block type",
+                            )
+                        elif content_type == "text":
+                            if audit.required(content_block, "text", content_path):
+                                audit.require_string(
+                                    content_block["text"],
+                                    f"{content_path}/text",
+                                )
         elif kind == "text":
             if audit.required(part, "text", path):
                 audit.require_string(part["text"], f"{path}/text")
@@ -425,18 +458,35 @@ def _validate_messages(protocol: str, body: dict, audit: _Audit) -> None:
                     f"{path}/tool_calls",
                     audit,
                 )
+        if protocol == "openai_chat" and role in {"system", "user"}:
+            content = message.get("content")
+            if isinstance(content, str):
+                pass
+            elif isinstance(content, list):
+                for part_index, part_value in enumerate(content):
+                    part_path = f"{path}/content/{part_index}"
+                    part = audit.require_mapping(part_value, part_path)
+                    if part is None:
+                        continue
+                    if not isinstance(part.get("type"), str):
+                        kind = "MISSING_FIELD" if "type" not in part else "TYPE_MISMATCH"
+                        audit.add(f"{part_path}/type", kind, "content-part type string")
+            else:
+                audit.add(f"{path}/content", "TYPE_MISMATCH", "string or content-part array")
         if protocol == "ollama_chat":
             if "tool_call_id" in message:
-                audit.add(
+                audit.require_string(
+                    message["tool_call_id"],
                     f"{path}/tool_call_id",
-                    "UNEXPECTED_FIELD",
-                    "tool_name correlation without OpenAI tool_call_id",
+                    non_empty=True,
                 )
             if role == "tool":
                 if audit.required(message, "tool_name", path):
                     audit.require_string(message["tool_name"], f"{path}/tool_name", non_empty=True)
                 if audit.required(message, "content", path):
                     audit.require_string(message["content"], f"{path}/content")
+            elif audit.required(message, "content", path):
+                audit.require_string(message["content"], f"{path}/content")
             if role == "assistant" and "tool_calls" in message:
                 _validate_history_tool_calls(
                     protocol,
@@ -492,6 +542,25 @@ def _validate_contents(body: dict, audit: _Audit) -> None:
                     f"{part_path}/thoughtSignature",
                     non_empty=True,
                 )
+            if "thought" in part and not isinstance(part["thought"], bool):
+                audit.add(f"{part_path}/thought", "TYPE_MISMATCH", "boolean")
+            payload_fields = {
+                "text",
+                "inlineData",
+                "functionCall",
+                "functionResponse",
+                "fileData",
+                "executableCode",
+                "codeExecutionResult",
+            }
+            if not payload_fields.intersection(part):
+                audit.add(
+                    part_path,
+                    "MISSING_FIELD",
+                    "one provider-native Part payload",
+                )
+            if "text" in part:
+                audit.require_string(part["text"], f"{part_path}/text")
             function_call = part.get("functionCall")
             if function_call is not None:
                 call_path = f"{part_path}/functionCall"
@@ -548,9 +617,46 @@ def _validate_responses_input(value: object, audit: _Audit) -> None:
 def _non_empty_content(value: object) -> bool:
     if isinstance(value, str):
         return bool(value.strip())
-    if isinstance(value, (list, dict)):
+    if isinstance(value, list):
         return bool(value)
     return False
+
+
+def _validate_openai_controls(body: dict, audit: _Audit) -> None:
+    if "parallel_tool_calls" in body and not isinstance(
+        body["parallel_tool_calls"], bool
+    ):
+        audit.add(
+            "/requestBody/parallel_tool_calls",
+            "TYPE_MISMATCH",
+            "boolean",
+        )
+    if "tool_choice" in body:
+        choice = body["tool_choice"]
+        if isinstance(choice, str):
+            if choice not in {"none", "auto", "required"}:
+                audit.add(
+                    "/requestBody/tool_choice",
+                    "VALUE_MISMATCH",
+                    '"none", "auto", "required", or provider-native object',
+                )
+        elif not isinstance(choice, dict):
+            audit.add(
+                "/requestBody/tool_choice",
+                "TYPE_MISMATCH",
+                "string or provider-native object",
+            )
+
+
+def _validate_anthropic_controls(body: dict, audit: _Audit) -> None:
+    if "max_tokens" not in body:
+        audit.add("/requestBody/max_tokens", "MISSING_FIELD", "positive integer")
+        return
+    value = body["max_tokens"]
+    if not isinstance(value, int) or isinstance(value, bool):
+        audit.add("/requestBody/max_tokens", "TYPE_MISMATCH", "positive integer")
+    elif value <= 0:
+        audit.add("/requestBody/max_tokens", "VALUE_MISMATCH", "positive integer")
 
 
 def _validate_initial_prompt(protocol: str, body: dict, audit: _Audit) -> None:
@@ -640,9 +746,11 @@ def _validate_request_body(
             audit.add("/requestBody/stream", kind, "true")
         if protocol == "openai_chat":
             audit.reject(body, {"contents", "input", "previous_response_id"}, "/requestBody")
+            _validate_openai_controls(body, audit)
             _validate_messages(protocol, body, audit)
         elif protocol == "openai_responses":
             audit.reject(body, {"contents", "messages"}, "/requestBody")
+            _validate_openai_controls(body, audit)
             if body.get("store") is not True:
                 kind = "MISSING_FIELD" if "store" not in body else "VALUE_MISMATCH"
                 audit.add("/requestBody/store", kind, "true")
@@ -656,6 +764,7 @@ def _validate_request_body(
                 {"contents", "input", "parallel_tool_calls", "previous_response_id", "store"},
                 "/requestBody",
             )
+            _validate_anthropic_controls(body, audit)
             _validate_messages(protocol, body, audit)
         elif protocol == "ollama_chat":
             audit.reject(
@@ -700,8 +809,8 @@ def _sse_payloads(raw: object) -> list[tuple[Optional[str], dict]]:
         if not joined or joined == "[DONE]":
             continue
         try:
-            decoded = json.loads(joined)
-        except (TypeError, ValueError):
+            decoded = strict_json_loads(joined)
+        except JSON_LOAD_ERRORS:
             continue
         if isinstance(decoded, dict):
             payloads.append((event, decoded))
@@ -716,8 +825,8 @@ def _ndjson_payloads(raw: object) -> list[dict]:
         if not line.strip():
             continue
         try:
-            decoded = json.loads(line)
-        except (TypeError, ValueError):
+            decoded = strict_json_loads(line)
+        except JSON_LOAD_ERRORS:
             continue
         if isinstance(decoded, dict):
             payloads.append(decoded)
@@ -825,8 +934,8 @@ def _anthropic_turn(raw: object) -> Optional[tuple[list[dict], list[dict]]]:
             continue
         if json_fragments.get(index):
             try:
-                block["input"] = json.loads(json_fragments[index])
-            except (TypeError, ValueError):
+                block["input"] = strict_json_loads(json_fragments[index])
+            except JSON_LOAD_ERRORS:
                 pass
         calls.append({"id": block.get("id"), "name": block.get("name")})
     return (history, calls) if calls else None
@@ -1127,22 +1236,50 @@ def _validate_transition(
             item = audit.require_mapping(result, path)
             if item is None:
                 continue
-            if "tool_call_id" in item:
-                audit.add(f"{path}/tool_call_id", "UNEXPECTED_FIELD", "native Ollama tool_name correlation")
+            call_id = call.get("id")
+            if isinstance(call_id, str) and call_id:
+                if "tool_call_id" in item:
+                    _correlate(
+                        item.get("tool_call_id"),
+                        call_id,
+                        f"{path}/tool_call_id",
+                        audit,
+                        "matching optional streamed tool call ID",
+                    )
+            elif "tool_call_id" in item:
+                audit.add(
+                    f"{path}/tool_call_id",
+                    "UNEXPECTED_FIELD",
+                    "absent when the streamed call has no ID",
+                )
             _correlate(item.get("tool_name"), call.get("name"), f"{path}/tool_name", audit, "matching streamed function name")
             if audit.required(item, "content", path):
                 audit.require_string(item["content"], f"{path}/content")
 
 
-def _append_unique(target: list[dict], additions: list[dict]) -> None:
+def _difference_identity(difference: Mapping[str, object]) -> tuple[object, ...]:
+    return tuple(
+        difference.get(field)
+        for field in ("requestId", "protocol", "location", "differenceKind")
+    )
+
+
+def _append_unique(
+    target: list[dict[str, object]],
+    additions: list[dict[str, object]],
+) -> None:
+    identities = {_difference_identity(difference) for difference in target}
     for difference in additions:
-        if difference not in target:
-            target.append(difference)
+        identity = _difference_identity(difference)
+        if identity in identities:
+            continue
+        target.append(difference)
+        identities.add(identity)
 
 
 def validate_tool_loop_transitions(
     parsed: Mapping[str, object],
-) -> dict[str, list[dict[str, str]]]:
+) -> dict[str, list[dict[str, object]]]:
     """Return bounded official-shape differences keyed by follow-up request ID."""
 
     try:
@@ -1154,7 +1291,7 @@ def validate_tool_loop_transitions(
     requests = parsed.get("requests")
     if not isinstance(tests, dict) or not isinstance(requests, dict):
         return {}
-    differences: dict[str, list[dict[str, str]]] = {}
+    differences: dict[str, list[dict[str, object]]] = {}
     for test_id in sorted(V3_TOOL_TEST_IDS):
         manifest = tests.get(test_id)
         if not isinstance(manifest, dict):
