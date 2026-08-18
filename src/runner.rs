@@ -14,9 +14,16 @@ use crate::checks::{
     Body, CheckError, ManifestRefs, PlanContext, PlannedRequest, RequestGroup, plan,
 };
 use crate::cli::Config;
+use crate::evidence::{StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome};
 use crate::http::{HttpExecutor, RequestInput};
-use crate::protocol::tools::build_follow_up;
-use crate::protocol::{AuthMode, PROBE_CANDIDATES, Protocol, basic_request, matches_response};
+use crate::protocol::stream::{StreamParseResult, parse_stream};
+use crate::protocol::tool_loop::{LoopDecision, ToolLoopState};
+use crate::protocol::tools::{
+    ToolConversation, ToolProtocolError, ToolRequestPhase, validate_tool_request,
+};
+use crate::protocol::{
+    AuthMode, PROBE_CANDIDATES, Protocol, basic_request, matches_response, normalize_request_url,
+};
 use crate::redaction::{Redactor, mask_api_key};
 
 pub struct RunOutcome {
@@ -62,6 +69,12 @@ pub async fn run(
         protocol_probe_refs: Vec::new(),
         selected_probe_ref: None,
         repeat_refs: Vec::new(),
+        #[cfg(test)]
+        turn_hook: None,
+        #[cfg(test)]
+        forced_follow_up_errors: None,
+        #[cfg(test)]
+        force_invalid_follow_up: false,
     };
     runner.execute().await?;
     let duration = started.elapsed();
@@ -86,9 +99,178 @@ struct Runner {
     protocol_probe_refs: Vec<String>,
     selected_probe_ref: Option<String>,
     repeat_refs: Vec<String>,
+    #[cfg(test)]
+    turn_hook: Option<TurnHook>,
+    #[cfg(test)]
+    forced_follow_up_errors: Option<Vec<String>>,
+    #[cfg(test)]
+    force_invalid_follow_up: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct TurnHook {
+    turn_committed: Arc<tokio::sync::Notify>,
+    resume: Arc<tokio::sync::Notify>,
 }
 
 impl Runner {
+    async fn execute_tool_loop(
+        &mut self,
+        test: &'static TestCase,
+        initial: PlannedRequest,
+    ) -> Result<Vec<RequestEvidence>, RunnerError> {
+        let initial_body = initial.body.json().clone();
+        let mut outgoing_errors = validate_tool_request(
+            initial.protocol,
+            &normalize_request_url(initial.protocol, &self.config.url, initial.stream),
+            initial.stream,
+            &initial_body,
+            ToolRequestPhase::Initial,
+        );
+        let mut conversation = match ToolConversation::from_initial(initial.protocol, initial_body)
+        {
+            Ok(conversation) => Some(conversation),
+            Err(error) => {
+                merge_errors(&mut outgoing_errors, tool_protocol_errors(&error));
+                None
+            }
+        };
+        let mut state = ToolLoopState::new(test.id).expect("tool-loop checks are allowlisted");
+        let loop_protocol = initial.protocol;
+        let loop_auth_mode = initial.auth_mode;
+        let mut current = initial;
+        let mut collected = Vec::new();
+
+        for turn_number in 1..=crate::protocol::tool_loop::MAX_ASSISTANT_TURNS {
+            self.ensure_not_cancelled()?;
+            current.id = format!("test-{}-turn-{turn_number}", test.id);
+            let input = self.request_input(current);
+            let mut evidence = self
+                .http
+                .execute(input, self.cancellation.child_token())
+                .await;
+            evidence.tool_loop_turn = turn_number;
+
+            let parsed = parse_stream_evidence(&mut evidence).await;
+            let mut contract_errors = std::mem::take(&mut outgoing_errors);
+            let transport_failure = evidence.transport_outcome != TransportOutcome::CompletedEof
+                || evidence.stream_termination == StreamTermination::HttpError;
+            if let Some(parsed) = parsed.as_ref() {
+                merge_errors(&mut contract_errors, parsed.contract_errors.clone());
+            } else {
+                merge_errors(&mut contract_errors, vec!["response.unavailable:/".into()]);
+            }
+            if !transport_failure && evidence.stream_termination != StreamTermination::Completed {
+                merge_errors(
+                    &mut contract_errors,
+                    vec![terminal_contract_error(&evidence.stream_termination)],
+                );
+            }
+
+            let assistant_turn = parsed.and_then(|parsed| parsed.assistant_turn);
+            if !transport_failure && assistant_turn.is_none() {
+                merge_errors(&mut contract_errors, vec!["response.unavailable:/".into()]);
+            }
+
+            let mut next = None;
+            if transport_failure {
+                evidence.tool_contract_status = ToolContractStatus::NonConformant;
+                evidence.tool_loop_outcome = ToolLoopOutcome::TransportFailure;
+            } else if evidence.stream_termination != StreamTermination::Completed
+                || !contract_errors.is_empty()
+                || assistant_turn.is_none()
+            {
+                evidence.tool_contract_status = ToolContractStatus::NonConformant;
+                evidence.tool_loop_outcome = ToolLoopOutcome::InvalidTurn;
+            } else {
+                evidence.tool_contract_status = ToolContractStatus::Conformant;
+                let assistant_turn = assistant_turn.expect("checked above");
+                match state.advance(&assistant_turn) {
+                    LoopDecision::Complete => {
+                        evidence.tool_loop_outcome = ToolLoopOutcome::Completed;
+                    }
+                    LoopDecision::Continue(results) => {
+                        let built = match self.take_forced_follow_up_error() {
+                            Some(error) => Err(error),
+                            None => conversation
+                                .as_mut()
+                                .ok_or(ToolProtocolError::UnsupportedProtocol)
+                                .and_then(|conversation| {
+                                    conversation.append_follow_up(&assistant_turn, &results)
+                                }),
+                        };
+                        match built {
+                            Ok(mut spec) => {
+                                self.maybe_invalidate_follow_up(&mut spec);
+                                let endpoint = normalize_request_url(
+                                    loop_protocol,
+                                    &self.config.url,
+                                    spec.stream,
+                                );
+                                let validation_errors = validate_tool_request(
+                                    loop_protocol,
+                                    &endpoint,
+                                    spec.stream,
+                                    &spec.body,
+                                    ToolRequestPhase::FollowUp {
+                                        previous: &assistant_turn,
+                                        results: &results,
+                                    },
+                                );
+                                if validation_errors.is_empty() {
+                                    evidence.tool_loop_outcome = ToolLoopOutcome::Continued;
+                                    next = Some(PlannedRequest {
+                                        id: String::new(),
+                                        protocol: loop_protocol,
+                                        auth_mode: loop_auth_mode,
+                                        body: Body::Json(spec.body),
+                                        stream: spec.stream,
+                                    });
+                                } else {
+                                    merge_errors(&mut contract_errors, validation_errors);
+                                    evidence.tool_contract_status =
+                                        ToolContractStatus::NonConformant;
+                                    evidence.tool_loop_outcome = ToolLoopOutcome::InvalidTurn;
+                                }
+                            }
+                            Err(error) => {
+                                merge_errors(&mut contract_errors, tool_protocol_errors(&error));
+                                evidence.tool_contract_status = ToolContractStatus::NonConformant;
+                                evidence.tool_loop_outcome = ToolLoopOutcome::InvalidTurn;
+                            }
+                        }
+                    }
+                    LoopDecision::Stop {
+                        outcome,
+                        contract_errors: loop_errors,
+                    } => {
+                        merge_errors(&mut contract_errors, loop_errors);
+                        if !contract_errors.is_empty() {
+                            evidence.tool_contract_status = ToolContractStatus::NonConformant;
+                        }
+                        evidence.tool_loop_outcome = outcome;
+                    }
+                }
+            }
+            evidence.tool_contract_errors = contract_errors;
+            self.audit.append_request(&evidence)?;
+            let cancelled = evidence.transport_outcome == TransportOutcome::ClientCancelled;
+            collected.push(evidence);
+            if cancelled {
+                return Err(RunnerError::Interrupted);
+            }
+            let Some(next_request) = next else {
+                break;
+            };
+            self.wait_between_turns().await;
+            self.ensure_not_cancelled()?;
+            current = next_request;
+        }
+
+        Ok(collected)
+    }
+
     async fn execute(&mut self) -> Result<(), RunnerError> {
         for test in self.selected.clone() {
             self.ensure_not_cancelled()?;
@@ -121,6 +303,10 @@ impl Runner {
             self.protocol_probe_refs.push(evidence.request_id.clone());
             self.ensure_not_cancelled()?;
             if evidence.metrics.transport_exit_code == 0
+                && evidence
+                    .metrics
+                    .http_status
+                    .is_some_and(|status| (200..300).contains(&status))
                 && matches_response(candidate.protocol, &evidence.response_body)
             {
                 self.detected_protocol = candidate.protocol;
@@ -133,55 +319,49 @@ impl Runner {
     }
 
     async fn execute_check(&mut self, test: &'static TestCase) -> Result<(), RunnerError> {
+        let is_tool_loop = matches!(test.id, "046" | "047" | "048" | "049");
+        if is_tool_loop && self.detected_protocol == Protocol::Unknown {
+            self.audit.append_manifest(&TestManifest {
+                id: test.id.to_owned(),
+                name: test.name.to_owned(),
+                category: test.category.to_owned(),
+                completed_at: Local::now(),
+                request_refs: self.protocol_probe_refs.clone(),
+            })?;
+            return Ok(());
+        }
+
         let context = PlanContext {
             protocol: self.detected_protocol,
             auth_mode: self.detected_auth_mode,
             model: &self.config.model,
         };
         let check_plan = plan(test.id, &context)?;
-        let initial_tool_body = if matches!(test.id, "047" | "048" | "049") {
-            check_plan
+        let manifest_refs = check_plan.manifest_refs;
+        let evidence = if is_tool_loop {
+            let initial = check_plan
                 .groups
-                .first()
-                .and_then(|group| group.requests().first())
-                .map(|request| request.body.json().clone())
-        } else {
-            None
-        };
-
-        let mut evidence = if check_plan.manifest_refs == ManifestRefs::SharedRepeatSamples
-            && !self.repeat_refs.is_empty()
+                .into_iter()
+                .flat_map(|group| match group {
+                    RequestGroup::Sequential(requests) | RequestGroup::Concurrent(requests) => {
+                        requests
+                    }
+                })
+                .next()
+                .expect("tool-loop plan has one initial request");
+            self.execute_tool_loop(test, initial).await?
+        } else if manifest_refs == ManifestRefs::SharedRepeatSamples && !self.repeat_refs.is_empty()
         {
             Vec::new()
         } else {
             self.execute_groups(check_plan.groups).await?
         };
 
-        if let (Some(initial_body), Some(initial_evidence)) = (initial_tool_body, evidence.first())
-            && let Ok(response) = serde_json::from_slice(&initial_evidence.response_body)
-            && let Ok(spec) = build_follow_up(
-                self.detected_protocol,
-                &self.config.model,
-                test.id,
-                &initial_body,
-                &response,
-            )
-        {
-            let follow = PlannedRequest {
-                id: format!("test-{}-follow", test.id),
-                protocol: self.detected_protocol,
-                auth_mode: self.detected_auth_mode,
-                body: Body::Json(spec.body),
-                stream: spec.stream,
-            };
-            evidence.push(self.execute_one(follow).await?);
-        }
-
         let executed_refs: Vec<String> = evidence
             .iter()
             .map(|request| request.request_id.clone())
             .collect();
-        let request_refs = match check_plan.manifest_refs {
+        let request_refs = match manifest_refs {
             ManifestRefs::Executed => executed_refs,
             ManifestRefs::AllProtocolProbes => self.protocol_probe_refs.clone(),
             ManifestRefs::SelectedProtocolProbe => self
@@ -240,11 +420,15 @@ impl Runner {
         request: PlannedRequest,
     ) -> Result<RequestEvidence, RunnerError> {
         let input = self.request_input(request);
-        let evidence = self
+        let mut evidence = self
             .http
             .execute(input, self.cancellation.child_token())
             .await;
+        enrich_stream_evidence(&mut evidence).await;
         self.audit.append_request(&evidence)?;
+        if evidence.transport_outcome == TransportOutcome::ClientCancelled {
+            return Err(RunnerError::Interrupted);
+        }
         Ok(evidence)
     }
 
@@ -272,9 +456,16 @@ impl Runner {
         }
         completed.sort_by_key(|(index, _)| *index);
         let mut evidence = Vec::with_capacity(completed.len());
-        for (_, request) in completed {
+        for (_, mut request) in completed {
+            enrich_stream_evidence(&mut request).await;
             self.audit.append_request(&request)?;
             evidence.push(request);
+        }
+        if evidence
+            .iter()
+            .any(|request| request.transport_outcome == TransportOutcome::ClientCancelled)
+        {
+            return Err(RunnerError::Interrupted);
         }
         Ok(evidence)
     }
@@ -282,7 +473,7 @@ impl Runner {
     fn request_input(&self, request: PlannedRequest) -> RequestInput {
         RequestInput {
             request_id: request.id,
-            url: self.config.url.clone(),
+            url: normalize_request_url(request.protocol, &self.config.url, request.stream),
             protocol: request.protocol,
             auth_mode: request.auth_mode,
             body: request.body.to_bytes(),
@@ -290,6 +481,85 @@ impl Runner {
             api_key: self.config.api_key.expose().to_owned(),
         }
     }
+
+    #[cfg(test)]
+    async fn wait_between_turns(&self) {
+        if let Some(hook) = &self.turn_hook {
+            hook.turn_committed.notify_one();
+            hook.resume.notified().await;
+        }
+    }
+
+    #[cfg(not(test))]
+    async fn wait_between_turns(&self) {}
+
+    #[cfg(test)]
+    fn take_forced_follow_up_error(&mut self) -> Option<ToolProtocolError> {
+        self.forced_follow_up_errors
+            .take()
+            .map(ToolProtocolError::InvalidRequest)
+    }
+
+    #[cfg(not(test))]
+    fn take_forced_follow_up_error(&mut self) -> Option<ToolProtocolError> {
+        None
+    }
+
+    #[cfg(test)]
+    fn maybe_invalidate_follow_up(&mut self, spec: &mut crate::protocol::RequestSpec) {
+        if self.force_invalid_follow_up {
+            self.force_invalid_follow_up = false;
+            spec.stream = false;
+        }
+    }
+
+    #[cfg(not(test))]
+    fn maybe_invalidate_follow_up(&mut self, _spec: &mut crate::protocol::RequestSpec) {}
+}
+
+async fn parse_stream_evidence(evidence: &mut RequestEvidence) -> Option<StreamParseResult> {
+    let is_success = evidence
+        .metrics
+        .http_status
+        .is_some_and(|status| (200..300).contains(&status));
+    if !evidence.stream
+        || evidence.transport_outcome != TransportOutcome::CompletedEof
+        || !is_success
+    {
+        return None;
+    }
+
+    let parsed = parse_stream(evidence.protocol, &evidence.response_body).await;
+    evidence.stream_termination = parsed.stream_termination.clone();
+    evidence.stream_end_signal = parsed.stream_end_signal.clone();
+    evidence.model_stop_reason = parsed.model_stop_reason.clone();
+    evidence.stream_event_count = parsed.event_count;
+    Some(parsed)
+}
+
+fn terminal_contract_error(termination: &StreamTermination) -> String {
+    format!("response.{termination}:/")
+}
+
+fn tool_protocol_errors(error: &ToolProtocolError) -> Vec<String> {
+    let errors = error.codes().to_vec();
+    if errors.is_empty() {
+        vec!["request.build_failed:/".into()]
+    } else {
+        errors
+    }
+}
+
+fn merge_errors(target: &mut Vec<String>, incoming: Vec<String>) {
+    for error in incoming {
+        if !target.contains(&error) {
+            target.push(error);
+        }
+    }
+}
+
+async fn enrich_stream_evidence(evidence: &mut RequestEvidence) {
+    let _ = parse_stream_evidence(evidence).await;
 }
 
 fn resolve_log_path(
@@ -327,3 +597,6 @@ pub enum RunnerError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+
+#[cfg(test)]
+mod tests;
