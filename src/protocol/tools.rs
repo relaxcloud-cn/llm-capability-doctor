@@ -92,6 +92,7 @@ pub fn build_follow_up(
         .cloned()
         .ok_or(FollowUpError::MissingField("tools"))?;
     let observation = observe(protocol, response)?;
+    let tool_name = required(observation.tool_name.clone(), "tool name")?;
     let error_result = id == "049";
     let tool_output = if error_result {
         "ERROR: timeout"
@@ -153,7 +154,6 @@ pub fn build_follow_up(
             } else {
                 json!({"result": tool_output})
             };
-            let tool_name = required(observation.tool_name, "tool name")?;
             let call_id = google_call_id(id, observation.call_id.as_deref());
             let mut assistant = required_value(observation.assistant, "candidate content")?;
             let function_call = assistant
@@ -187,7 +187,7 @@ pub fn build_follow_up(
                 required_value(observation.assistant, "assistant message")?,
                 {
                     "role": "tool",
-                    "tool_name": required(observation.tool_name, "tool name")?,
+                    "tool_name": tool_name,
                     "content": tool_output
                 }
             ],

@@ -268,6 +268,46 @@ fn required_protocol_ids_reject_empty_strings() {
 }
 
 #[test]
+fn chat_follow_up_rejects_an_empty_tool_name() {
+    assert_empty_tool_name_rejected(
+        Protocol::OpenAiChat,
+        json!({"choices": [{"message": {"role": "assistant", "tool_calls": [{
+            "id": "chat-call", "function": {"name": "", "arguments": "{}"}
+        }]}}]}),
+    );
+}
+
+#[test]
+fn responses_follow_up_rejects_an_empty_tool_name() {
+    assert_empty_tool_name_rejected(
+        Protocol::OpenAiResponses,
+        json!({"id": "response-id", "output": [{
+            "type": "function_call", "call_id": "responses-call", "name": "", "arguments": "{}"
+        }]}),
+    );
+}
+
+#[test]
+fn anthropic_follow_up_rejects_an_empty_tool_name() {
+    assert_empty_tool_name_rejected(
+        Protocol::AnthropicMessages,
+        json!({"content": [{
+            "type": "tool_use", "id": "anthropic-call", "name": "", "input": {}
+        }]}),
+    );
+}
+
+fn assert_empty_tool_name_rejected(protocol: Protocol, response: Value) {
+    let initial = tool_request(protocol, MODEL, "047", PROMPT);
+
+    assert_eq!(
+        build_follow_up(protocol, MODEL, "047", &initial.body, &response),
+        Err(FollowUpError::MissingField("tool name")),
+        "{protocol}"
+    );
+}
+
+#[test]
 fn google_follow_up_uses_a_local_id_when_upstream_id_is_supplied() {
     let response = google_response(Some("upstream-call"), "doctor__get_weather");
     let follow_up = google_follow_up("047", &response).expect("valid Google function call");
