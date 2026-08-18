@@ -549,7 +549,7 @@ git commit -m "feat: parse official OpenAI chat tool streams"
 - Create: `src/protocol/fixtures/openai_responses_bad_correlation.sse`
 - Modify: `src/protocol/stream/mod.rs`
 
-- [ ] **Step 1: Add failing Responses event-sequence tests.**
+- [x] **Step 1: Add failing Responses event-sequence tests.**
 
 Cover `response.created`, `response.output_item.added`,
 `response.function_call_arguments.delta`,
@@ -560,7 +560,7 @@ the call are correlated, and retain the response ID for
 identity, call ID, output index, argument fragments, and terminal fields; the
 Python analyzer retains exhaustive envelope coverage.
 
-- [ ] **Step 2: Run the parser tests.**
+- [x] **Step 2: Run the parser tests.**
 
 ```bash
 cargo test --locked --lib protocol::stream::openai_responses::tests -- --nocapture
@@ -568,13 +568,13 @@ cargo test --locked --lib protocol::stream::openai_responses::tests -- --nocaptu
 
 Expected: module missing.
 
-- [ ] **Step 3: Implement the Responses state machine.**
+- [x] **Step 3: Implement the Responses state machine.**
 
 Require completed function-call items to contain `call_id`, `name`, and JSON object arguments. The `.done` arguments must agree with the assembled deltas. Accumulate final output text from official text events. Preserve `response.id` in `ProtocolHistory::OpenAiResponses`.
 
 Classify `response.completed` only when the embedded response status is `completed`; classify `response.incomplete` as `model_incomplete`; classify `response.failed` and `error` events as `protocol_error`; classify clean EOF without one of those terminal events as `missing_terminal_event`. A terminal stream with correlation/order errors stays wire-completed but is contract non-conformant.
 
-- [ ] **Step 4: Verify all Responses fixtures.**
+- [x] **Step 4: Verify all Responses fixtures.**
 
 ```bash
 cargo test --locked --lib protocol::stream::openai_responses::tests -- --nocapture
@@ -582,7 +582,7 @@ cargo test --locked --lib protocol::stream::openai_responses::tests -- --nocaptu
 
 Expected: normal tool/final streams complete, incomplete/error streams remain distinct, and bad correlation produces a stable contract error.
 
-- [ ] **Step 5: Commit Responses parsing.**
+- [x] **Step 5: Commit Responses parsing.**
 
 ```bash
 git add src/protocol/stream/mod.rs src/protocol/stream/openai_responses.rs src/protocol/fixtures/openai_responses_*.sse

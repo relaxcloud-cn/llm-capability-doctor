@@ -6,6 +6,7 @@ use crate::evidence::{StreamEndSignal, StreamTermination};
 
 pub(crate) mod framing;
 pub(crate) mod openai_chat;
+pub(crate) mod openai_responses;
 
 #[derive(Debug, PartialEq)]
 pub struct StreamParseResult {
