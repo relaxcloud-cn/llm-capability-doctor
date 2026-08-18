@@ -170,6 +170,505 @@ class ProtocolConformanceTests(unittest.TestCase):
             "eval_duration": 4,
         }
 
+    @staticmethod
+    def _encode_sse(
+        events: list[tuple[str | None, object]],
+        *,
+        trailing_blank: bool = True,
+    ) -> str:
+        frames = []
+        for event_name, data in events:
+            lines = []
+            if event_name is not None:
+                lines.append(f"event: {event_name}")
+            payload = (
+                data
+                if isinstance(data, str)
+                else json.dumps(data, separators=(",", ":"))
+            )
+            lines.append(f"data: {payload}")
+            frames.append("\n".join(lines))
+        body = "\n\n".join(frames)
+        return body + ("\n\n" if trailing_blank else "")
+
+    @staticmethod
+    def _encode_ndjson(records: list[object]) -> str:
+        lines = [
+            record
+            if isinstance(record, str)
+            else json.dumps(record, separators=(",", ":"))
+            for record in records
+        ]
+        return "\n".join(lines) + "\n"
+
+    def _chat_stream_events(self) -> list[tuple[str | None, object]]:
+        return [
+            (
+                None,
+                {
+                    "id": "chatcmpl-stream",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "gpt-fixture",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": "o"},
+                            "finish_reason": None,
+                            "logprobs": None,
+                        }
+                    ],
+                },
+            ),
+            (
+                None,
+                {
+                    "id": "chatcmpl-stream",
+                    "object": "chat.completion.chunk",
+                    "created": 1,
+                    "model": "gpt-fixture",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "k"},
+                            "finish_reason": "stop",
+                            "logprobs": None,
+                        }
+                    ],
+                },
+            ),
+            (None, "[DONE]"),
+        ]
+
+    def _responses_stream_events(self) -> list[tuple[str | None, object]]:
+        started = self._responses()
+        started["status"] = "in_progress"
+        started["completed_at"] = None
+        started["output"] = []
+        started["usage"] = None
+        in_progress = copy.deepcopy(started)
+        completed = self._responses()
+        completed["completed_at"] = 2
+
+        item_started = {
+            "id": "msg_fixture",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "status": "in_progress",
+        }
+        part_started = {
+            "type": "output_text",
+            "text": "",
+            "annotations": [],
+        }
+        part_completed = {
+            "type": "output_text",
+            "text": "ok",
+            "annotations": [],
+        }
+        item_completed = completed["output"][0]
+
+        return [
+            (
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": started,
+                    "sequence_number": 0,
+                },
+            ),
+            (
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": in_progress,
+                    "sequence_number": 1,
+                },
+            ),
+            (
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": item_started,
+                    "sequence_number": 2,
+                },
+            ),
+            (
+                "response.content_part.added",
+                {
+                    "type": "response.content_part.added",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": part_started,
+                    "sequence_number": 3,
+                },
+            ),
+            (
+                "response.output_text.delta",
+                {
+                    "type": "response.output_text.delta",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "ok",
+                    "logprobs": [],
+                    "sequence_number": 4,
+                },
+            ),
+            (
+                "response.output_text.done",
+                {
+                    "type": "response.output_text.done",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "text": "ok",
+                    "logprobs": [],
+                    "sequence_number": 5,
+                },
+            ),
+            (
+                "response.content_part.done",
+                {
+                    "type": "response.content_part.done",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "part": part_completed,
+                    "sequence_number": 6,
+                },
+            ),
+            (
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item_completed,
+                    "sequence_number": 7,
+                },
+            ),
+            (
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": completed,
+                    "sequence_number": 8,
+                },
+            ),
+        ]
+
+    def _responses_function_stream_events(
+        self,
+    ) -> list[tuple[str | None, object]]:
+        started = self._responses()
+        started["status"] = "in_progress"
+        started["completed_at"] = None
+        started["output"] = []
+        started["usage"] = None
+        in_progress = copy.deepcopy(started)
+
+        item_started = {
+            "id": "fc_fixture",
+            "type": "function_call",
+            "call_id": "call_fixture",
+            "name": "get_weather",
+            "arguments": "",
+            "status": "in_progress",
+        }
+        item_completed = {
+            **item_started,
+            "arguments": '{"city":"Beijing"}',
+            "status": "completed",
+        }
+        completed = self._responses()
+        completed["completed_at"] = 2
+        completed["output"] = [copy.deepcopy(item_completed)]
+
+        return [
+            (
+                "response.created",
+                {
+                    "type": "response.created",
+                    "response": started,
+                    "sequence_number": 0,
+                },
+            ),
+            (
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": in_progress,
+                    "sequence_number": 1,
+                },
+            ),
+            (
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": item_started,
+                    "sequence_number": 2,
+                },
+            ),
+            (
+                "response.function_call_arguments.delta",
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": "fc_fixture",
+                    "output_index": 0,
+                    "delta": '{"city":',
+                    "sequence_number": 3,
+                },
+            ),
+            (
+                "response.function_call_arguments.done",
+                {
+                    "type": "response.function_call_arguments.done",
+                    "item_id": "fc_fixture",
+                    "output_index": 0,
+                    "name": "get_weather",
+                    "arguments": '{"city":"Beijing"}',
+                    "sequence_number": 4,
+                },
+            ),
+            (
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": item_completed,
+                    "sequence_number": 5,
+                },
+            ),
+            (
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": completed,
+                    "sequence_number": 6,
+                },
+            ),
+        ]
+
+    def _responses_item_stream_events(
+        self,
+        item_started: dict,
+        item_completed: dict,
+        middle_events: list[tuple[str, dict]],
+    ) -> list[tuple[str | None, object]]:
+        started = self._responses()
+        started["status"] = "in_progress"
+        started["completed_at"] = None
+        started["output"] = []
+        started["usage"] = None
+        completed = self._responses()
+        completed["completed_at"] = 2
+        completed["output"] = [copy.deepcopy(item_completed)]
+        events: list[tuple[str | None, object]] = [
+            (
+                "response.created",
+                {"type": "response.created", "response": started},
+            ),
+            (
+                "response.in_progress",
+                {
+                    "type": "response.in_progress",
+                    "response": copy.deepcopy(started),
+                },
+            ),
+            (
+                "response.output_item.added",
+                {
+                    "type": "response.output_item.added",
+                    "output_index": 0,
+                    "item": copy.deepcopy(item_started),
+                },
+            ),
+            *copy.deepcopy(middle_events),
+            (
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": 0,
+                    "item": copy.deepcopy(item_completed),
+                },
+            ),
+            (
+                "response.completed",
+                {"type": "response.completed", "response": completed},
+            ),
+        ]
+        for sequence_number, (_, payload) in enumerate(events):
+            assert isinstance(payload, dict)
+            payload["sequence_number"] = sequence_number
+        return events
+
+    def _anthropic_stream_events(self) -> list[tuple[str | None, object]]:
+        return [
+            (
+                "message_start",
+                {
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_stream",
+                        "type": "message",
+                        "role": "assistant",
+                        "model": "claude-fixture",
+                        "content": [],
+                        "stop_reason": None,
+                        "stop_sequence": None,
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                },
+            ),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {},
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '{"city":',
+                    },
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": '"Beijing"}',
+                    },
+                },
+            ),
+            (
+                "content_block_stop",
+                {"type": "content_block_stop", "index": 0},
+            ),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": "tool_use",
+                        "stop_sequence": None,
+                    },
+                    "usage": {"output_tokens": 3},
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+
+    def _gemini_stream_events(self) -> list[tuple[str | None, object]]:
+        return [
+            (
+                None,
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": "o"}],
+                            },
+                            "index": 0,
+                        }
+                    ],
+                    "modelVersion": "gemini-fixture",
+                    "responseId": "resp-fixture",
+                },
+            ),
+            (
+                None,
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": "k"}],
+                            },
+                            "finishReason": "STOP",
+                            "index": 0,
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": 1,
+                        "candidatesTokenCount": 1,
+                        "totalTokenCount": 2,
+                    },
+                    "modelVersion": "gemini-fixture",
+                    "responseId": "resp-fixture",
+                },
+            ),
+        ]
+
+    def _ollama_stream_records(self) -> list[object]:
+        return [
+            {
+                "model": "ollama-fixture",
+                "created_at": "2026-08-18T00:00:00Z",
+                "message": {"role": "assistant", "content": "o"},
+                "done": False,
+            },
+            {
+                "model": "ollama-fixture",
+                "created_at": "2026-08-18T00:00:01Z",
+                "message": {"role": "assistant", "content": "k"},
+                "done": True,
+                "done_reason": "stop",
+                "total_duration": 10,
+                "load_duration": 2,
+                "prompt_eval_count": 1,
+                "prompt_eval_duration": 3,
+                "eval_count": 1,
+                "eval_duration": 4,
+            },
+        ]
+
+    def _valid_stream_fixtures(self) -> dict[str, tuple[str, str]]:
+        return {
+            "openai_chat": (
+                self._encode_sse(self._chat_stream_events()),
+                "content-type: text/event-stream; charset=utf-8",
+            ),
+            "openai_responses": (
+                self._encode_sse(self._responses_stream_events()),
+                "content-type: text/event-stream",
+            ),
+            "anthropic_messages": (
+                self._encode_sse(self._anthropic_stream_events()),
+                "content-type: text/event-stream",
+            ),
+            "gemini_generate_content": (
+                self._encode_sse(
+                    self._gemini_stream_events(),
+                    trailing_blank=False,
+                ),
+                "content-type: text/event-stream",
+            ),
+            "ollama_chat": (
+                self._encode_ndjson(self._ollama_stream_records()),
+                "content-type: application/x-ndjson",
+            ),
+        }
+
     def _single_result(self, request: dict) -> dict:
         report = analyze_protocol_conformance(
             self._parsed({request["request_id"]: request})
@@ -189,6 +688,22 @@ class ProtocolConformanceTests(unittest.TestCase):
         self.assertEqual(
             difference_kind,
             result["differences"][0]["differenceKind"],
+        )
+
+    def _assert_difference(
+        self,
+        result: dict,
+        location: str,
+        difference_kind: str,
+    ) -> None:
+        self.assertEqual("DIFFERENT", result["status"])
+        self.assertIn(
+            (location, difference_kind),
+            [
+                (difference["location"], difference["differenceKind"])
+                for difference in result["differences"]
+            ],
+            result["differences"],
         )
 
     def test_public_constants_and_pinned_baselines(self) -> None:
@@ -500,7 +1015,9 @@ class ProtocolConformanceTests(unittest.TestCase):
                 )
                 self._assert_one_difference(result, "/protocol", "EVIDENCE_GAP")
 
-    def test_transport_empty_body_and_invalid_status_are_evidence_gaps(self) -> None:
+    def test_transport_missing_body_and_invalid_status_are_evidence_gaps(self) -> None:
+        missing_body = self._request("req-missing-body", "openai_chat", self._chat())
+        missing_body.pop("responseBody")
         fixtures = (
             self._request(
                 "req-transport",
@@ -508,11 +1025,7 @@ class ProtocolConformanceTests(unittest.TestCase):
                 raw_response="",
                 curl_exit_code="7",
             ),
-            self._request(
-                "req-empty",
-                "openai_chat",
-                raw_response="",
-            ),
+            missing_body,
             self._request(
                 "req-status",
                 "openai_chat",
@@ -529,6 +1042,23 @@ class ProtocolConformanceTests(unittest.TestCase):
             with self.subTest(request_id=request["request_id"]):
                 result = self._single_result(request)
                 self._assert_one_difference(result, location, "EVIDENCE_GAP")
+
+    def test_recorded_empty_body_is_a_protocol_difference(self) -> None:
+        nonstream = self._single_result(
+            self._request("req-empty-json", "openai_chat", raw_response="")
+        )
+        self._assert_one_difference(nonstream, "/responseBody", "INVALID_JSON")
+
+        stream = self._single_result(
+            self._request(
+                "req-empty-stream",
+                "openai_chat",
+                raw_response="",
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_one_difference(stream, "/events/0", "SEQUENCE")
 
     def test_bool_is_not_an_integer(self) -> None:
         response = self._chat()
@@ -719,7 +1249,6 @@ class ProtocolConformanceTests(unittest.TestCase):
         missing_logprob_token["output"][0]["content"][0]["logprobs"] = [
             {
                 "logprob": -0.1,
-                "bytes": [111],
                 "top_logprobs": [],
             }
         ]
@@ -730,19 +1259,17 @@ class ProtocolConformanceTests(unittest.TestCase):
             )
         )
 
-        missing_top_logprob_token = self._responses()
-        missing_top_logprob_token["output"][0]["content"][0]["logprobs"] = [
+        missing_logprob_value = self._responses()
+        missing_logprob_value["output"][0]["content"][0]["logprobs"] = [
             {
                 "token": "o",
-                "logprob": -0.1,
-                "bytes": [111],
-                "top_logprobs": [{"logprob": -0.2, "bytes": [120]}],
+                "top_logprobs": [],
             }
         ]
         fixtures.append(
             (
-                missing_top_logprob_token,
-                "/output/0/content/0/logprobs/0/top_logprobs/0/token",
+                missing_logprob_value,
+                "/output/0/content/0/logprobs/0/logprob",
             )
         )
 
@@ -756,6 +1283,45 @@ class ProtocolConformanceTests(unittest.TestCase):
                     )
                 )
                 self._assert_one_difference(result, location, "MISSING_FIELD")
+
+    def test_responses_logprob_optional_fields_match_frozen_schema(self) -> None:
+        response = self._responses()
+        response["output"][0]["content"][0]["logprobs"] = [
+            {"token": "o", "logprob": -0.1},
+            {
+                "token": "k",
+                "logprob": -0.2,
+                "top_logprobs": [{}, {"token": "x"}, {"logprob": -1.0}],
+            },
+        ]
+        result = self._single_result(
+            self._request("req-responses-optional-logprobs", "openai_responses", response)
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_responses_logprob_rejects_undocumented_bytes_fields(self) -> None:
+        response = self._responses()
+        response["output"][0]["content"][0]["logprobs"] = [
+            {
+                "token": "o",
+                "logprob": -0.1,
+                "bytes": [111],
+                "top_logprobs": [{"bytes": [120]}],
+            }
+        ]
+        result = self._single_result(
+            self._request("req-responses-logprob-bytes", "openai_responses", response)
+        )
+        self._assert_difference(
+            result,
+            "/output/0/content/0/logprobs/0/bytes",
+            "UNEXPECTED_FIELD",
+        )
+        self._assert_difference(
+            result,
+            "/output/0/content/0/logprobs/0/top_logprobs/0/bytes",
+            "UNEXPECTED_FIELD",
+        )
 
     def test_anthropic_citations_validate_each_item(self) -> None:
         response = self._anthropic()
@@ -855,18 +1421,1336 @@ class ProtocolConformanceTests(unittest.TestCase):
                 self.assertFalse(result["stream"])
                 self._assert_one_difference(result, "/stream", "EVIDENCE_GAP")
 
-    def test_streaming_is_explicitly_deferred_as_framing_difference(self) -> None:
-        result = self._single_result(
-            self._request(
-                "req-stream",
+    def test_each_stream_success_profile_is_consistent(self) -> None:
+        for protocol, (body, headers) in self._valid_stream_fixtures().items():
+            with self.subTest(protocol=protocol):
+                result = self._single_result(
+                    self._request(
+                        f"req-stream-{protocol}",
+                        protocol,
+                        raw_response=body,
+                        stream="1",
+                        response_headers=headers,
+                    )
+                )
+                self.assertTrue(result["stream"])
+                self.assertEqual("CONSISTENT", result["status"])
+                self.assertEqual([], result["differences"])
+
+    def test_stream_request_http_errors_use_json_error_envelopes(self) -> None:
+        fixtures = {
+            "openai_chat": {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid request",
+                    "param": None,
+                    "code": None,
+                }
+            },
+            "openai_responses": {
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "invalid request",
+                    "param": None,
+                    "code": None,
+                }
+            },
+            "anthropic_messages": {
+                "type": "error",
+                "error": {"type": "invalid_request_error", "message": "bad"},
+                "request_id": "req_fixture",
+            },
+            "gemini_generate_content": {
+                "error": {
+                    "code": 400,
+                    "message": "bad",
+                    "status": "INVALID_ARGUMENT",
+                }
+            },
+            "ollama_chat": {"error": "bad request"},
+        }
+        for protocol, response in fixtures.items():
+            with self.subTest(protocol=protocol):
+                result = self._single_result(
+                    self._request(
+                        f"req-stream-http-error-{protocol}",
+                        protocol,
+                        response,
+                        http_status="400",
+                        stream="1",
+                        response_headers="content-type: application/json",
+                    )
+                )
+                self.assertEqual("CONSISTENT", result["status"])
+                self.assertEqual([], result["differences"])
+
+    def test_stream_content_type_when_present_matches_protocol(self) -> None:
+        wrong_headers = {
+            "openai_chat": "content-type: application/json",
+            "openai_responses": "content-type: application/json",
+            "anthropic_messages": "content-type: application/json",
+            "gemini_generate_content": "content-type: application/json",
+            "ollama_chat": "content-type: text/event-stream",
+        }
+        for protocol, (body, _) in self._valid_stream_fixtures().items():
+            with self.subTest(protocol=protocol):
+                result = self._single_result(
+                    self._request(
+                        f"req-stream-content-type-{protocol}",
+                        protocol,
+                        raw_response=body,
+                        stream="1",
+                        response_headers=wrong_headers[protocol],
+                    )
+                )
+                self._assert_difference(
+                    result,
+                    "/responseHeaders/content-type",
+                    "VALUE_MISMATCH",
+                )
+
+    def test_stream_framing_is_protocol_specific(self) -> None:
+        chat = self._chat_stream_events()
+        chat[0] = ("chat.completion.chunk", chat[0][1])
+
+        responses = self._responses_stream_events()
+        responses[0] = (None, responses[0][1])
+
+        anthropic = self._anthropic_stream_events()
+        anthropic[0] = (None, anthropic[0][1])
+
+        gemini_named = self._gemini_stream_events()
+        gemini_named[0] = ("message", gemini_named[0][1])
+
+        gemini_done = self._gemini_stream_events()
+        gemini_done.append((None, "[DONE]"))
+
+        ollama_sse = [
+            (None, record) for record in self._ollama_stream_records()
+        ]
+
+        fixtures = (
+            (
                 "openai_chat",
-                raw_response='data: {"id":"chunk"}\n\ndata: [DONE]\n\n',
+                self._encode_sse(chat),
+                "/events/0/event",
+            ),
+            (
+                "openai_responses",
+                self._encode_sse(responses),
+                "/events/0/event",
+            ),
+            (
+                "anthropic_messages",
+                self._encode_sse(anthropic),
+                "/events/0/event",
+            ),
+            (
+                "gemini_generate_content",
+                self._encode_sse(gemini_named, trailing_blank=False),
+                "/events/0/event",
+            ),
+            (
+                "gemini_generate_content",
+                self._encode_sse(gemini_done),
+                "/events/2/data",
+            ),
+            (
+                "ollama_chat",
+                self._encode_sse(ollama_sse),
+                "/records/0",
+            ),
+        )
+        for index, (protocol, body, location) in enumerate(fixtures):
+            with self.subTest(protocol=protocol, index=index):
+                headers = (
+                    "content-type: application/x-ndjson"
+                    if protocol == "ollama_chat"
+                    else "content-type: text/event-stream"
+                )
+                result = self._single_result(
+                    self._request(
+                        f"req-stream-framing-{protocol}-{index}",
+                        protocol,
+                        raw_response=body,
+                        stream="1",
+                        response_headers=headers,
+                    )
+                )
+                self._assert_difference(result, location, "FRAMING")
+
+    def test_stream_payload_invalid_json_is_precise_and_not_echoed(self) -> None:
+        fixtures = (
+            (
+                "openai_chat",
+                self._encode_sse([(None, '{"secret":"SSE_STREAM_SECRET"')]),
+                "content-type: text/event-stream",
+                "/events/0/data",
+                "SSE_STREAM_SECRET",
+            ),
+            (
+                "ollama_chat",
+                self._encode_ndjson(['{"secret":"NDJSON_STREAM_SECRET"']),
+                "content-type: application/x-ndjson",
+                "/records/0",
+                "NDJSON_STREAM_SECRET",
+            ),
+        )
+        for protocol, body, headers, location, marker in fixtures:
+            with self.subTest(protocol=protocol):
+                result = self._single_result(
+                    self._request(
+                        f"req-stream-invalid-json-{protocol}",
+                        protocol,
+                        raw_response=body,
+                        stream="1",
+                        response_headers=headers,
+                    )
+                )
+                self._assert_difference(result, location, "INVALID_JSON")
+                self.assertNotIn(marker, json.dumps(result))
+
+    def test_chat_stream_terminal_and_cross_chunk_correlation(self) -> None:
+        missing_done = self._chat_stream_events()[:-1]
+
+        changed_id = self._chat_stream_events()
+        changed_id[1][1]["id"] = "chatcmpl-other"
+
+        changed_created = self._chat_stream_events()
+        changed_created[1][1]["created"] = 2
+
+        changed_model = self._chat_stream_events()
+        changed_model[1][1]["model"] = "gpt-other"
+
+        duplicate_choice = self._chat_stream_events()
+        duplicate_choice[1][1]["choices"].append(
+            copy.deepcopy(duplicate_choice[1][1]["choices"][0])
+        )
+
+        fixtures = (
+            (missing_done, "/events/2", "SEQUENCE"),
+            (changed_id, "/events/1/data/id", "CORRELATION"),
+            (changed_created, "/events/1/data/created", "CORRELATION"),
+            (changed_model, "/events/1/data/model", "CORRELATION"),
+            (
+                duplicate_choice,
+                "/events/1/data/choices/1/index",
+                "CORRELATION",
+            ),
+        )
+        for index, (events, location, kind) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-chat-stream-correlation-{index}",
+                        "openai_chat",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, kind)
+
+    def test_chat_stream_choice_indexes_follow_request_n_across_chunks(self) -> None:
+        two_choice_events = self._chat_stream_events()
+        for event_index in (0, 1):
+            second_choice = copy.deepcopy(
+                two_choice_events[event_index][1]["choices"][0]
+            )
+            second_choice["index"] = 1
+            two_choice_events[event_index][1]["choices"].append(second_choice)
+        two_choice_result = self._single_result(
+            self._request(
+                "req-chat-stream-two-choices",
+                "openai_chat",
+                raw_response=self._encode_sse(two_choice_events),
+                request_body={"model": "fixture", "n": 2},
                 stream="1",
                 response_headers="content-type: text/event-stream",
             )
         )
-        self.assertTrue(result["stream"])
-        self._assert_one_difference(result, "/responseBody", "FRAMING")
+        self.assertEqual("CONSISTENT", two_choice_result["status"])
+
+        fixtures = []
+        default_n_events = self._chat_stream_events()
+        default_n_events[1][1]["choices"][0]["index"] = 1
+        fixtures.append((default_n_events, {"model": "fixture"}))
+
+        out_of_range_events = self._chat_stream_events()
+        out_of_range_events[1][1]["choices"][0]["index"] = 2
+        fixtures.append((out_of_range_events, {"model": "fixture", "n": 2}))
+
+        for case_index, (events, request_body) in enumerate(fixtures):
+            with self.subTest(case=case_index):
+                result = self._single_result(
+                    self._request(
+                        f"req-chat-stream-choice-range-{case_index}",
+                        "openai_chat",
+                        raw_response=self._encode_sse(events),
+                        request_body=request_body,
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(
+                    result,
+                    f"/events/1/data/choices/0/index",
+                    "CORRELATION",
+                )
+
+    def test_chat_stream_done_marker_requires_a_response_chunk(self) -> None:
+        result = self._single_result(
+            self._request(
+                "req-chat-stream-done-only",
+                "openai_chat",
+                raw_response=self._encode_sse([(None, "[DONE]")]),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(result, "/events/0/data", "SEQUENCE")
+
+    def test_responses_stream_event_sequence_lifecycle_and_terminal(self) -> None:
+        event_mismatch = self._responses_stream_events()
+        event_mismatch[4] = ("response.output_text.done", event_mismatch[4][1])
+
+        sequence_repeated = self._responses_stream_events()
+        sequence_repeated[4][1]["sequence_number"] = 3
+
+        item_mismatch = self._responses_stream_events()
+        item_mismatch[4][1]["item_id"] = "msg_other"
+
+        output_index_mismatch = self._responses_stream_events()
+        output_index_mismatch[4][1]["output_index"] = 1
+
+        content_index_mismatch = self._responses_stream_events()
+        content_index_mismatch[5][1]["content_index"] = 1
+
+        open_item_at_terminal = self._responses_stream_events()
+        del open_item_at_terminal[7]
+
+        missing_terminal = self._responses_stream_events()[:-1]
+
+        terminal_identity_mismatch = self._responses_stream_events()
+        terminal_identity_mismatch[8][1]["response"]["id"] = "resp_other"
+
+        fixtures = (
+            (event_mismatch, "/events/4/event", "VALUE_MISMATCH"),
+            (
+                sequence_repeated,
+                "/events/4/data/sequence_number",
+                "SEQUENCE",
+            ),
+            (item_mismatch, "/events/4/data/item_id", "CORRELATION"),
+            (
+                output_index_mismatch,
+                "/events/4/data/output_index",
+                "CORRELATION",
+            ),
+            (
+                content_index_mismatch,
+                "/events/5/data/content_index",
+                "CORRELATION",
+            ),
+            (open_item_at_terminal, "/events/7/data/type", "SEQUENCE"),
+            (missing_terminal, "/events/8", "SEQUENCE"),
+            (
+                terminal_identity_mismatch,
+                "/events/8/data/response/id",
+                "CORRELATION",
+            ),
+        )
+        for index, (events, location, kind) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-responses-stream-lifecycle-{index}",
+                        "openai_responses",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, kind)
+
+        error_result = self._single_result(
+            self._request(
+                "req-responses-stream-error",
+                "openai_responses",
+                raw_response=self._encode_sse(
+                    [
+                        (
+                            "error",
+                            {
+                                "type": "error",
+                                "code": "server_error",
+                                "message": "generation failed",
+                                "param": None,
+                                "sequence_number": 0,
+                            },
+                        )
+                    ]
+                ),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", error_result["status"])
+
+    def test_responses_stream_function_call_events_follow_official_shape(self) -> None:
+        result = self._single_result(
+            self._request(
+                "req-responses-stream-function-call",
+                "openai_responses",
+                raw_response=self._encode_sse(
+                    self._responses_function_stream_events()
+                ),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_responses_stream_accepts_output_text_annotation_event(self) -> None:
+        events = self._responses_stream_events()
+        events.insert(
+            5,
+            (
+                "response.output_text.annotation.added",
+                {
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": {
+                        "type": "file_citation",
+                        "file_id": "file_fixture",
+                        "index": 0,
+                        "filename": "fixture.txt",
+                    },
+                    "sequence_number": 5,
+                },
+            ),
+        )
+        for index, (_, payload) in enumerate(events):
+            payload["sequence_number"] = index
+        result = self._single_result(
+            self._request(
+                "req-responses-stream-output-text-annotation",
+                "openai_responses",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_responses_stream_sequence_numbers_are_strictly_increasing(self) -> None:
+        monotonic = self._responses_stream_events()
+        for index, (_, payload) in enumerate(monotonic):
+            payload["sequence_number"] = 10 + index * 2
+        monotonic_result = self._single_result(
+            self._request(
+                "req-responses-stream-monotonic-sequence",
+                "openai_responses",
+                raw_response=self._encode_sse(monotonic),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual(
+            "CONSISTENT",
+            monotonic_result["status"],
+            monotonic_result["differences"],
+        )
+
+        for name, value in (("repeat", 3), ("decrease", 2)):
+            with self.subTest(case=name):
+                events = self._responses_stream_events()
+                events[4][1]["sequence_number"] = value
+                result = self._single_result(
+                    self._request(
+                        f"req-responses-stream-sequence-{name}",
+                        "openai_responses",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(
+                    result,
+                    "/events/4/data/sequence_number",
+                    "SEQUENCE",
+                )
+
+    def test_responses_stream_function_item_fields_correlate(self) -> None:
+        fixtures = []
+
+        changed_item_id = self._responses_function_stream_events()
+        changed_item_id[3][1]["item_id"] = "fc_other"
+        fixtures.append((changed_item_id, "/events/3/data/item_id"))
+
+        changed_output_index = self._responses_function_stream_events()
+        changed_output_index[3][1]["output_index"] = 1
+        fixtures.append((changed_output_index, "/events/3/data/output_index"))
+
+        changed_call_id = self._responses_function_stream_events()
+        changed_call_id[5][1]["item"]["call_id"] = "call_other"
+        fixtures.append((changed_call_id, "/events/5/data/item/call_id"))
+
+        changed_final_call_id = self._responses_function_stream_events()
+        changed_final_call_id[6][1]["response"]["output"][0][
+            "call_id"
+        ] = "call_other"
+        fixtures.append(
+            (
+                changed_final_call_id,
+                "/events/6/data/response/output/0/call_id",
+            )
+        )
+
+        for index, (events, location) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-responses-stream-function-correlation-{index}",
+                        "openai_responses",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, "CORRELATION")
+
+    def test_responses_audio_events_require_official_response_id_fields(self) -> None:
+        audio_events = (
+            (
+                "response.audio.delta",
+                {"type": "response.audio.delta", "delta": "AA=="},
+            ),
+            (
+                "response.audio.done",
+                {"type": "response.audio.done", "response_id": "resp_fixture"},
+            ),
+            (
+                "response.audio.transcript.delta",
+                {
+                    "type": "response.audio.transcript.delta",
+                    "response_id": "resp_fixture",
+                    "delta": "ok",
+                },
+            ),
+            (
+                "response.audio.transcript.done",
+                {
+                    "type": "response.audio.transcript.done",
+                    "response_id": "resp_fixture",
+                },
+            ),
+        )
+        events = self._responses_stream_events()
+        for offset, audio_event in enumerate(audio_events):
+            events.insert(2 + offset, copy.deepcopy(audio_event))
+        for sequence_number, (_, payload) in enumerate(events):
+            payload["sequence_number"] = sequence_number
+        result = self._single_result(
+            self._request(
+                "req-responses-audio-events",
+                "openai_responses",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        for event_name in (
+            "response.audio.done",
+            "response.audio.transcript.delta",
+            "response.audio.transcript.done",
+        ):
+            with self.subTest(event=event_name):
+                missing = copy.deepcopy(events)
+                event_index = next(
+                    index for index, event in enumerate(missing) if event[0] == event_name
+                )
+                missing[event_index][1].pop("response_id")
+                invalid = self._single_result(
+                    self._request(
+                        f"req-responses-audio-missing-{event_index}",
+                        "openai_responses",
+                        raw_response=self._encode_sse(missing),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(
+                    invalid,
+                    f"/events/{event_index}/data/response_id",
+                    "MISSING_FIELD",
+                )
+
+    def test_responses_custom_tool_call_terminal_and_event_correlation(self) -> None:
+        started = {
+            "type": "custom_tool_call",
+            "id": "ctc_fixture",
+            "call_id": "call_fixture",
+            "name": "run_fixture",
+            "input": "",
+        }
+        completed = {**started, "input": "fixture input"}
+        middle = [
+            (
+                "response.custom_tool_call_input.delta",
+                {
+                    "type": "response.custom_tool_call_input.delta",
+                    "item_id": "ctc_fixture",
+                    "output_index": 0,
+                    "delta": "fixture ",
+                },
+            ),
+            (
+                "response.custom_tool_call_input.done",
+                {
+                    "type": "response.custom_tool_call_input.done",
+                    "item_id": "ctc_fixture",
+                    "output_index": 0,
+                    "input": "fixture input",
+                },
+            ),
+        ]
+        events = self._responses_item_stream_events(started, completed, middle)
+        result = self._single_result(
+            self._request(
+                "req-responses-custom-tool",
+                "openai_responses",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        missing_input = copy.deepcopy(events)
+        missing_input[2][1]["item"].pop("input")
+        invalid_item = self._single_result(
+            self._request(
+                "req-responses-custom-tool-missing-input",
+                "openai_responses",
+                raw_response=self._encode_sse(missing_input),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_item,
+            "/events/2/data/item/input",
+            "MISSING_FIELD",
+        )
+
+        reasoning_started = {
+            "id": "rs_fixture",
+            "type": "reasoning",
+            "summary": [],
+            "status": "in_progress",
+        }
+        reasoning_completed = {**reasoning_started, "status": "completed"}
+        wrong_reference = self._responses_item_stream_events(
+            reasoning_started,
+            reasoning_completed,
+            [
+                (
+                    "response.custom_tool_call_input.delta",
+                    {
+                        "type": "response.custom_tool_call_input.delta",
+                        "item_id": "rs_fixture",
+                        "output_index": 0,
+                        "delta": "wrong",
+                    },
+                )
+            ],
+        )
+        invalid_reference = self._single_result(
+            self._request(
+                "req-responses-custom-tool-wrong-item",
+                "openai_responses",
+                raw_response=self._encode_sse(wrong_reference),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_reference,
+            "/events/3/data/item_id",
+            "CORRELATION",
+        )
+
+    def test_responses_reasoning_events_reference_reasoning_items(self) -> None:
+        reasoning_started = {
+            "id": "rs_fixture",
+            "type": "reasoning",
+            "summary": [],
+            "status": "in_progress",
+        }
+        reasoning_completed = {
+            **reasoning_started,
+            "summary": [{"type": "summary_text", "text": "ok"}],
+            "status": "completed",
+        }
+        middle = [
+            (
+                "response.reasoning_summary_text.delta",
+                {
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": "rs_fixture",
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "delta": "ok",
+                },
+            ),
+            (
+                "response.reasoning_summary_text.done",
+                {
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": "rs_fixture",
+                    "output_index": 0,
+                    "summary_index": 0,
+                    "text": "ok",
+                },
+            ),
+        ]
+        legal = self._responses_item_stream_events(
+            reasoning_started, reasoning_completed, middle
+        )
+        result = self._single_result(
+            self._request(
+                "req-responses-reasoning-events",
+                "openai_responses",
+                raw_response=self._encode_sse(legal),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        custom_item = {
+            "type": "custom_tool_call",
+            "id": "ctc_fixture",
+            "call_id": "call_fixture",
+            "name": "fixture",
+            "input": "ok",
+        }
+        wrong = self._responses_item_stream_events(custom_item, custom_item, middle)
+        for _, payload in wrong[3:-2]:
+            payload["item_id"] = "ctc_fixture"
+        invalid = self._single_result(
+            self._request(
+                "req-responses-reasoning-wrong-item",
+                "openai_responses",
+                raw_response=self._encode_sse(wrong),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid,
+            "/events/3/data/item_id",
+            "CORRELATION",
+        )
+
+    def test_responses_shell_call_shape_and_event_correlation(self) -> None:
+        started = {
+            "type": "shell_call",
+            "id": "sh_fixture",
+            "call_id": "call_fixture",
+            "action": {
+                "commands": ["echo ok"],
+                "timeout_ms": None,
+                "max_output_length": None,
+            },
+            "status": "in_progress",
+            "environment": {"type": "local"},
+        }
+        completed = {**started, "status": "completed"}
+        middle = [
+            (
+                "response.shell_call_command.added",
+                {
+                    "type": "response.shell_call_command.added",
+                    "output_index": 0,
+                    "command_index": 0,
+                    "command": "",
+                },
+            ),
+            (
+                "response.shell_call_command.delta",
+                {
+                    "type": "response.shell_call_command.delta",
+                    "output_index": 0,
+                    "command_index": 0,
+                    "delta": "echo ok",
+                },
+            ),
+            (
+                "response.shell_call_command.done",
+                {
+                    "type": "response.shell_call_command.done",
+                    "output_index": 0,
+                    "command_index": 0,
+                    "command": "echo ok",
+                },
+            ),
+            (
+                "response.shell_call_output_content.delta",
+                {
+                    "type": "response.shell_call_output_content.delta",
+                    "item_id": "sh_fixture",
+                    "output_index": 0,
+                    "command_index": 0,
+                    "delta": {"stdout": "ok\n"},
+                },
+            ),
+            (
+                "response.shell_call_output_content.done",
+                {
+                    "type": "response.shell_call_output_content.done",
+                    "item_id": "sh_fixture",
+                    "output_index": 0,
+                    "command_index": 0,
+                    "output": [
+                        {
+                            "stdout": "ok\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ),
+        ]
+        events = self._responses_item_stream_events(started, completed, middle)
+        result = self._single_result(
+            self._request(
+                "req-responses-shell-call",
+                "openai_responses",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        missing_action_field = copy.deepcopy(events)
+        missing_action_field[2][1]["item"]["action"].pop("max_output_length")
+        invalid_shape = self._single_result(
+            self._request(
+                "req-responses-shell-missing-action-field",
+                "openai_responses",
+                raw_response=self._encode_sse(missing_action_field),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_shape,
+            "/events/2/data/item/action/max_output_length",
+            "MISSING_FIELD",
+        )
+
+        custom_item = {
+            "type": "custom_tool_call",
+            "id": "ctc_fixture",
+            "call_id": "call_fixture",
+            "name": "fixture",
+            "input": "ok",
+        }
+        wrong = self._responses_item_stream_events(custom_item, custom_item, middle)
+        for _, payload in wrong[3:-2]:
+            if "item_id" in payload:
+                payload["item_id"] = "ctc_fixture"
+        invalid_reference = self._single_result(
+            self._request(
+                "req-responses-shell-wrong-item",
+                "openai_responses",
+                raw_response=self._encode_sse(wrong),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_reference,
+            "/events/3/data/output_index",
+            "CORRELATION",
+        )
+        self._assert_difference(
+            invalid_reference,
+            "/events/6/data/item_id",
+            "CORRELATION",
+        )
+
+    def test_responses_annotation_is_nullable_and_targets_output_text(self) -> None:
+        events = self._responses_stream_events()
+        events.insert(
+            5,
+            (
+                "response.output_text.annotation.added",
+                {
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": None,
+                },
+            ),
+        )
+        for sequence_number, (_, payload) in enumerate(events):
+            payload["sequence_number"] = sequence_number
+        result = self._single_result(
+            self._request(
+                "req-responses-null-annotation",
+                "openai_responses",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+        missing = copy.deepcopy(events)
+        missing[5][1].pop("annotation")
+        invalid_missing = self._single_result(
+            self._request(
+                "req-responses-missing-annotation",
+                "openai_responses",
+                raw_response=self._encode_sse(missing),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_missing,
+            "/events/5/data/annotation",
+            "MISSING_FIELD",
+        )
+
+        refusal = self._responses_stream_events()
+        refusal[3][1]["part"] = {"type": "refusal", "refusal": ""}
+        del refusal[4:6]
+        refusal.insert(
+            4,
+            (
+                "response.output_text.annotation.added",
+                {
+                    "type": "response.output_text.annotation.added",
+                    "item_id": "msg_fixture",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "annotation_index": 0,
+                    "annotation": None,
+                },
+            ),
+        )
+        refusal[5][1]["part"] = {"type": "refusal", "refusal": "no"}
+        refusal_item = copy.deepcopy(refusal[6][1]["item"])
+        refusal_item["content"] = [{"type": "refusal", "refusal": "no"}]
+        refusal[6][1]["item"] = refusal_item
+        refusal[7][1]["response"]["output"] = [copy.deepcopy(refusal_item)]
+        for sequence_number, (_, payload) in enumerate(refusal):
+            payload["sequence_number"] = sequence_number
+        invalid_part = self._single_result(
+            self._request(
+                "req-responses-annotation-refusal",
+                "openai_responses",
+                raw_response=self._encode_sse(refusal),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            invalid_part,
+            "/events/4/data/content_index",
+            "CORRELATION",
+        )
+
+    def test_responses_stream_terminal_event_matches_response_state(self) -> None:
+        completed_with_failed_status = self._responses_stream_events()
+        completed_with_failed_status[-1][1]["response"]["status"] = "failed"
+
+        failed_without_error = self._responses_stream_events()
+        failed_without_error[-1] = (
+            "response.failed",
+            {
+                **failed_without_error[-1][1],
+                "type": "response.failed",
+            },
+        )
+        failed_without_error[-1][1]["response"]["status"] = "failed"
+
+        fixtures = (
+            (
+                completed_with_failed_status,
+                "/events/8/data/response/status",
+            ),
+            (failed_without_error, "/events/8/data/response/error"),
+        )
+        for index, (events, location) in enumerate(fixtures):
+            with self.subTest(index=index):
+                result = self._single_result(
+                    self._request(
+                        f"req-responses-stream-terminal-state-{index}",
+                        "openai_responses",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, "CORRELATION")
+
+    def test_anthropic_stream_block_tool_and_message_lifecycle(self) -> None:
+        event_mismatch = self._anthropic_stream_events()
+        event_mismatch[2] = ("content_block_stop", event_mismatch[2][1])
+
+        block_index_mismatch = self._anthropic_stream_events()
+        block_index_mismatch[4][1]["index"] = 1
+
+        invalid_tool_json = self._anthropic_stream_events()
+        invalid_tool_json[3][1]["delta"]["partial_json"] = '"Beijing"'
+
+        stop_reason_mismatch = self._anthropic_stream_events()
+        stop_reason_mismatch[5][1]["delta"]["stop_reason"] = "end_turn"
+
+        missing_message_delta = self._anthropic_stream_events()
+        del missing_message_delta[5]
+
+        missing_message_stop = self._anthropic_stream_events()[:-1]
+
+        fixtures = (
+            (event_mismatch, "/events/2/event", "VALUE_MISMATCH"),
+            (block_index_mismatch, "/events/4/data/index", "CORRELATION"),
+            (invalid_tool_json, "/events/4/data", "INVALID_JSON"),
+            (
+                stop_reason_mismatch,
+                "/events/5/data/delta/stop_reason",
+                "CORRELATION",
+            ),
+            (missing_message_delta, "/events/5/data/type", "SEQUENCE"),
+            (missing_message_stop, "/events/6", "SEQUENCE"),
+        )
+        for index, (events, location, kind) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-anthropic-stream-lifecycle-{index}",
+                        "anthropic_messages",
+                        raw_response=self._encode_sse(events),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, kind)
+
+        error_result = self._single_result(
+            self._request(
+                "req-anthropic-stream-error",
+                "anthropic_messages",
+                raw_response=self._encode_sse(
+                    [
+                        (
+                            "error",
+                            {
+                                "type": "error",
+                                "error": {
+                                    "type": "overloaded_error",
+                                    "message": "overloaded",
+                                },
+                            },
+                        )
+                    ]
+                ),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", error_result["status"])
+
+    def test_anthropic_stream_content_blocks_precede_message_delta(self) -> None:
+        events = self._anthropic_stream_events()
+        message_delta = events.pop(5)
+        events.insert(1, message_delta)
+        result = self._single_result(
+            self._request(
+                "req-anthropic-stream-block-after-message-delta",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            result,
+            "/events/2/data/type",
+            "SEQUENCE",
+        )
+
+    def test_anthropic_stream_allows_multiple_partial_message_deltas(self) -> None:
+        events = self._anthropic_stream_events()
+        events.insert(
+            5,
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {},
+                    "usage": {"output_tokens": 1},
+                },
+            ),
+        )
+        result = self._single_result(
+            self._request(
+                "req-anthropic-partial-message-deltas",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_anthropic_stream_delta_type_matches_open_block(self) -> None:
+        events = self._anthropic_stream_events()
+        events[2][1]["delta"] = {"type": "text_delta", "text": "wrong"}
+        del events[3]
+        result = self._single_result(
+            self._request(
+                "req-anthropic-stream-tool-text-delta",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            result,
+            "/events/2/data/delta/type",
+            "CORRELATION",
+        )
+
+    def test_anthropic_stream_block_indexes_are_contiguous(self) -> None:
+        events = self._anthropic_stream_events()
+        for event_index in (1, 2, 3, 4):
+            events[event_index][1]["index"] = 1
+        result = self._single_result(
+            self._request(
+                "req-anthropic-stream-noncontiguous-block",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            result,
+            "/events/1/data/index",
+            "SEQUENCE",
+        )
+
+    def test_anthropic_stream_reports_each_extra_field_once(self) -> None:
+        events = self._anthropic_stream_events()
+        events[-1][1]["extra"] = True
+        result = self._single_result(
+            self._request(
+                "req-anthropic-stream-extra-field",
+                "anthropic_messages",
+                raw_response=self._encode_sse(events),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        matching = [
+            difference
+            for difference in result["differences"]
+            if difference["location"] == "/events/6/data/extra"
+            and difference["differenceKind"] == "UNEXPECTED_FIELD"
+        ]
+        self.assertEqual(1, len(matching), result["differences"])
+
+    def test_gemini_stream_eof_and_declared_tool_arguments(self) -> None:
+        final_event = self._gemini_stream_events()[-1:]
+        eof_result = self._single_result(
+            self._request(
+                "req-gemini-stream-eof",
+                "gemini_generate_content",
+                raw_response=self._encode_sse(
+                    final_event,
+                    trailing_blank=False,
+                ),
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self.assertEqual("CONSISTENT", eof_result["status"])
+
+        response = self._gemini()
+        response["candidates"][0]["content"]["parts"] = [
+            {
+                "functionCall": {
+                    "name": "get_weather",
+                    "args": '{"city":"Beijing"}',
+                }
+            }
+        ]
+        request_body = {
+            "tools": [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": "get_weather",
+                            "parameters": {
+                                "type": "OBJECT",
+                                "properties": {"city": {"type": "STRING"}},
+                                "required": ["city"],
+                            },
+                        }
+                    ]
+                }
+            ]
+        }
+        args_result = self._single_result(
+            self._request(
+                "req-gemini-stream-tool-args",
+                "gemini_generate_content",
+                raw_response=self._encode_sse(
+                    [(None, response)],
+                    trailing_blank=False,
+                ),
+                request_body=request_body,
+                stream="1",
+                response_headers="content-type: text/event-stream",
+            )
+        )
+        self._assert_difference(
+            args_result,
+            "/events/0/data/candidates/0/content/parts/0/functionCall/args",
+            "TYPE_MISMATCH",
+        )
+
+    def test_gemini_stream_identity_is_stable_across_frames(self) -> None:
+        fixtures = []
+
+        changed_response_id = self._gemini_stream_events()
+        changed_response_id[1][1]["responseId"] = "resp-other"
+        fixtures.append((changed_response_id, "/events/1/data/responseId"))
+
+        changed_model_version = self._gemini_stream_events()
+        changed_model_version[1][1]["modelVersion"] = "gemini-other"
+        fixtures.append((changed_model_version, "/events/1/data/modelVersion"))
+
+        for index, (events, location) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-gemini-stream-identity-{index}",
+                        "gemini_generate_content",
+                        raw_response=self._encode_sse(
+                            events,
+                            trailing_blank=False,
+                        ),
+                        stream="1",
+                        response_headers="content-type: text/event-stream",
+                    )
+                )
+                self._assert_difference(result, location, "CORRELATION")
+
+    def test_ollama_stream_terminal_usage_and_inband_error(self) -> None:
+        missing_terminal = self._ollama_stream_records()[:1]
+
+        duplicate_terminal = self._ollama_stream_records()
+        duplicate_terminal.append(copy.deepcopy(duplicate_terminal[-1]))
+
+        invalid_usage = self._ollama_stream_records()
+        invalid_usage[1]["eval_count"] = "1"
+
+        invalid_error = self._ollama_stream_records()[:1]
+        invalid_error.append({"error": {"message": "generation failed"}})
+
+        fixtures = (
+            (missing_terminal, "/records/1", "SEQUENCE"),
+            (duplicate_terminal, "/records/2/done", "SEQUENCE"),
+            (invalid_usage, "/records/1/eval_count", "TYPE_MISMATCH"),
+            (invalid_error, "/records/1/error", "TYPE_MISMATCH"),
+        )
+        for index, (records, location, kind) in enumerate(fixtures):
+            with self.subTest(index=index, location=location):
+                result = self._single_result(
+                    self._request(
+                        f"req-ollama-stream-lifecycle-{index}",
+                        "ollama_chat",
+                        raw_response=self._encode_ndjson(records),
+                        stream="1",
+                        response_headers="content-type: application/x-ndjson",
+                    )
+                )
+                self._assert_difference(result, location, kind)
+
+        inband_error = self._ollama_stream_records()[:1]
+        inband_error.append({"error": "generation failed"})
+        error_result = self._single_result(
+            self._request(
+                "req-ollama-stream-error",
+                "ollama_chat",
+                raw_response=self._encode_ndjson(inband_error),
+                stream="1",
+                response_headers="content-type: application/x-ndjson",
+            )
+        )
+        self.assertEqual("CONSISTENT", error_result["status"])
+
+    def test_ollama_stream_final_record_requires_usage_fields(self) -> None:
+        usage_fields = (
+            "total_duration",
+            "load_duration",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "eval_count",
+            "eval_duration",
+        )
+        for field in usage_fields:
+            with self.subTest(field=field):
+                records = self._ollama_stream_records()
+                del records[-1][field]
+                result = self._single_result(
+                    self._request(
+                        f"req-ollama-stream-missing-final-{field}",
+                        "ollama_chat",
+                        raw_response=self._encode_ndjson(records),
+                        stream="1",
+                        response_headers="content-type: application/x-ndjson",
+                    )
+                )
+                self._assert_difference(
+                    result,
+                    f"/records/1/{field}",
+                    "MISSING_FIELD",
+                )
+
+    def test_ollama_stream_nonfinal_record_rejects_final_usage_fields(self) -> None:
+        records = self._ollama_stream_records()
+        records[0]["eval_count"] = 1
+        result = self._single_result(
+            self._request(
+                "req-ollama-stream-nonfinal-usage",
+                "ollama_chat",
+                raw_response=self._encode_ndjson(records),
+                stream="1",
+                response_headers="content-type: application/x-ndjson",
+            )
+        )
+        self._assert_difference(
+            result,
+            "/records/0/eval_count",
+            "SEQUENCE",
+        )
 
     def test_content_type_is_validated_only_when_present(self) -> None:
         result = self._single_result(
@@ -964,6 +2848,18 @@ class ProtocolConformanceTests(unittest.TestCase):
                     any(expected_error in error for error in errors),
                     errors,
                 )
+
+    def test_analyzer_treats_empty_protocol_as_missing_metadata(self) -> None:
+        report = analyze_protocol_conformance(
+            self._parsed(
+                {"req-empty-protocol": self._request("req-empty-protocol", "", self._chat())}
+            )
+        )
+        self.assertEqual([], validate_protocol_conformance(report))
+        result = report["results"][0]
+        self.assertIsNone(result["protocol"])
+        self._assert_one_difference(result, "/protocol", "EVIDENCE_GAP")
+        self.assertIsNone(result["differences"][0]["protocol"])
 
 
 if __name__ == "__main__":

@@ -835,15 +835,130 @@ class _ResponsesValidator(_ChatValidator):
         if not self.enum(
             item_type,
             _path(location, "type"),
-            ("function_call", "message", "reasoning"),
+            (
+                "custom_tool_call",
+                "function_call",
+                "message",
+                "reasoning",
+                "shell_call",
+            ),
         ):
             return
         if item_type == "function_call":
             self.validate_function_call(value, location)
+        elif item_type == "custom_tool_call":
+            self.validate_custom_tool_call(value, location)
         elif item_type == "message":
             self.validate_response_message(value, location)
-        else:
+        elif item_type == "reasoning":
             self.validate_reasoning_item(value, location)
+        else:
+            self.validate_shell_call(value, location)
+
+    def validate_tool_call_caller(self, value: object, location: str) -> None:
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            self.add(location, "TYPE_MISMATCH", "object or null", _actual_type(value))
+            return
+        caller_type = value.get("type")
+        if caller_type == "direct":
+            self.object_shape(value, location, ("type",))
+        elif caller_type == "program":
+            if self.object_shape(value, location, ("type", "caller_id")):
+                if "caller_id" in value:
+                    self.string(value["caller_id"], _path(location, "caller_id"))
+        elif "type" not in value:
+            self.add(_path(location, "type"), "MISSING_FIELD", "present", "missing")
+        else:
+            self.add(
+                _path(location, "type"),
+                "ENUM_MISMATCH",
+                "one of direct, program",
+                "value outside allowed enum",
+            )
+
+    def validate_custom_tool_call(self, value: object, location: str) -> None:
+        if not self.object_shape(
+            value,
+            location,
+            ("type", "call_id", "name", "input"),
+            ("id", "caller", "namespace"),
+        ):
+            return
+        assert isinstance(value, dict)
+        if "type" in value:
+            self.enum(value["type"], _path(location, "type"), ("custom_tool_call",))
+        for field in ("id", "call_id", "namespace", "name", "input"):
+            if field in value:
+                self.string(value[field], _path(location, field))
+        if "caller" in value:
+            self.validate_tool_call_caller(value["caller"], _path(location, "caller"))
+
+    def validate_shell_call(self, value: object, location: str) -> None:
+        if not self.object_shape(
+            value,
+            location,
+            ("type", "id", "call_id", "action", "status", "environment"),
+            ("caller", "created_by"),
+        ):
+            return
+        assert isinstance(value, dict)
+        if "type" in value:
+            self.enum(value["type"], _path(location, "type"), ("shell_call",))
+        for field in ("id", "call_id", "created_by"):
+            if field in value:
+                self.string(value[field], _path(location, field))
+        if "status" in value:
+            self.enum(value["status"], _path(location, "status"), self._ITEM_STATUSES)
+        if "caller" in value:
+            self.validate_tool_call_caller(value["caller"], _path(location, "caller"))
+        if "action" in value:
+            self.validate_shell_action(value["action"], _path(location, "action"))
+        if "environment" in value:
+            self.validate_shell_environment(
+                value["environment"], _path(location, "environment")
+            )
+
+    def validate_shell_action(self, value: object, location: str) -> None:
+        if not self.object_shape(
+            value,
+            location,
+            ("commands", "timeout_ms", "max_output_length"),
+        ):
+            return
+        assert isinstance(value, dict)
+        commands = value.get("commands")
+        if self.typed(commands, _path(location, "commands"), "array", lambda item: isinstance(item, list)):
+            assert isinstance(commands, list)
+            for index, command in enumerate(commands):
+                self.string(command, f"{_path(location, 'commands')}/{index}")
+        for field in ("timeout_ms", "max_output_length"):
+            if field in value and value[field] is not None:
+                self.integer(value[field], _path(location, field))
+
+    def validate_shell_environment(self, value: object, location: str) -> None:
+        if value is None:
+            return
+        if not isinstance(value, dict):
+            self.add(location, "TYPE_MISMATCH", "object or null", _actual_type(value))
+            return
+        environment_type = value.get("type")
+        if environment_type == "local":
+            self.object_shape(value, location, ("type",))
+        elif environment_type == "container_reference":
+            if self.object_shape(value, location, ("type", "container_id")):
+                if "container_id" in value:
+                    self.string(value["container_id"], _path(location, "container_id"))
+        elif "type" not in value:
+            self.add(_path(location, "type"), "MISSING_FIELD", "present", "missing")
+        else:
+            self.add(
+                _path(location, "type"),
+                "ENUM_MISMATCH",
+                "one of local, container_reference",
+                "value outside allowed enum",
+            )
 
     def validate_function_call(self, value: object, location: str) -> None:
         if not self.object_shape(
@@ -1080,7 +1195,8 @@ class _ResponsesValidator(_ChatValidator):
         if not self.object_shape(
             value,
             location,
-            ("token", "logprob", "bytes", "top_logprobs"),
+            ("token", "logprob"),
+            ("top_logprobs",),
         ):
             return
         assert isinstance(value, dict)
@@ -1093,8 +1209,6 @@ class _ResponsesValidator(_ChatValidator):
                 "number",
                 _is_number,
             )
-        if "bytes" in value:
-            self.validate_byte_array(value["bytes"], _path(location, "bytes"))
         if "top_logprobs" not in value:
             return
         top_logprobs = value["top_logprobs"]
@@ -1110,7 +1224,8 @@ class _ResponsesValidator(_ChatValidator):
                 if not self.object_shape(
                     top_logprob,
                     item_path,
-                    ("token", "logprob", "bytes"),
+                    (),
+                    ("token", "logprob"),
                 ):
                     continue
                 assert isinstance(top_logprob, dict)
@@ -1122,10 +1237,6 @@ class _ResponsesValidator(_ChatValidator):
                         _path(item_path, "logprob"),
                         "number",
                         _is_number,
-                    )
-                if "bytes" in top_logprob:
-                    self.validate_byte_array(
-                        top_logprob["bytes"], _path(item_path, "bytes")
                     )
 
     def validate_byte_array(self, value: object, location: str) -> None:
@@ -2515,7 +2626,11 @@ def _analyze_request(
 ) -> dict:
     raw_request = request if isinstance(request, dict) else {}
     raw_protocol = raw_request.get("protocol")
-    protocol = raw_protocol if isinstance(raw_protocol, str) else None
+    protocol = (
+        raw_protocol
+        if isinstance(raw_protocol, str) and raw_protocol != ""
+        else None
+    )
     stream_value = _parse_stream(raw_request.get("stream"))
     stream = stream_value is True
     metrics = raw_request.get("metrics")
@@ -2569,8 +2684,10 @@ def _analyze_request(
             "zero transport exit code",
             "non-zero exit code",
         )
-    elif not isinstance(response_body, str) or not response_body.strip():
-        evidence("/responseBody", "non-empty response bytes", "empty or missing")
+    elif "responseBody" not in raw_request:
+        evidence("/responseBody", "recorded response bytes", "missing")
+    elif not isinstance(response_body, str):
+        evidence("/responseBody", "recorded response bytes", _actual_type(response_body))
     elif http_status is None or not 100 <= http_status <= 599:
         evidence(
             "/metrics/http_status",
@@ -2583,18 +2700,58 @@ def _analyze_request(
             "one pinned supported protocol",
             "missing" if protocol is None else "unknown protocol",
         )
-    elif stream:
-        differences.append(
-            _difference(
+    else:
+        if protocol == "gemini_generate_content":
+            validator = _GeminiValidator(
                 request_id,
                 protocol,
-                "/responseBody",
-                "FRAMING",
-                "validated official streaming framing and lifecycle",
-                "stream validation deferred",
+                raw_request.get("requestBody"),
+                http_status,
             )
-        )
-    else:
+        else:
+            validator_class = {
+                "openai_chat": _ChatValidator,
+                "openai_responses": _ResponsesValidator,
+                "anthropic_messages": _AnthropicValidator,
+                "ollama_chat": _OllamaValidator,
+            }.get(protocol)
+            validator = (
+                validator_class(request_id, protocol)
+                if validator_class is not None
+                else None
+            )
+
+        if stream and validator is not None:
+            from model_doctor_protocol_streaming import (
+                StreamEvidence,
+                validate_stream_response,
+            )
+
+            differences.extend(
+                validate_stream_response(
+                    StreamEvidence(
+                        request_id=request_id,
+                        protocol=protocol,
+                        response_body=response_body,
+                        response_headers=raw_request.get("responseHeaders"),
+                        http_status=http_status,
+                        request_body=raw_request.get("requestBody"),
+                        profile_validator=validator,
+                    ),
+                    make_difference=_difference,
+                    validate_http_error=validator.validate_error,
+                )
+            )
+            return {
+                "requestId": request_id,
+                "protocol": protocol,
+                "checkIds": list(check_ids),
+                "stream": stream,
+                "httpStatus": http_status,
+                "status": "DIFFERENT" if differences else "CONSISTENT",
+                "differences": differences,
+            }
+
         content_type = _content_type(raw_request.get("responseHeaders"))
         if content_type is not None:
             media_type = content_type.split(";", 1)[0].strip().lower()
@@ -2623,25 +2780,6 @@ def _analyze_request(
                 )
             )
         else:
-            if protocol == "gemini_generate_content":
-                validator = _GeminiValidator(
-                    request_id,
-                    protocol,
-                    raw_request.get("requestBody"),
-                    http_status,
-                )
-            else:
-                validator_class = {
-                    "openai_chat": _ChatValidator,
-                    "openai_responses": _ResponsesValidator,
-                    "anthropic_messages": _AnthropicValidator,
-                    "ollama_chat": _OllamaValidator,
-                }.get(protocol)
-                validator = (
-                    validator_class(request_id, protocol)
-                    if validator_class is not None
-                    else None
-                )
             if validator is not None:
                 if 200 <= http_status <= 299:
                     differences.extend(validator.validate_success(decoded))
@@ -2832,8 +2970,10 @@ def validate_protocol_conformance(value: object) -> List[str]:
             else:
                 seen_request_ids.add(request_id)
             protocol = result.get("protocol")
-            if protocol is not None and not isinstance(protocol, str):
-                errors.append(f"{prefix} protocol must be a string or null")
+            if protocol is not None and (
+                not isinstance(protocol, str) or protocol == ""
+            ):
+                errors.append(f"{prefix} protocol must be a non-empty string or null")
                 structurally_valid = False
             check_ids = result.get("checkIds")
             if not (
