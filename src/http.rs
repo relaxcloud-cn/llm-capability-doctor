@@ -7,6 +7,9 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::audit::{RequestEvidence, ResponseMetrics};
+use crate::evidence::{
+    StreamEndSignal, StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome,
+};
 use crate::protocol::{AuthMode, Protocol};
 
 pub struct RequestInput {
@@ -159,6 +162,15 @@ impl HttpExecutor {
             headers,
             error,
             response_body: body,
+            transport_outcome: TransportOutcome::CompletedEof,
+            stream_termination: StreamTermination::NotApplicable,
+            stream_end_signal: StreamEndSignal::None,
+            model_stop_reason: None,
+            stream_event_count: 0,
+            tool_contract_status: ToolContractStatus::NotApplicable,
+            tool_contract_errors: Vec::new(),
+            tool_loop_turn: 0,
+            tool_loop_outcome: ToolLoopOutcome::NotApplicable,
         }
     }
 
@@ -190,6 +202,15 @@ impl HttpExecutor {
             headers: Vec::new(),
             error,
             response_body: Vec::new(),
+            transport_outcome: TransportOutcome::TransportError,
+            stream_termination: StreamTermination::TransportError,
+            stream_end_signal: StreamEndSignal::None,
+            model_stop_reason: None,
+            stream_event_count: 0,
+            tool_contract_status: ToolContractStatus::NotApplicable,
+            tool_contract_errors: Vec::new(),
+            tool_loop_turn: 0,
+            tool_loop_outcome: ToolLoopOutcome::NotApplicable,
         }
     }
 }

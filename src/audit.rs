@@ -10,6 +10,9 @@ use chrono::{DateTime, Local};
 use thiserror::Error;
 use url::Url;
 
+use crate::evidence::{
+    StreamEndSignal, StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome,
+};
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
@@ -46,6 +49,15 @@ pub struct RequestEvidence {
     pub headers: Vec<(String, String)>,
     pub error: String,
     pub response_body: Vec<u8>,
+    pub transport_outcome: TransportOutcome,
+    pub stream_termination: StreamTermination,
+    pub stream_end_signal: StreamEndSignal,
+    pub model_stop_reason: Option<String>,
+    pub stream_event_count: usize,
+    pub tool_contract_status: ToolContractStatus,
+    pub tool_contract_errors: Vec<String>,
+    pub tool_loop_turn: usize,
+    pub tool_loop_outcome: ToolLoopOutcome,
 }
 
 pub struct TestManifest {
@@ -191,10 +203,10 @@ impl AuditWriter {
     fn write_header(&mut self, metadata: &RunMetadata) -> Result<(), AuditError> {
         writeln!(self.writer, "========== MODEL DOCTOR RUN ==========")?;
         writeln!(self.writer, "run_id: {}", metadata.run_id)?;
-        writeln!(self.writer, "script_version: 0.10.0")?;
+        writeln!(self.writer, "script_version: {}", env!("CARGO_PKG_VERSION"))?;
         writeln!(self.writer, "collector_runtime: rust")?;
         writeln!(self.writer, "section_encoding: base64")?;
-        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v2")?;
+        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v3")?;
         writeln!(
             self.writer,
             "started_at: {}",
@@ -242,6 +254,22 @@ impl AuditWriter {
             .redactor
             .redact_text(&String::from_utf8_lossy(&request.response_body));
         let safe_headers = self.redactor.redact_headers(&request.headers);
+        let safe_stream_end_signal = single_line(
+            &self
+                .redactor
+                .redact_text(&request.stream_end_signal.to_string()),
+        );
+        let safe_model_stop_reason = request.model_stop_reason.as_deref().map_or_else(
+            || "none".to_owned(),
+            |reason| single_line(&self.redactor.redact_text(reason)),
+        );
+        let safe_tool_contract_errors: Vec<String> = request
+            .tool_contract_errors
+            .iter()
+            .map(|error| self.redactor.redact_text(error))
+            .collect();
+        let safe_tool_contract_errors_json = serde_json::to_string(&safe_tool_contract_errors)
+            .expect("serializing a string array cannot fail");
         let mut output = String::new();
 
         push_line(
@@ -262,6 +290,42 @@ impl AuditWriter {
         push_line(
             &mut output,
             &format!("stream: {}", u8::from(request.stream)),
+        );
+        push_line(
+            &mut output,
+            &format!("transport_outcome: {}", request.transport_outcome),
+        );
+        push_line(
+            &mut output,
+            &format!("stream_termination: {}", request.stream_termination),
+        );
+        push_line(
+            &mut output,
+            &format!("stream_end_signal: {safe_stream_end_signal}"),
+        );
+        push_line(
+            &mut output,
+            &format!("model_stop_reason: {safe_model_stop_reason}"),
+        );
+        push_line(
+            &mut output,
+            &format!("stream_event_count: {}", request.stream_event_count),
+        );
+        push_line(
+            &mut output,
+            &format!("tool_contract_status: {}", request.tool_contract_status),
+        );
+        push_line(
+            &mut output,
+            &format!("tool_contract_errors_json: {safe_tool_contract_errors_json}"),
+        );
+        push_line(
+            &mut output,
+            &format!("tool_loop_turn: {}", request.tool_loop_turn),
+        );
+        push_line(
+            &mut output,
+            &format!("tool_loop_outcome: {}", request.tool_loop_outcome),
         );
         output.push('\n');
         push_line(&mut output, "----- CURL COMMAND BEGIN -----");
@@ -416,4 +480,168 @@ fn open_private_file(path: &Path) -> std::io::Result<File> {
         .truncate(true)
         .write(true)
         .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::Duration;
+
+    use chrono::Local;
+    use tempfile::tempdir;
+
+    use super::{AuditWriter, RequestEvidence, ResponseMetrics, RunMetadata};
+    use crate::evidence::{
+        StreamEndSignal, StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome,
+    };
+    use crate::protocol::{AuthMode, Protocol};
+    use crate::redaction::Redactor;
+
+    #[test]
+    fn run_header_declares_011_and_evidence_v3() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("audit.log");
+        let url: url::Url = "https://example.com/v1/chat/completions"
+            .parse()
+            .expect("valid URL");
+        let metadata = RunMetadata {
+            run_id: "run-1".to_owned(),
+            started_at: Local::now(),
+            url: url.clone(),
+            model: "test-model".to_owned(),
+            masked_api_key: "[MASKED]".to_owned(),
+            selected_test_count: 1,
+            insecure: false,
+        };
+        let audit =
+            AuditWriter::create(&path, metadata, Redactor::new("", &url)).expect("create audit");
+        drop(audit);
+
+        let output = fs::read_to_string(path).expect("read audit");
+        assert!(output.contains("script_version: 0.11.0\n"));
+        assert!(output.contains("log_schema: llm-capability-doctor.evidence.v3\n"));
+    }
+
+    #[test]
+    fn request_block_emits_v3_metadata_before_encoded_sections() {
+        let (audit, _) = test_audit("");
+        let request = sample_request();
+
+        let output = audit.render_request(&request);
+        let start = output.find("transport_outcome:").expect("v3 metadata");
+        let end = output
+            .find("----- CURL COMMAND BEGIN -----")
+            .expect("curl section");
+
+        assert_eq!(
+            &output[start..end],
+            concat!(
+                "transport_outcome: completed_eof\n",
+                "stream_termination: completed\n",
+                "stream_end_signal: [DONE]\n",
+                "model_stop_reason: stop\n",
+                "stream_event_count: 3\n",
+                "tool_contract_status: conformant\n",
+                "tool_contract_errors_json: []\n",
+                "tool_loop_turn: 1\n",
+                "tool_loop_outcome: completed\n",
+                "\n",
+            )
+        );
+    }
+
+    #[test]
+    fn tool_contract_errors_are_redacted_json_strings() {
+        let (audit, _) = test_audit("secret-token");
+        let mut request = sample_request();
+        request.model_stop_reason = None;
+        request.tool_contract_status = ToolContractStatus::NonConformant;
+        request.tool_contract_errors =
+            vec!["bad secret-token".to_owned(), "line\n\"quoted\"".to_owned()];
+
+        let output = audit.render_request(&request);
+
+        assert!(output.contains("model_stop_reason: none\n"));
+        assert!(output.contains(
+            "tool_contract_errors_json: [\"bad [REDACTED]\",\"line\\n\\\"quoted\\\"\"]\n"
+        ));
+        assert!(!output.contains("secret-token"));
+    }
+
+    #[test]
+    fn dynamic_stream_metadata_is_redacted_and_single_line() {
+        let (audit, _) = test_audit("secret-token");
+        let mut request = sample_request();
+        request.stream_end_signal = StreamEndSignal::GeminiFinishReason(
+            "STOP-secret-token\r\nforged_signal: true".to_owned(),
+        );
+        request.model_stop_reason = Some("stop-secret-token\r\nforged_reason: true".to_owned());
+
+        let output = audit.render_request(&request);
+
+        assert!(output.contains(
+            "stream_end_signal: finishReason:STOP-[REDACTED]\\r\\nforged_signal: true\n"
+        ));
+        assert!(output.contains("model_stop_reason: stop-[REDACTED]\\r\\nforged_reason: true\n"));
+        assert!(!output.contains("secret-token"));
+        assert!(!output.contains("\nforged_signal:"));
+        assert!(!output.contains("\nforged_reason:"));
+    }
+
+    fn test_audit(api_key: &str) -> (AuditWriter, tempfile::TempDir) {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("audit.log");
+        let url: url::Url = "https://example.com/v1/chat/completions"
+            .parse()
+            .expect("valid URL");
+        let metadata = RunMetadata {
+            run_id: "run-1".to_owned(),
+            started_at: Local::now(),
+            url: url.clone(),
+            model: "test-model".to_owned(),
+            masked_api_key: "[MASKED]".to_owned(),
+            selected_test_count: 1,
+            insecure: false,
+        };
+        let audit = AuditWriter::create(&path, metadata, Redactor::new(api_key, &url))
+            .expect("create audit");
+        (audit, directory)
+    }
+
+    fn sample_request() -> RequestEvidence {
+        let now = Local::now();
+        RequestEvidence {
+            request_id: "request-1".to_owned(),
+            started_at: now,
+            completed_at: now,
+            protocol: Protocol::OpenAiChat,
+            auth_mode: AuthMode::Bearer,
+            stream: true,
+            url: "https://example.com/v1/chat/completions"
+                .parse()
+                .expect("valid URL"),
+            timeout: Duration::from_secs(30),
+            insecure: false,
+            body: "{}".to_owned(),
+            metrics: ResponseMetrics {
+                transport_exit_code: 0,
+                http_status: Some(200),
+                time_total: Duration::from_millis(20),
+                time_starttransfer: Duration::from_millis(10),
+                size_download: 2,
+            },
+            headers: Vec::new(),
+            error: String::new(),
+            response_body: b"{}".to_vec(),
+            transport_outcome: TransportOutcome::CompletedEof,
+            stream_termination: StreamTermination::Completed,
+            stream_end_signal: StreamEndSignal::OpenAiDone,
+            model_stop_reason: Some("stop".to_owned()),
+            stream_event_count: 3,
+            tool_contract_status: ToolContractStatus::Conformant,
+            tool_contract_errors: Vec::new(),
+            tool_loop_turn: 1,
+            tool_loop_outcome: ToolLoopOutcome::Completed,
+        }
+    }
 }

@@ -117,7 +117,7 @@ git commit -m "feat: restore official tool protocol check"
 - Modify: `src/audit.rs`
 - Modify: `src/http.rs`
 
-- [ ] **Step 1: Add failing wire-name and audit serialization tests.**
+- [x] **Step 1: Add failing wire-name and audit serialization tests.**
 
 Create these tests:
 
@@ -143,7 +143,7 @@ tool_loop_turn
 tool_loop_outcome
 ```
 
-- [ ] **Step 2: Run the audit tests and confirm missing symbols/fields.**
+- [x] **Step 2: Run the audit tests and confirm missing symbols/fields.**
 
 ```bash
 cargo test --locked --lib evidence::tests -- --nocapture
@@ -152,7 +152,7 @@ cargo test --locked --lib audit::tests -- --nocapture
 
 Expected: compilation fails because `evidence` and the nine request fields do not exist.
 
-- [ ] **Step 3: Implement the stable evidence model.**
+- [x] **Step 3: Implement the stable evidence model.**
 
 Define these public types in `src/evidence.rs`:
 
@@ -220,7 +220,7 @@ all end-signal, contract, loop, count, and error-list fields use their approved
 zero/not-applicable values. Task 3 replaces the legacy failure default with
 the precise timeout/disconnect/cancellation classification.
 
-- [ ] **Step 4: Run audit/evidence tests.**
+- [x] **Step 4: Run audit/evidence tests.**
 
 ```bash
 cargo test --locked --lib evidence::tests -- --nocapture
@@ -229,7 +229,7 @@ cargo test --locked --lib audit::tests -- --nocapture
 
 Expected: exact wire-name, field-order, version, and redaction assertions pass.
 
-- [ ] **Step 5: Commit the evidence contract.**
+- [x] **Step 5: Commit the evidence contract.**
 
 ```bash
 git add src/evidence.rs src/lib.rs src/audit.rs src/http.rs
