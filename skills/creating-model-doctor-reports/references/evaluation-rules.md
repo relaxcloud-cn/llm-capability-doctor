@@ -183,7 +183,7 @@ Use only the fixed labels “OpenCodex 数据格式兼容”, “OpenCodex 数�
 ### 002 协议识别
 
 - Method: inspect all ordered protocol probes until the first matching response.
-- `PASS`: at least one response matches an exact root envelope and field types: OpenAI Chat uses root `choices[0].message.content`; OpenAI Responses uses root `type:"response"`, `status:"completed"`, and an `output` message whose content contains text; Anthropic uses root `type:"message"` and a text content block; Gemini GenerateContent uses root `candidates[].content.parts[].text`; Ollama Chat uses root `message.content` with `done:true`.
+- `PASS`: at least one response matches an exact root envelope and field types: OpenAI Chat requires a root `choices` array whose first item has an object `message` with non-empty string `content`; OpenAI Responses requires a non-empty root `id` and a non-empty root `output` array containing a `type:"message"` item whose `content` array contains a `type:"output_text"` block with non-empty string `text`; Anthropic requires root `type:"message"`, a non-empty root `content` array, and at least one `type:"text"` block with non-empty string `text`; Gemini GenerateContent checks only `candidates[0].content.parts[].text` and requires at least one non-empty string `text`; Ollama Chat requires root `message.content` with `done:true`.
 - `FAIL`: no probe matches a supported response structure.
 - Do not use recursive key search, nested lookalikes, or a marker outside the protocol's model-visible content path. Ollama can pass protocol detection but is not one of the four OpenCodex compatibility families.
 - Conclusion: summarize which probe returned a matching protocol structure, then write `因此判定该接口为 <协议> 协议。`; do not report only “检测成功”.
@@ -198,12 +198,12 @@ Use only the fixed labels “OpenCodex 数据格式兼容”, “OpenCodex 数�
 ### 004 同步生成
 
 - Method: inspect the non-streaming request for `MODEL_DOCTOR_CASE_004_OK`.
-- `PASS`: a complete protocol-native non-stream envelope satisfies the same exact root and field-type rules as 002, reaches its synchronous completed state, and contains the marker only in model-visible content.
-- `FAIL`: request error, streaming response, incomplete state, nested lookalike, invalid envelope, empty model-visible content, or missing marker.
+- `PASS`: a complete protocol-native non-stream envelope satisfies the same exact root and field-type rules as 002 and contains the marker only in model-visible content. The matcher does not add completion fields beyond 002; in particular, OpenAI Responses does not require root `type` or `status`.
+- `FAIL`: request error, streaming response, truncated or invalid JSON, nested lookalike, invalid envelope, empty model-visible content, or missing marker. Do not infer failure from an ignored protocol completion field.
 
 ### 005 流式生成
 
-- Method: parse SSE records in wire order and concatenate only protocol-native model-visible deltas for `MODEL_DOCTOR_CASE_005_OK`. OpenAI Chat records require the exact `data: ` prefix; Google accepts `data:` with optional following space. Parse a trailing residual `data:` record at EOF. Anthropic may ignore malformed/unrecognized non-content frames; malformed JSON records for the other three supported families fail.
+- Method: parse SSE records in wire order and concatenate only protocol-native model-visible deltas for `MODEL_DOCTOR_CASE_005_OK`. OpenAI Chat records require the exact `data: ` prefix; OpenAI Responses, Anthropic, and Google accept `data:` with an optional following space. Parse a trailing residual `data:` record at EOF. Anthropic drops every `data:` frame whose JSON cannot be parsed and continues; malformed JSON `data:` frames for OpenAI Chat, OpenAI Responses, and Google record a stream error.
 - `PASS`: valid incremental stream events reconstruct the complete marker without using an ordinary non-stream JSON body or non-visible fields.
 - `FAIL`: ordinary non-stream JSON, malformed required SSE data, invalid delta shape, no valid stream content, request failure, or missing marker.
 - Boundary: 006 makes the protocol terminal contract explicit; seeing text alone does not prove a complete stream.
@@ -212,8 +212,9 @@ Use only the fixed labels “OpenCodex 数据格式兼容”, “OpenCodex 数�
 
 - Method: inspect a streaming request for its marker, ordered SSE records, protocol-native terminal, and EOF behavior.
 - Immediate terminal signals are OpenAI Chat `[DONE]`, explicit protocol error events, and OpenAI Responses failed/incomplete events. A normal OpenAI Responses `response.completed`, Chat `finish_reason`/usage fallback, Anthropic `message_stop`/`stop_reason`, and Google `finishReason`/`usageMetadata` become complete only after clean EOF. Ollama `done:true` remains a general protocol terminal but does not make Ollama OpenCodex-compatible.
+- The stream inspector stops parsing at an immediate terminal, and the HTTP executor stops reading later network chunks. Bytes after the terminal that were already present in the same received chunk may still exist in the raw response evidence but do not participate in the stream inspector verdict; they are not a trailing-content failure.
 - `PASS`: the complete marker is reconstructed, the required normal terminal is present, no later error contradicts it, and every EOF-fallback protocol reaches clean EOF.
-- `FAIL`: missing/failed/incomplete terminal, truncation, explicit stream error, malformed required frame, content after an immediate terminal, or incomplete text.
+- `FAIL`: missing/failed/incomplete terminal, truncation, an explicit stream error observed before an immediate terminal, a later error after a normal EOF-fallback terminal, malformed required frame, or incomplete text.
 
 ### 007 Token usage
 
@@ -367,9 +368,10 @@ Require protocol-native formal tool calls. Natural-language descriptions never c
 ### 040 单工具调用
 
 - Method: inspect the streaming tool response, reassemble every protocol-native tool-name and argument delta by call identity, parse the completed arguments object, and require a normal stream terminal.
+- Required streamed call identity is protocol-specific: OpenAI Chat requires a non-empty `tool_calls[].id` and `function.name`; OpenAI Responses requires a non-empty `call_id` and `name`; Anthropic requires a non-empty `tool_use.id` and `name`; Google requires a non-empty `functionCall.name`, while upstream `functionCall.id` is optional.
 - `PASS`: the completed stream contains exactly one `get_weather` call with `city:"Beijing"`.
 - `FAIL`: text-only response, malformed/incomplete argument stream, wrong tool/argument, extra argument, multiple calls, abnormal terminal, or request failure.
-- Boundary: Call ID integrity is not judged here.
+- Boundary: follow-up correlation is not judged here, but the protocol-native call identity fields listed above are.
 
 ### 041 工具选择
 
@@ -402,7 +404,7 @@ Require protocol-native formal tool calls. Natural-language descriptions never c
 
 ### 047 串行工具调用
 
-- Method: inspect both initial and follow-up requests and their protocol-native correlation fields. OpenAI Chat reuses `tool_call_id`, OpenAI Responses reuses `call_id`, and Anthropic reuses `tool_use_id`. Google must discard any upstream call ID, generate a new Google 本地调用 ID, and reuse that same local ID in the logged `functionCall` and `functionResponse` history.
+- Method: inspect both initial and follow-up requests, the exact namespace presented to the model, and their protocol-native correlation fields. For the first weather call, OpenAI Responses must use `doctor/get_weather`; OpenAI Chat, Anthropic, and Google must use `doctor__get_weather`. The second tool remains bare `get_time` for all four families. OpenAI Chat reuses `tool_call_id`, OpenAI Responses reuses `call_id`, and Anthropic reuses `tool_use_id`. Google must discard any upstream call ID, generate a new Google 本地调用 ID, and reuse that same local ID in the logged `functionCall` and `functionResponse` history.
 - `PASS`: the first response calls weather with a non-empty name/required ID, the follow-up returns the tool result using the exact protocol correlation ID, and the second response calls `get_time(zone="UTC")` with a non-empty required ID/name.
 - `FAIL`: missing request, empty name/required ID, fabricated or mismatched history/correlation, Google upstream ID reuse, or wrong second behavior.
 
@@ -459,7 +461,7 @@ Semantic correctness is required for every sample. `time_total` means 完整响�
 
 ### 057 并发响应时间
 
-- Method: inspect the fixed 4、8、16、32 concurrent waves in evidence v2; for historical evidence v1, inspect every wave present under its validated contract.
+- Method: inspect the fixed 4、8、16、32 concurrent waves in evidence v2 and v3; for historical evidence v1, inspect every wave present under its validated contract.
 - `PASS`: every request in every executed wave has the exact wave marker, valid metric, and no rate limit.
 - `FAIL`: any timeout, HTTP/protocol/content error, missing sample, rate limit, or invalid metric.
 - Conclusion: summarize whether every executed concurrency wave succeeded without rate limiting, then judge the highest verified short-run concurrency tier. Keep each wave's success count, rate-limit count, P50, nearest-rank P95, and maximum complete-response latency in evidence. This short run 不构成 SLA or sustained-load proof.

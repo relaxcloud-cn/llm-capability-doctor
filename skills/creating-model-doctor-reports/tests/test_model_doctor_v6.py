@@ -1966,6 +1966,9 @@ test_manifest_count: 1
             encoding="utf-8"
         )
 
+        def section(current: str, following: str) -> str:
+            return rules.split(current, 1)[1].split(following, 1)[0]
+
         for marker in (
             "collector v0.11.0",
             "llm-capability-doctor.evidence.v3",
@@ -1994,6 +1997,70 @@ test_manifest_count: 1
         self.assertIn("045 仍是增强能力项", rules)
         self.assertIn("v1/v2", rules)
         self.assertIn("NOT_ASSESSED", rules)
+
+        protocol_rules = section("### 002 协议识别", "### 003 鉴权与模型接受")
+        self.assertIn("non-empty root `id`", protocol_rules)
+        self.assertIn('`type:"output_text"`', protocol_rules)
+        self.assertIn("`candidates[0].content.parts[].text`", protocol_rules)
+        self.assertNotIn('`type:"response"`', protocol_rules)
+        self.assertNotIn('`status:"completed"`', protocol_rules)
+
+        sync_rules = section("### 004 同步生成", "### 005 流式生成")
+        self.assertIn("does not require root `type` or `status`", sync_rules)
+        self.assertIn("nested lookalike", sync_rules)
+        self.assertNotIn("incomplete state", sync_rules)
+
+        stream_rules = section("### 005 流式生成", "### 006 流结束完整性")
+        self.assertIn(
+            "OpenAI Responses, Anthropic, and Google accept `data:` with an "
+            "optional following space",
+            stream_rules,
+        )
+        self.assertIn(
+            "Anthropic drops every `data:` frame whose JSON cannot be parsed",
+            stream_rules,
+        )
+        self.assertIn(
+            "malformed JSON `data:` frames for OpenAI Chat, OpenAI Responses, "
+            "and Google record a stream error",
+            stream_rules,
+        )
+
+        terminal_rules = section("### 006 流结束完整性", "### 007 Token usage")
+        self.assertIn("stops parsing at an immediate terminal", terminal_rules)
+        self.assertIn("stops reading later network chunks", terminal_rules)
+        self.assertIn(
+            "may still exist in the raw response evidence but do not participate "
+            "in the stream inspector verdict",
+            terminal_rules,
+        )
+        self.assertNotIn("outside the collected evidence", terminal_rules)
+        self.assertNotIn("content after an immediate terminal", terminal_rules)
+
+        single_tool_rules = section("### 040 单工具调用", "### 041 工具选择")
+        for marker in (
+            "non-empty `tool_calls[].id`",
+            "non-empty `call_id`",
+            "non-empty `tool_use.id`",
+            "upstream `functionCall.id` is optional",
+        ):
+            self.assertIn(marker, single_tool_rules)
+        self.assertNotIn("Call ID integrity is not judged", single_tool_rules)
+
+        serial_tool_rules = section("### 047 串行工具调用", "### 048 工具结果忠实性")
+        self.assertIn(
+            "OpenAI Responses must use `doctor/get_weather`",
+            serial_tool_rules,
+        )
+        self.assertIn(
+            "OpenAI Chat, Anthropic, and Google must use `doctor__get_weather`",
+            serial_tool_rules,
+        )
+        self.assertIn("second tool remains bare `get_time`", serial_tool_rules)
+
+        concurrency_rules = section("### 057 并发响应时间", "## 13. Security Business Language")
+        self.assertIn("in evidence v2 and v3", concurrency_rules)
+        self.assertNotIn("in evidence v2;", concurrency_rules)
 
     def test_readme_explains_bounded_opencodex_compatibility_result(self) -> None:
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
