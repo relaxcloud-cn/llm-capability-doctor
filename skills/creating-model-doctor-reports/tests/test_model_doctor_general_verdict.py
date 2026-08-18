@@ -372,6 +372,29 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
                     validate_assessment(tampered),
                 )
 
+    def test_assessment_rejects_boolean_verdict_counts(self) -> None:
+        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        assessment = assemble_assessment(parsed, reviews)
+        count_fields = (
+            "collectedTests",
+            "passedTests",
+            "totalTests",
+            "passedCoreTests",
+            "totalCoreTests",
+            "passedEnhancedTests",
+            "totalEnhancedTests",
+        )
+
+        for field in count_fields:
+            with self.subTest(field=field):
+                tampered = deepcopy(assessment)
+                verdict = tampered["capabilitySummary"]["generalVerdict"]
+                verdict[field] = bool(verdict[field])
+                self.assertIn(
+                    f"capabilitySummary generalVerdict {field} must be an integer",
+                    validate_assessment(tampered),
+                )
+
     def test_assessment_schema_requires_closed_general_verdict(self) -> None:
         schema = json.loads(
             (SKILL_DIR / "references" / "assessment-schema.json").read_text(

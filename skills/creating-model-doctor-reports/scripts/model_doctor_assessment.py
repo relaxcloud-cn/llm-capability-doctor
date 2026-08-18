@@ -64,6 +64,15 @@ REVIEW_CAPABILITY_SUMMARY_FIELDS = {
 ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
     "generalVerdict"
 }
+GENERAL_VERDICT_COUNT_FIELDS = (
+    "collectedTests",
+    "passedTests",
+    "totalTests",
+    "passedCoreTests",
+    "totalCoreTests",
+    "passedEnhancedTests",
+    "totalEnhancedTests",
+)
 CAPABILITY_ISSUE_FIELDS = {
     "title",
     "statement",
@@ -757,6 +766,13 @@ def _validate_assessment_summary(
         return ["capabilitySummary must be an object"]
     for field in sorted(set(summary) - ASSESSMENT_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
+    general_verdict = summary.get("generalVerdict")
+    if isinstance(general_verdict, dict):
+        for field in GENERAL_VERDICT_COUNT_FIELDS:
+            if type(general_verdict.get(field)) is not int:
+                errors.append(
+                    f"capabilitySummary generalVerdict {field} must be an integer"
+                )
     statuses = {
         item.get("testId"): item.get("reviewedStatus")
         for item in items
