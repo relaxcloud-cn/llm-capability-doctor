@@ -22,8 +22,13 @@ pub(crate) struct DecodedSse {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct DecodedNdjson {
-    pub records: Vec<Value>,
-    pub trailing_error: Option<FramingError>,
+    pub items: Vec<NdjsonItem>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum NdjsonItem {
+    Record(Value),
+    Error(FramingError),
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
@@ -72,15 +77,19 @@ pub(crate) async fn decode_sse_chunks(chunks: Vec<Vec<u8>>) -> Result<DecodedSse
 
 pub(crate) fn decode_ndjson_chunks(chunks: Vec<Vec<u8>>) -> Result<Vec<Value>, FramingError> {
     let decoded = decode_ndjson_chunks_partial(chunks);
-    match decoded.trailing_error {
-        Some(error) => Err(error),
-        None => Ok(decoded.records),
+    let mut records = Vec::new();
+    for item in decoded.items {
+        match item {
+            NdjsonItem::Record(record) => records.push(record),
+            NdjsonItem::Error(error) => return Err(error),
+        }
     }
+    Ok(records)
 }
 
 pub(crate) fn decode_ndjson_chunks_partial(chunks: Vec<Vec<u8>>) -> DecodedNdjson {
     let bytes = chunks.concat();
-    let mut records = Vec::new();
+    let mut items = Vec::new();
     let mut line_start = 0;
     let mut line_number = 1;
 
@@ -91,15 +100,10 @@ pub(crate) fn decode_ndjson_chunks_partial(chunks: Vec<Vec<u8>>) -> DecodedNdjso
 
         let line = strip_carriage_return(&bytes[line_start..index]);
         if !is_blank_line(line) {
-            match parse_ndjson_object(line, line_number, false) {
-                Ok(value) => records.push(value),
-                Err(error) => {
-                    return DecodedNdjson {
-                        records,
-                        trailing_error: Some(error),
-                    };
-                }
-            }
+            items.push(match parse_ndjson_object(line, line_number, false) {
+                Ok(value) => NdjsonItem::Record(value),
+                Err(error) => NdjsonItem::Error(error),
+            });
         }
         line_start = index + 1;
         line_number += 1;
@@ -108,22 +112,14 @@ pub(crate) fn decode_ndjson_chunks_partial(chunks: Vec<Vec<u8>>) -> DecodedNdjso
     if line_start < bytes.len() {
         let tail = strip_carriage_return(&bytes[line_start..]);
         if !is_blank_line(tail) {
-            match parse_ndjson_object(tail, line_number, true) {
-                Ok(value) => records.push(value),
-                Err(error) => {
-                    return DecodedNdjson {
-                        records,
-                        trailing_error: Some(error),
-                    };
-                }
-            }
+            items.push(match parse_ndjson_object(tail, line_number, true) {
+                Ok(value) => NdjsonItem::Record(value),
+                Err(error) => NdjsonItem::Error(error),
+            });
         }
     }
 
-    DecodedNdjson {
-        records,
-        trailing_error: None,
-    }
+    DecodedNdjson { items }
 }
 
 fn strip_initial_utf8_bom(mut chunks: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -222,8 +218,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        FramingError, SSE_FEED_CHUNK_BYTES, SseEvent, decode_ndjson_chunks, decode_sse_chunks,
-        into_owned_sse_bytes, sse_feed_chunks,
+        FramingError, NdjsonItem, SSE_FEED_CHUNK_BYTES, SseEvent, decode_ndjson_chunks,
+        decode_ndjson_chunks_partial, decode_sse_chunks, into_owned_sse_bytes, sse_feed_chunks,
     };
 
     fn bytes(value: &str) -> Vec<u8> {
@@ -414,5 +410,44 @@ mod tests {
                 Err(FramingError::NdjsonNotObject { line: 1 })
             );
         }
+    }
+
+    #[test]
+    fn ndjson_partial_decode_preserves_records_and_errors_in_wire_order() {
+        let body = bytes(
+            "{\"record\":0}\nPRIVATE_BAD_ONE\n{\"record\":1}\n[]\n{\"record\":2}\n{\"tail\":",
+        );
+        let decoded = decode_ndjson_chunks_partial(vec![body.clone()]);
+
+        assert_eq!(decoded.items.len(), 6);
+        assert!(matches!(
+            &decoded.items[0],
+            NdjsonItem::Record(value) if value == &json!({"record": 0})
+        ));
+        assert!(matches!(
+            &decoded.items[1],
+            NdjsonItem::Error(FramingError::InvalidNdjson { line: 2, .. })
+        ));
+        assert!(matches!(
+            &decoded.items[2],
+            NdjsonItem::Record(value) if value == &json!({"record": 1})
+        ));
+        assert!(matches!(
+            &decoded.items[3],
+            NdjsonItem::Error(FramingError::NdjsonNotObject { line: 4 })
+        ));
+        assert!(matches!(
+            &decoded.items[4],
+            NdjsonItem::Record(value) if value == &json!({"record": 2})
+        ));
+        assert!(matches!(
+            &decoded.items[5],
+            NdjsonItem::Error(FramingError::IncompleteNdjson { line: 6, .. })
+        ));
+
+        assert!(matches!(
+            decode_ndjson_chunks(vec![body]),
+            Err(FramingError::InvalidNdjson { line: 2, .. })
+        ));
     }
 }

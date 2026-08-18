@@ -5,7 +5,7 @@ use serde_json::{Map, Value};
 
 use crate::evidence::{StreamEndSignal, StreamTermination};
 
-use super::framing::{FramingError, decode_ndjson_chunks_partial};
+use super::framing::{FramingError, NdjsonItem, decode_ndjson_chunks_partial};
 use super::{AssistantTurn, ProtocolHistory, StreamParseResult, ToolCall, ToolCorrelation};
 
 const METRIC_FIELDS: [&str; 6] = [
@@ -49,10 +49,25 @@ struct ParserState {
 
 pub(crate) async fn parse(body: &[u8]) -> StreamParseResult {
     let decoded = decode_ndjson_chunks_partial(vec![body.to_vec()]);
-    let event_count = decoded.records.len();
     let mut state = ParserState::default();
+    let mut event_count = 0;
+    let mut malformed_stream = false;
 
-    for (record_index, record) in decoded.records.iter().enumerate() {
+    for (record_index, item) in decoded.items.iter().enumerate() {
+        let record = match item {
+            NdjsonItem::Record(record) => record,
+            NdjsonItem::Error(error) => {
+                malformed_stream = true;
+                state.sealed = true;
+                push_error(
+                    &mut state.contract_errors,
+                    framing_error_code(error),
+                    &format!("/records/{record_index}"),
+                );
+                continue;
+            }
+        };
+        event_count += 1;
         let Some(record) = record.as_object() else {
             continue;
         };
@@ -113,21 +128,6 @@ pub(crate) async fn parse(body: &[u8]) -> StreamParseResult {
         state.invalid_call_set = true;
     }
 
-    let malformed_stream = decoded.trailing_error.is_some();
-    if let Some(error) = decoded.trailing_error {
-        let code = match error {
-            FramingError::IncompleteNdjson { .. } => "truncated_ndjson",
-            FramingError::InvalidNdjson { .. } => "malformed_ndjson",
-            FramingError::NdjsonNotObject { .. } => "non_object_record",
-            FramingError::InvalidSse { .. } => "invalid_ndjson",
-        };
-        push_error(
-            &mut state.contract_errors,
-            code,
-            &format!("/records/{event_count}"),
-        );
-    }
-
     let stream_termination = if malformed_stream {
         StreamTermination::MalformedStream
     } else if state.protocol_error {
@@ -154,6 +154,15 @@ pub(crate) async fn parse(body: &[u8]) -> StreamParseResult {
         model_stop_reason: state.done_reason,
         event_count,
         contract_errors: state.contract_errors,
+    }
+}
+
+fn framing_error_code(error: &FramingError) -> &'static str {
+    match error {
+        FramingError::IncompleteNdjson { .. } => "truncated_ndjson",
+        FramingError::InvalidNdjson { .. } => "malformed_ndjson",
+        FramingError::NdjsonNotObject { .. } => "non_object_record",
+        FramingError::InvalidSse { .. } => "invalid_ndjson",
     }
 }
 
@@ -1117,6 +1126,88 @@ mod tests {
             parsed.contract_errors,
             ["ollama.truncated_ndjson:/records/1"]
         );
+    }
+
+    #[tokio::test]
+    async fn malformed_record_seals_history_but_later_done_remains_observable() {
+        let after_error = normal(
+            json!({
+                "role": "assistant",
+                "content": "PRIVATE_AFTER_MALFORMED",
+                "tool_calls": [{
+                    "id": "PRIVATE_CALL_ID",
+                    "function": {
+                        "name": "PRIVATE_TOOL_NAME",
+                        "arguments": {"secret": "PRIVATE_ARGUMENT"}
+                    }
+                }]
+            }),
+            true,
+            Some(json!("stop")),
+        );
+        let body = format!(
+            "{}\nPRIVATE_BAD_JSON\n{after_error}\n",
+            normal(assistant("before"), false, None)
+        );
+        let parsed = parse(body.as_bytes()).await;
+
+        assert_eq!(
+            parsed.stream_termination,
+            StreamTermination::MalformedStream
+        );
+        assert_eq!(parsed.stream_end_signal, StreamEndSignal::OllamaDone);
+        assert_eq!(parsed.model_stop_reason.as_deref(), Some("stop"));
+        assert_eq!(parsed.event_count, 2);
+        assert!(
+            parsed
+                .contract_errors
+                .contains(&"ollama.malformed_ndjson:/records/1".to_owned())
+        );
+        assert!(
+            parsed
+                .contract_errors
+                .contains(&"ollama.record_after_terminal:/records/2".to_owned())
+        );
+
+        let turn = parsed.assistant_turn.expect("pre-error history");
+        assert_eq!(turn.final_text, "before");
+        assert!(turn.tool_calls.is_empty());
+        assert_eq!(
+            turn.history,
+            ProtocolHistory::Ollama(json!({"role": "assistant", "content": "before"}))
+        );
+        assert!(!parsed.contract_errors.join(" ").contains("PRIVATE"));
+    }
+
+    #[tokio::test]
+    async fn multiple_framing_errors_and_truncated_tail_keep_wire_order_and_done_signal() {
+        let body = format!(
+            "{}\nPRIVATE_BAD_ONE\n[]\n{}\n{{\"tail\":",
+            normal(assistant("before"), false, None),
+            normal(assistant("PRIVATE_AFTER_ERRORS"), true, Some(json!("stop")))
+        );
+        let parsed = parse(body.as_bytes()).await;
+
+        assert_eq!(
+            parsed.stream_termination,
+            StreamTermination::MalformedStream
+        );
+        assert_eq!(parsed.stream_end_signal, StreamEndSignal::OllamaDone);
+        assert_eq!(parsed.event_count, 2);
+        assert_eq!(
+            parsed.contract_errors,
+            [
+                "ollama.malformed_ndjson:/records/1",
+                "ollama.non_object_record:/records/2",
+                "ollama.record_after_terminal:/records/3",
+                "ollama.truncated_ndjson:/records/4",
+            ]
+        );
+        assert_eq!(
+            parsed.assistant_turn.expect("sealed history").final_text,
+            "before"
+        );
+        assert!(!parsed.contract_errors.join(" ").contains("PRIVATE"));
     }
 
     #[tokio::test]
