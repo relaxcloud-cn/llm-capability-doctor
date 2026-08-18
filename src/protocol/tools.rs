@@ -17,14 +17,17 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
         "045" => Some(
             "MODEL_DOCTOR_CASE_045. In one response call get_weather for Beijing and get_time for UTC.",
         ),
+        "046" => Some(
+            "MODEL_DOCTOR_CASE_046. Call get_weather for Beijing. After its result, reply only MODEL_DOCTOR_CASE_046_OK.",
+        ),
         "047" => Some(
-            "MODEL_DOCTOR_CASE_047. First call get_weather for Beijing. After its result, call get_time for UTC.",
+            "MODEL_DOCTOR_CASE_047. First call get_weather for Beijing. After its result, call get_time for UTC. After that result, reply only MODEL_DOCTOR_CASE_047_OK.",
         ),
         "048" => Some(
             "MODEL_DOCTOR_CASE_048. Call get_weather for Beijing. After the result, reply MODEL_DOCTOR_CASE_048_OK followed by the exact tool result.",
         ),
         "049" => Some(
-            "MODEL_DOCTOR_CASE_049. Call get_weather for Beijing. If it returns a timeout error, retry get_weather once.",
+            "MODEL_DOCTOR_CASE_049. Call get_weather for Beijing. If it returns a timeout error, retry get_weather exactly once. After a successful retry, reply only MODEL_DOCTOR_CASE_049_OK.",
         ),
         "050" => Some(
             "MODEL_DOCTOR_CASE_050. Choose get_weather for Beijing from the available tool catalog.",
@@ -36,7 +39,8 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
 pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> RequestSpec {
     let tools = tool_definitions(protocol, id);
     let parallel = id == "045";
-    let body = match protocol {
+    let stream = matches!(id, "046" | "047" | "048" | "049");
+    let mut body = match protocol {
         Protocol::OpenAiResponses => json!({
             "model": model,
             "input": prompt,
@@ -63,10 +67,12 @@ pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> 
             "stream": false
         }),
     };
-    RequestSpec {
-        body,
-        stream: false,
+    if stream && protocol != Protocol::GeminiGenerateContent {
+        body.as_object_mut()
+            .expect("tool request bodies are JSON objects")
+            .insert("stream".into(), Value::Bool(true));
     }
+    RequestSpec { body, stream }
 }
 
 pub fn build_follow_up(

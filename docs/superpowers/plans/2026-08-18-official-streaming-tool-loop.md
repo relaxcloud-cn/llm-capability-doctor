@@ -32,7 +32,7 @@
 - Modify: `src/protocol/tools.rs`
 - Modify: `src/cli.rs`
 
-- [ ] **Step 1: Add failing catalog and routing tests.**
+- [x] **Step 1: Add failing catalog and routing tests.**
 
 Add `catalog::tests::catalog_has_47_unique_checks_and_restores_046` in `src/catalog.rs`:
 
@@ -60,7 +60,7 @@ mod tests {
 
 Add `checks::tools::tests::check_046_is_a_streaming_tool_loop_seed` in `src/checks/tools.rs`. It must assert request ID `test-046`, `stream == true`, prompt marker `MODEL_DOCTOR_CASE_046`, and a tool declaration for `get_weather`.
 
-- [ ] **Step 2: Run the focused tests and confirm the expected failures.**
+- [x] **Step 2: Run the focused tests and confirm the expected failures.**
 
 ```bash
 cargo test --locked --lib catalog::tests::catalog_has_47_unique_checks_and_restores_046 -- --exact
@@ -69,7 +69,7 @@ cargo test --locked --lib checks::tools::tests::check_046_is_a_streaming_tool_lo
 
 Expected: the first test fails at `46 != 47`; the second fails because check 046 is unsupported.
 
-- [ ] **Step 3: Restore check 046 and bump the collector contract.**
+- [x] **Step 3: Restore check 046 and bump the collector contract.**
 
 Make these exact changes:
 
@@ -91,7 +91,7 @@ CLI list help: 47-item catalog
 
 Route `046` through `checks::tools::plan`. Update `Cargo.lock` with `cargo check`, then use `--locked` again.
 
-- [ ] **Step 4: Run the focused and catalog tests.**
+- [x] **Step 4: Run the focused and catalog tests.**
 
 ```bash
 cargo test --locked --lib catalog::tests -- --nocapture
@@ -100,7 +100,7 @@ cargo test --locked --lib checks::tools::tests -- --nocapture
 
 Expected: all catalog/routing tests pass and checks 046 through 049 are streaming seeds.
 
-- [ ] **Step 5: Commit the catalog baseline.**
+- [x] **Step 5: Commit the catalog baseline.**
 
 ```bash
 git add Cargo.toml Cargo.lock src/catalog.rs src/checks/mod.rs src/checks/tools.rs src/protocol/tools.rs src/cli.rs

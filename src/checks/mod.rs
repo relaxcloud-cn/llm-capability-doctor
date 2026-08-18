@@ -110,7 +110,7 @@ pub fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError
         | "020" | "022" | "024" | "031" | "033" | "034" | "035" | "036" | "038" => {
             content::plan(id, context)
         }
-        "040" | "041" | "042" | "043" | "044" | "045" | "047" | "048" | "049" | "050" => {
+        "040" | "041" | "042" | "043" | "044" | "045" | "046" | "047" | "048" | "049" | "050" => {
             tools::plan(id, context)
         }
         "052" | "053" | "054" | "055" | "056" | "057" => performance::plan(id, context),
