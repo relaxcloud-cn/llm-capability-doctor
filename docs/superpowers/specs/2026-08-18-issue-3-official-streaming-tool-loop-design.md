@@ -454,12 +454,17 @@ schema/collector version pair.
 Store small, tracked official-shape fixtures under `src/protocol/fixtures/` and
 load them from Rust unit tests. For each protocol, cover:
 
-- fragmented tool arguments reconstructed into the expected JSON object;
+- arbitrary HTTP byte boundaries without changing the decoded events/objects;
 - official assistant history and tool-result follow-up shape;
 - official normal terminal;
 - missing terminal after clean EOF;
 - malformed or truncated final event;
 - protocol-native error event.
+
+OpenAI Chat, OpenAI Responses, and Anthropic additionally cover their official
+string argument-delta reconstruction. Gemini and Ollama fixtures keep
+`functionCall.args` and `function.arguments` as structured objects; they must
+not invent string argument deltas that those official protocols do not define.
 
 The fixtures use deterministic Model Doctor markers and no vendor credentials.
 
