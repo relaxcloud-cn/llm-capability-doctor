@@ -6,30 +6,27 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qsl, urlsplit
 
+from model_doctor_contracts import (
+    CONTRACT_TEST_IDS,
+    LEGACY_TEST_IDS,
+    V1_CONTRACT,
+    V2_CONTRACT,
+    V3_CONTRACT,
+    V3_TEST_IDS,
+    contract_key,
+)
+
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
-V1_CONTRACT = ("llm-capability-doctor.evidence.v1", "0.9.0")
-V2_CONTRACT = ("llm-capability-doctor.evidence.v2", "0.10.0")
-SUPPORTED_CONTRACTS = {V1_CONTRACT, V2_CONTRACT}
 SECTION_ENCODING = "base64"
-RETAINED_TEST_IDS = {
-    *(f"{value:03d}" for value in range(1, 21)),
-    "022",
-    "024",
-    "031",
-    *(f"{value:03d}" for value in range(33, 37)),
-    "038",
-    *(f"{value:03d}" for value in range(40, 46)),
-    *(f"{value:03d}" for value in range(47, 51)),
-    *(f"{value:03d}" for value in range(52, 58)),
-    "059",
-    "060",
-}
+# Compatibility alias for callers that imported the historical name.
+RETAINED_TEST_IDS = LEGACY_TEST_IDS
 ONSITE_TEST_IDS = {
     "002",
     "003",
@@ -342,6 +339,130 @@ def _parse_request_refs(value: str, test_id: str) -> List[str]:
     return refs
 
 
+V3_REQUEST_FIELDS = (
+    "transport_outcome",
+    "stream_termination",
+    "stream_end_signal",
+    "model_stop_reason",
+    "stream_event_count",
+    "tool_contract_status",
+    "tool_contract_errors_json",
+    "tool_loop_turn",
+    "tool_loop_outcome",
+)
+TRANSPORT_OUTCOMES = frozenset({
+    "completed_eof",
+    "timeout",
+    "upstream_disconnect",
+    "client_cancelled",
+    "transport_error",
+})
+STREAM_TERMINATIONS = frozenset({
+    "not_applicable",
+    "completed",
+    "missing_terminal_event",
+    "timeout",
+    "upstream_disconnect",
+    "client_cancelled",
+    "transport_error",
+    "http_error",
+    "malformed_stream",
+    "protocol_error",
+    "model_incomplete",
+})
+STREAM_END_SIGNALS = frozenset({
+    "none",
+    "[DONE]",
+    "response.completed",
+    "message_stop",
+    "done:true",
+})
+TOOL_CONTRACT_STATUSES = frozenset({
+    "not_applicable",
+    "conformant",
+    "non_conformant",
+})
+TOOL_LOOP_OUTCOMES = frozenset({
+    "not_applicable",
+    "continued",
+    "completed",
+    "invalid_turn",
+    "transport_failure",
+    "max_turns_exceeded",
+})
+CANONICAL_NON_NEGATIVE_INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
+
+
+def _validate_v3_request_metadata(
+    metadata: Dict[str, str],
+    request_id: str,
+) -> None:
+    for field in V3_REQUEST_FIELDS:
+        if field not in metadata or not isinstance(metadata[field], str):
+            raise ValueError(
+                f"Request {request_id} is missing v3 metadata field {field}"
+            )
+
+    enum_fields = {
+        "transport_outcome": TRANSPORT_OUTCOMES,
+        "stream_termination": STREAM_TERMINATIONS,
+        "tool_contract_status": TOOL_CONTRACT_STATUSES,
+        "tool_loop_outcome": TOOL_LOOP_OUTCOMES,
+    }
+    for field, approved in enum_fields.items():
+        if metadata[field] not in approved:
+            raise ValueError(
+                f"Request {request_id} has invalid {field}: {metadata[field]!r}"
+            )
+
+    end_signal = metadata["stream_end_signal"]
+    if end_signal not in STREAM_END_SIGNALS and not (
+        end_signal.startswith("finishReason:")
+        and end_signal.removeprefix("finishReason:").strip()
+    ):
+        raise ValueError(
+            f"Request {request_id} has invalid stream_end_signal: {end_signal!r}"
+        )
+
+    if not metadata["model_stop_reason"].strip():
+        raise ValueError(
+            f"Request {request_id} has invalid model_stop_reason: "
+            f"{metadata['model_stop_reason']!r}"
+        )
+
+    for field in ("stream_event_count", "tool_loop_turn"):
+        if not CANONICAL_NON_NEGATIVE_INTEGER.fullmatch(metadata[field]):
+            raise ValueError(
+                f"Request {request_id} has invalid {field}: {metadata[field]!r}"
+            )
+
+    errors_raw = metadata["tool_contract_errors_json"]
+    try:
+        errors = json.loads(errors_raw)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise ValueError(
+            f"Request {request_id} has invalid tool_contract_errors_json"
+        ) from error
+    if not isinstance(errors, list) or any(
+        not isinstance(error, str) or not error.strip() for error in errors
+    ):
+        raise ValueError(
+            f"Request {request_id} has invalid tool_contract_errors_json"
+        )
+
+    status = metadata["tool_contract_status"]
+    if status == "conformant" and errors:
+        raise ValueError(
+            f"Request {request_id} conformant tool_contract_status requires "
+            "an empty tool_contract_errors_json array"
+        )
+    if status == "non_conformant" and not errors:
+        raise ValueError(
+            f"Request {request_id} non_conformant tool_contract_status requires "
+            "a non-empty tool_contract_errors_json array"
+        )
+
+
 def parse_log(path: Path) -> Dict[str, object]:
     """Parse one supported evidence log without retaining its absolute path."""
 
@@ -349,9 +470,7 @@ def parse_log(path: Path) -> Dict[str, object]:
     raw = path.read_bytes()
     decoded = raw.decode("utf-8", errors="replace")
     raw_run = _run_header(decoded)
-    contract = (raw_run.get("log_schema"), raw_run.get("script_version"))
-    if contract not in SUPPORTED_CONTRACTS:
-        raise ValueError(f"Unsupported log schema/version pair: {contract!r}")
+    contract = contract_key(raw_run)
     if raw_run.get("section_encoding") != SECTION_ENCODING:
         raise ValueError(
             f"Unsupported or missing section_encoding: "
@@ -390,6 +509,8 @@ def parse_log(path: Path) -> Dict[str, object]:
                 f"Request block {identifier} declares request_id="
                 f"{metadata.get('request_id')!r}"
             )
+        if contract == V3_CONTRACT:
+            _validate_v3_request_metadata(metadata, identifier)
         requests[identifier] = {
             **metadata,
             "request_id": identifier,
@@ -420,7 +541,7 @@ def parse_log(path: Path) -> Dict[str, object]:
     for identifier, block in _blocks(decoded, "TEST"):
         if identifier in tests:
             raise ValueError(f"Duplicate test block: {identifier}")
-        if identifier not in RETAINED_TEST_IDS:
+        if identifier not in CONTRACT_TEST_IDS[contract]:
             raise ValueError(f"Unsupported test ID in evidence log: {identifier}")
         metadata = _key_values(block)
         forbidden = FORBIDDEN_MANIFEST_FIELDS.intersection(metadata)
@@ -454,7 +575,7 @@ def parse_log(path: Path) -> Dict[str, object]:
     discovered_test_ids = set(tests)
     if contract == V1_CONTRACT:
         profile = run.get("collection_profile")
-        if profile == "full" and discovered_test_ids != RETAINED_TEST_IDS:
+        if profile == "full" and discovered_test_ids != LEGACY_TEST_IDS:
             raise ValueError(
                 "The full collection profile must contain all 46 retained tests"
             )
@@ -470,11 +591,16 @@ def parse_log(path: Path) -> Dict[str, object]:
             raise ValueError(
                 f"Unsupported or missing collection_profile: {profile!r}"
             )
-    else:
+    elif contract == V2_CONTRACT:
         if "collection_profile" in run:
             raise ValueError("Evidence v2 must not contain collection_profile")
-        if discovered_test_ids != RETAINED_TEST_IDS:
+        if discovered_test_ids != LEGACY_TEST_IDS:
             raise ValueError("Evidence v2 must contain all 46 retained tests")
+    else:
+        if "collection_profile" in run:
+            raise ValueError("Evidence v3 must not contain collection_profile")
+        if discovered_test_ids != V3_TEST_IDS:
+            raise ValueError("Evidence v3 must contain all 47 retained tests")
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))
