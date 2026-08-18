@@ -19,7 +19,10 @@ fn matches_response_accepts_native_synchronous_envelopes() {
         Protocol::OpenAiResponses,
         json!({
             "id": "resp_123",
-            "output": [{"content": [{"type": "output_text", "text": "hello"}]}]
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }]
         })
     ));
     assert!(matches(
@@ -51,6 +54,16 @@ fn matches_response_rejects_non_native_or_malformed_envelopes() {
         json!({"choices": [{"message": {"content": []}}]})
     ));
 
+    assert!(!matches(
+        Protocol::OpenAiResponses,
+        json!({
+            "id": "resp_123",
+            "output": [{
+                "type": "function_call",
+                "content": [{"type": "output_text", "text": "lookalike"}]
+            }]
+        })
+    ));
     assert!(!matches(
         Protocol::OpenAiResponses,
         json!({
@@ -120,6 +133,10 @@ fn matches_response_rejects_non_native_or_malformed_envelopes() {
     assert!(!matches(
         Protocol::OllamaChat,
         json!({"message": {"content": "hello"}, "done": "true"})
+    ));
+    assert!(!matches(
+        Protocol::OllamaChat,
+        json!({"message": {"content": "hello"}, "done": false})
     ));
     assert!(!matches(
         Protocol::OllamaChat,

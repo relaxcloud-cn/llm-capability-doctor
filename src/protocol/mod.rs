@@ -242,15 +242,16 @@ pub fn matches_response(protocol: Protocol, body: &[u8]) -> bool {
                     .is_some_and(|output| {
                         !output.is_empty()
                             && output.iter().any(|item| {
-                                item.get("content").and_then(Value::as_array).is_some_and(
-                                    |content| {
-                                        content.iter().any(|block| {
-                                            block.get("type").and_then(Value::as_str)
-                                                == Some("output_text")
-                                                && non_empty_string(block.get("text"))
-                                        })
-                                    },
-                                )
+                                item.get("type").and_then(Value::as_str) == Some("message")
+                                    && item.get("content").and_then(Value::as_array).is_some_and(
+                                        |content| {
+                                            content.iter().any(|block| {
+                                                block.get("type").and_then(Value::as_str)
+                                                    == Some("output_text")
+                                                    && non_empty_string(block.get("text"))
+                                            })
+                                        },
+                                    )
                             })
                     })
         }
@@ -283,7 +284,7 @@ pub fn matches_response(protocol: Protocol, body: &[u8]) -> bool {
                 .get("message")
                 .and_then(Value::as_object)
                 .is_some_and(|message| non_empty_string(message.get("content")))
-                && value.get("done").and_then(Value::as_bool).is_some()
+                && value.get("done").and_then(Value::as_bool) == Some(true)
         }
         Protocol::Unknown => false,
     }
