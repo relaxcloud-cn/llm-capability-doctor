@@ -1304,6 +1304,250 @@ class ProtocolConformanceTests(unittest.TestCase):
                     errors,
                 )
 
+    def test_v3_chat_content_parts_require_official_discriminated_payloads(self) -> None:
+        cases = (
+            ("unknown", {"type": "video"}),
+            ("text", {"type": "text"}),
+            ("image", {"type": "image_url"}),
+            ("audio", {"type": "input_audio"}),
+            ("file", {"type": "file"}),
+        )
+        for mutation, part in cases:
+            with self.subTest(mutation=mutation):
+                parsed = self._tool_loop_parsed("openai_chat")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["messages"][0]["content"] = [part]
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                result = report["results"][0]
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+
+        parsed = self._tool_loop_parsed("openai_chat")
+        parsed["requests"] = {
+            "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+        }
+        parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+        request = parsed["requests"]["test-046-turn-1"]
+        body = json.loads(request["requestBody"])
+        body["messages"][0]["content"] = [
+            {"type": "text", "text": "MODEL_DOCTOR_CASE_046"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+            {"type": "input_audio", "input_audio": {"data": "YQ==", "format": "wav"}},
+            {"type": "file", "file": {"file_id": "file_fixture"}},
+        ]
+        body["messages"].append({
+            "role": "assistant",
+            "content": [{"type": "refusal", "refusal": "declined"}],
+        })
+        request["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual("CONSISTENT", report["results"][0]["status"], report)
+
+        for mutation in (
+            "empty-content-array",
+            "empty-assistant",
+            "mixed-assistant-parts",
+            "null-function-call-no-content",
+        ):
+            with self.subTest(mutation=mutation):
+                parsed = self._tool_loop_parsed("openai_chat")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                if mutation == "empty-content-array":
+                    body["messages"].append({"role": "user", "content": []})
+                elif mutation == "empty-assistant":
+                    body["messages"].append({"role": "assistant"})
+                elif mutation == "mixed-assistant-parts":
+                    body["messages"].append({
+                        "role": "assistant",
+                        "content": [
+                            {"type": "text", "text": "partial"},
+                            {"type": "refusal", "refusal": "declined"},
+                        ],
+                    })
+                else:
+                    body["messages"].append({
+                        "role": "assistant",
+                        "content": None,
+                        "function_call": None,
+                    })
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                result = report["results"][0]
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+
+    def test_v3_anthropic_and_gemini_parts_require_official_payloads(self) -> None:
+        for block_type in ("image", "document", "search_result"):
+            with self.subTest(protocol="anthropic_messages", block_type=block_type):
+                parsed = self._tool_loop_parsed("anthropic_messages")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["messages"].append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_fixture",
+                        "content": [{"type": block_type}],
+                    }],
+                })
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                result = report["results"][0]
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+
+        invalid_parts = (
+            ("null-inline-data", {"inlineData": None}),
+            ("empty-inline-data", {"inlineData": {}}),
+            ("empty-executable-code", {"executableCode": {}}),
+            ("null-function-call", {"functionCall": None}),
+            (
+                "multiple-payloads",
+                {
+                    "text": "duplicate payload",
+                    "functionCall": {"name": "get_weather", "args": {}},
+                },
+            ),
+        )
+        for mutation, part in invalid_parts:
+            with self.subTest(protocol="gemini_generate_content", mutation=mutation):
+                parsed = self._tool_loop_parsed("gemini_generate_content")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["contents"][0]["parts"].append(part)
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                result = report["results"][0]
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+
+    def test_v3_openai_tool_choice_objects_require_official_inner_shape(self) -> None:
+        cases = (
+            ("openai_chat", {}),
+            ("openai_chat", {"type": "function", "function": {}}),
+            ("openai_responses", {}),
+            ("openai_responses", {"type": "function"}),
+        )
+        for protocol, tool_choice in cases:
+            with self.subTest(protocol=protocol, tool_choice=tool_choice):
+                parsed = self._tool_loop_parsed(protocol)
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["tool_choice"] = tool_choice
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                result = report["results"][0]
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+
+        valid_cases = (
+            (
+                "openai_chat",
+                {"type": "function", "function": {"name": "get_weather"}},
+            ),
+            (
+                "openai_responses",
+                {"type": "function", "name": "get_weather"},
+            ),
+        )
+        for protocol, tool_choice in valid_cases:
+            with self.subTest(protocol=protocol, valid_tool_choice=tool_choice):
+                parsed = self._tool_loop_parsed(protocol)
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["tool_choice"] = tool_choice
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual(
+                    "CONSISTENT",
+                    report["results"][0]["status"],
+                    report,
+                )
+
+    def test_v3_ollama_rejects_blank_ids_and_negative_function_indexes(self) -> None:
+        for mutation in ("blank-id", "negative-index"):
+            with self.subTest(mutation=mutation):
+                parsed = self._ollama_tool_loop_with_ids()
+                first = parsed["requests"]["test-046-turn-1"]
+                records = [
+                    json.loads(line)
+                    for line in first["responseBody"].splitlines()
+                    if line.strip()
+                ]
+                calls = records[0]["message"]["tool_calls"]
+                follow = parsed["requests"]["test-046-turn-2"]
+                body = json.loads(follow["requestBody"])
+                if mutation == "blank-id":
+                    calls[0]["id"] = ""
+                    body["messages"][1]["tool_calls"][0]["id"] = ""
+                    del body["messages"][2]["tool_call_id"]
+                else:
+                    calls[0]["function"]["index"] = -1
+                    body["messages"][1]["tool_calls"][0]["function"]["index"] = -1
+                first["responseBody"] = self._encode_ndjson(records)
+                follow["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertTrue(
+                    any(result["status"] == "DIFFERENT" for result in report["results"]),
+                    report["results"],
+                )
+
+    def test_v3_responses_accepts_official_function_output_content_array(self) -> None:
+        parsed = self._tool_loop_parsed("openai_responses")
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["input"][0]["output"] = [{
+            "type": "input_text",
+            "text": "WEATHER_SUNNY",
+        }]
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual([], validate_protocol_conformance(report))
+        self.assertTrue(
+            all(result["status"] == "CONSISTENT" for result in report["results"]),
+            report["results"],
+        )
+
     def test_v3_pass_gate_rejects_invalid_required_and_control_fields(self) -> None:
         cases = (
             ("anthropic_messages", "missing-max-tokens"),
@@ -1541,7 +1785,14 @@ class ProtocolConformanceTests(unittest.TestCase):
     def test_ollama_transition_preserves_extensions_and_uses_function_index_order(self) -> None:
         parsed = self._tool_loop_parsed("ollama_chat")
         initial = parsed["requests"]["test-046-turn-1"]
-        initial["responseBody"] = self._fixture_body("ollama_tool.ndjson")
+        records = [
+            json.loads(line)
+            for line in self._fixture_body("ollama_tool.ndjson").splitlines()
+            if line.strip()
+        ]
+        for call in records[1]["message"]["tool_calls"]:
+            del call["type"]
+        initial["responseBody"] = self._encode_ndjson(records)
         initial_body = json.loads(initial["requestBody"])
         initial_body["tools"].append({
             "type": "function",
@@ -1568,7 +1819,6 @@ class ProtocolConformanceTests(unittest.TestCase):
                 "tool_calls": [
                     {
                         "id": "call_weather_046",
-                        "type": "function",
                         "function": {
                             "index": 1,
                             "name": "get_weather",
@@ -1582,7 +1832,6 @@ class ProtocolConformanceTests(unittest.TestCase):
                     },
                     {
                         "id": "call_time_046",
-                        "type": "function",
                         "function": {
                             "index": 0,
                             "name": "get_time",

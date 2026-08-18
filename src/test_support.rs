@@ -263,13 +263,10 @@ fn encode_ollama(turn: &ScriptedAssistantTurn) -> Vec<u8> {
             arguments,
             ..
         } => {
-            let mut call = serde_json::Map::from_iter([
-                ("type".into(), serde_json::Value::String("function".into())),
-                (
-                    "function".into(),
-                    serde_json::json!({"index": 0, "name": name, "arguments": arguments}),
-                ),
-            ]);
+            let mut call = serde_json::Map::from_iter([(
+                "function".into(),
+                serde_json::json!({"index": 0, "name": name, "arguments": arguments}),
+            )]);
             if let Some(call_id) = call_id {
                 call.insert("id".into(), serde_json::Value::String(call_id.clone()));
             }
@@ -430,4 +427,25 @@ fn content_length(head: &[u8]) -> usize {
                 .flatten()
         })
         .unwrap_or(0)
+}
+
+#[test]
+fn official_ollama_fixture_uses_native_tool_call_fields() {
+    let turn = ScriptedAssistantTurn::Tool {
+        response_id: "response-fixture".into(),
+        call_id: Some("call-fixture".into()),
+        name: "get_weather".into(),
+        arguments: serde_json::json!({"city": "Shanghai"}),
+    };
+    let bytes = encode_official_stream(Protocol::OllamaChat, &turn);
+    let record: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("official Ollama NDJSON record");
+    let call = &record["message"]["tool_calls"][0];
+
+    assert_eq!(call["id"], "call-fixture");
+    assert_eq!(call["function"]["index"], 0);
+    assert!(
+        call.get("type").is_none(),
+        "Ollama ToolCall has no type field"
+    );
 }

@@ -315,6 +315,8 @@ def _validate_history_tool_calls(
     calls = audit.require_list(value, location)
     if calls is None:
         return
+    if not calls:
+        audit.add(location, "VALUE_MISMATCH", "non-empty tool-call array")
     for index, raw_call in enumerate(calls):
         path = f"{location}/{index}"
         call = audit.require_mapping(raw_call, path)
@@ -351,6 +353,246 @@ def _validate_history_tool_calls(
                     "UNEXPECTED_FIELD",
                     "stream-only indexes removed from assistant history",
                 )
+        elif protocol == "ollama_chat":
+            if "type" in call:
+                audit.add(
+                    f"{path}/type",
+                    "UNEXPECTED_FIELD",
+                    "absent from the native Ollama ToolCall",
+                )
+            if "id" in call:
+                audit.require_string(call["id"], f"{path}/id", non_empty=True)
+            if "index" in call:
+                audit.add(
+                    f"{path}/index",
+                    "UNEXPECTED_FIELD",
+                    "function.index instead of a top-level index",
+                )
+            if "index" in function:
+                native_index = function["index"]
+                if not isinstance(native_index, int) or isinstance(native_index, bool):
+                    audit.add(
+                        f"{path}/function/index",
+                        "TYPE_MISMATCH",
+                        "non-negative integer",
+                    )
+                elif native_index < 0:
+                    audit.add(
+                        f"{path}/function/index",
+                        "VALUE_MISMATCH",
+                        "non-negative integer",
+                    )
+
+
+def _validate_chat_content_part(
+    value: object,
+    location: str,
+    audit: _Audit,
+    *,
+    allowed_types: set[str],
+) -> None:
+    part = audit.require_mapping(value, location)
+    if part is None:
+        return
+    kind = part.get("type")
+    if not isinstance(kind, str):
+        difference_kind = "MISSING_FIELD" if "type" not in part else "TYPE_MISMATCH"
+        audit.add(f"{location}/type", difference_kind, "content-part type string")
+        return
+    if kind not in allowed_types:
+        audit.add(
+            f"{location}/type",
+            "VALUE_MISMATCH",
+            "role-compatible official content-part type",
+        )
+        return
+    if kind in {"text", "refusal"}:
+        field = kind
+        if audit.required(part, field, location):
+            audit.require_string(part[field], f"{location}/{field}")
+        return
+    if kind == "image_url":
+        if not audit.required(part, "image_url", location):
+            return
+        image = audit.require_mapping(part["image_url"], f"{location}/image_url")
+        if image is None:
+            return
+        if audit.required(image, "url", f"{location}/image_url"):
+            audit.require_string(
+                image["url"],
+                f"{location}/image_url/url",
+                non_empty=True,
+            )
+        if "detail" in image:
+            detail = image["detail"]
+            if detail not in {"auto", "low", "high"}:
+                audit.add(
+                    f"{location}/image_url/detail",
+                    "VALUE_MISMATCH",
+                    '"auto", "low", or "high"',
+                )
+        return
+    if kind == "input_audio":
+        if not audit.required(part, "input_audio", location):
+            return
+        audio = audit.require_mapping(part["input_audio"], f"{location}/input_audio")
+        if audio is None:
+            return
+        if audit.required(audio, "data", f"{location}/input_audio"):
+            audit.require_string(
+                audio["data"],
+                f"{location}/input_audio/data",
+                non_empty=True,
+            )
+        if audit.required(audio, "format", f"{location}/input_audio"):
+            audio_format = audio["format"]
+            if audio_format not in {"wav", "mp3"}:
+                audit.add(
+                    f"{location}/input_audio/format",
+                    "VALUE_MISMATCH",
+                    '"wav" or "mp3"',
+                )
+        return
+    if not audit.required(part, "file", location):
+        return
+    file_value = audit.require_mapping(part["file"], f"{location}/file")
+    if file_value is None:
+        return
+    for field in ("filename", "file_data", "file_id"):
+        if field in file_value:
+            audit.require_string(file_value[field], f"{location}/file/{field}")
+
+
+def _validate_chat_content(
+    value: object,
+    location: str,
+    audit: _Audit,
+    *,
+    allowed_types: set[str],
+    nullable: bool = False,
+) -> None:
+    if value is None and nullable:
+        return
+    if isinstance(value, str):
+        return
+    parts = audit.require_list(value, location)
+    if parts is None:
+        return
+    if not parts:
+        audit.add(location, "VALUE_MISMATCH", "non-empty content-part array")
+    for index, part in enumerate(parts):
+        _validate_chat_content_part(
+            part,
+            f"{location}/{index}",
+            audit,
+            allowed_types=allowed_types,
+        )
+
+
+def _validate_anthropic_source(
+    block: Mapping[str, object],
+    location: str,
+    audit: _Audit,
+    *,
+    block_type: str,
+) -> None:
+    if not audit.required(block, "source", location):
+        return
+    source_path = f"{location}/source"
+    source = audit.require_mapping(block["source"], source_path)
+    if source is None:
+        return
+    if not audit.required(source, "type", source_path):
+        return
+    source_type = source["type"]
+    if not audit.require_string(source_type, f"{source_path}/type", non_empty=True):
+        return
+    allowed_source_types = {
+        "image": {"base64", "url", "file"},
+        "document": {"base64", "text", "content", "url", "file"},
+    }[block_type]
+    if source_type not in allowed_source_types:
+        audit.add(
+            f"{source_path}/type",
+            "VALUE_MISMATCH",
+            f"official Anthropic {block_type} source type",
+        )
+        return
+    required_fields = {
+        "base64": ("media_type", "data"),
+        "text": ("media_type", "data"),
+        "url": ("url",),
+        "file": ("file_id",),
+        "content": ("content",),
+    }[source_type]
+    for field in required_fields:
+        if not audit.required(source, field, source_path):
+            continue
+        field_path = f"{source_path}/{field}"
+        if field == "content" and isinstance(source[field], list):
+            for index, nested in enumerate(source[field]):
+                _validate_anthropic_result_block(
+                    nested,
+                    f"{field_path}/{index}",
+                    audit,
+                )
+        else:
+            audit.require_string(source[field], field_path, non_empty=True)
+
+
+def _validate_anthropic_result_block(
+    value: object,
+    location: str,
+    audit: _Audit,
+) -> None:
+    block = audit.require_mapping(value, location)
+    if block is None:
+        return
+    block_type = block.get("type")
+    if block_type == "text":
+        if audit.required(block, "text", location):
+            audit.require_string(block["text"], f"{location}/text")
+        return
+    if block_type in {"image", "document"}:
+        _validate_anthropic_source(
+            block,
+            location,
+            audit,
+            block_type=block_type,
+        )
+        return
+    if block_type == "search_result":
+        for field in ("source", "title"):
+            if audit.required(block, field, location):
+                audit.require_string(
+                    block[field],
+                    f"{location}/{field}",
+                    non_empty=True,
+                )
+        if not audit.required(block, "content", location):
+            return
+        content = audit.require_list(block["content"], f"{location}/content")
+        if content is None:
+            return
+        if not content:
+            audit.add(
+                f"{location}/content",
+                "VALUE_MISMATCH",
+                "non-empty text-block array",
+            )
+        for index, nested in enumerate(content):
+            _validate_anthropic_result_block(
+                nested,
+                f"{location}/content/{index}",
+                audit,
+            )
+        return
+    difference_kind = "MISSING_FIELD" if "type" not in block else "VALUE_MISMATCH"
+    audit.add(
+        f"{location}/type",
+        difference_kind,
+        "text, image, document, or search_result",
+    )
 
 
 def _validate_anthropic_content(value: object, location: str, audit: _Audit) -> None:
@@ -389,33 +631,25 @@ def _validate_anthropic_content(value: object, location: str, audit: _Audit) -> 
                         "string or provider-native content block array",
                     )
                 elif isinstance(result_content, list):
-                    allowed_result_types = {"text", "image", "document", "search_result"}
                     for content_index, content_value in enumerate(result_content):
                         content_path = f"{path}/content/{content_index}"
-                        content_block = audit.require_mapping(content_value, content_path)
-                        if content_block is None:
-                            continue
-                        content_type = content_block.get("type")
-                        if content_type not in allowed_result_types:
-                            field_kind = (
-                                "MISSING_FIELD"
-                                if "type" not in content_block
-                                else "VALUE_MISMATCH"
-                            )
-                            audit.add(
-                                f"{content_path}/type",
-                                field_kind,
-                                "provider-native tool-result content block type",
-                            )
-                        elif content_type == "text":
-                            if audit.required(content_block, "text", content_path):
-                                audit.require_string(
-                                    content_block["text"],
-                                    f"{content_path}/text",
-                                )
+                        _validate_anthropic_result_block(
+                            content_value,
+                            content_path,
+                            audit,
+                        )
         elif kind == "text":
             if audit.required(part, "text", path):
                 audit.require_string(part["text"], f"{path}/text")
+        elif kind in {"image", "document", "search_result"}:
+            _validate_anthropic_result_block(part, path, audit)
+        elif kind == "thinking":
+            for field in ("thinking", "signature"):
+                if audit.required(part, field, path):
+                    audit.require_string(part[field], f"{path}/{field}")
+        elif kind == "redacted_thinking":
+            if audit.required(part, "data", path):
+                audit.require_string(part["data"], f"{path}/data", non_empty=True)
         else:
             field_kind = "MISSING_FIELD" if "type" not in part else "VALUE_MISMATCH"
             audit.add(f"{path}/type", field_kind, "provider-native content block type")
@@ -431,6 +665,9 @@ def _validate_messages(protocol: str, body: dict, audit: _Audit) -> None:
     if protocol in {"openai_chat", "ollama_chat"}:
         allowed_roles.add("system")
         allowed_roles.add("tool")
+    if protocol == "openai_chat":
+        allowed_roles.add("developer")
+        allowed_roles.add("function")
     for index, value in enumerate(messages):
         path = f"/requestBody/messages/{index}"
         message = audit.require_mapping(value, path)
@@ -442,15 +679,52 @@ def _validate_messages(protocol: str, body: dict, audit: _Audit) -> None:
         elif role not in allowed_roles:
             audit.add(f"{path}/role", "VALUE_MISMATCH", "provider-native role")
         if protocol == "openai_chat" and role == "tool":
-            if not audit.required(message, "tool_call_id", path):
-                continue
-            audit.require_string(message["tool_call_id"], f"{path}/tool_call_id", non_empty=True)
-            if "content" in message:
-                audit.require_string(message["content"], f"{path}/content")
+            if audit.required(message, "tool_call_id", path):
+                audit.require_string(
+                    message["tool_call_id"],
+                    f"{path}/tool_call_id",
+                    non_empty=True,
+                )
+            if audit.required(message, "content", path):
+                _validate_chat_content(
+                    message["content"],
+                    f"{path}/content",
+                    audit,
+                    allowed_types={"text"},
+                )
         if protocol == "openai_chat" and role == "assistant":
-            content = message.get("content")
-            if content is not None:
-                audit.require_string(content, f"{path}/content")
+            has_content = "content" in message and message["content"] is not None
+            has_calls = (
+                message.get("tool_calls") not in (None, [])
+                or message.get("function_call") is not None
+            )
+            if not has_content and not has_calls:
+                audit.add(
+                    f"{path}/content",
+                    "MISSING_FIELD",
+                    "content unless tool_calls or function_call is present",
+                )
+            if "content" in message:
+                _validate_chat_content(
+                    message["content"],
+                    f"{path}/content",
+                    audit,
+                    allowed_types={"text", "refusal"},
+                    nullable=True,
+                )
+                content_parts = message["content"]
+                if isinstance(content_parts, list):
+                    part_types = [
+                        part.get("type")
+                        for part in content_parts
+                        if isinstance(part, dict)
+                    ]
+                    if "refusal" in part_types and part_types != ["refusal"]:
+                        audit.add(
+                            f"{path}/content",
+                            "VALUE_MISMATCH",
+                            "one refusal part or one or more text parts",
+                        )
             if "tool_calls" in message:
                 _validate_history_tool_calls(
                     protocol,
@@ -458,21 +732,41 @@ def _validate_messages(protocol: str, body: dict, audit: _Audit) -> None:
                     f"{path}/tool_calls",
                     audit,
                 )
-        if protocol == "openai_chat" and role in {"system", "user"}:
-            content = message.get("content")
-            if isinstance(content, str):
-                pass
-            elif isinstance(content, list):
-                for part_index, part_value in enumerate(content):
-                    part_path = f"{path}/content/{part_index}"
-                    part = audit.require_mapping(part_value, part_path)
-                    if part is None:
-                        continue
-                    if not isinstance(part.get("type"), str):
-                        kind = "MISSING_FIELD" if "type" not in part else "TYPE_MISMATCH"
-                        audit.add(f"{part_path}/type", kind, "content-part type string")
-            else:
-                audit.add(f"{path}/content", "TYPE_MISMATCH", "string or content-part array")
+            if "function_call" in message and message["function_call"] is not None:
+                function_path = f"{path}/function_call"
+                function = audit.require_mapping(message["function_call"], function_path)
+                if function is not None:
+                    for field in ("name", "arguments"):
+                        if audit.required(function, field, function_path):
+                            audit.require_string(
+                                function[field],
+                                f"{function_path}/{field}",
+                            )
+            if "refusal" in message and message["refusal"] is not None:
+                audit.require_string(message["refusal"], f"{path}/refusal")
+        if protocol == "openai_chat" and role in {"system", "developer"}:
+            if audit.required(message, "content", path):
+                _validate_chat_content(
+                    message["content"],
+                    f"{path}/content",
+                    audit,
+                    allowed_types={"text"},
+                )
+        if protocol == "openai_chat" and role == "user":
+            if audit.required(message, "content", path):
+                _validate_chat_content(
+                    message["content"],
+                    f"{path}/content",
+                    audit,
+                    allowed_types={"text", "image_url", "input_audio", "file"},
+                )
+        if protocol == "openai_chat" and role == "function":
+            if audit.required(message, "content", path):
+                content = message["content"]
+                if content is not None:
+                    audit.require_string(content, f"{path}/content")
+            if audit.required(message, "name", path):
+                audit.require_string(message["name"], f"{path}/name", non_empty=True)
         if protocol == "ollama_chat":
             if "tool_call_id" in message:
                 audit.require_string(
@@ -514,6 +808,144 @@ def _validate_messages(protocol: str, body: dict, audit: _Audit) -> None:
                     saw_non_result = True
 
 
+_GEMINI_PART_PAYLOADS = {
+    "text",
+    "inlineData",
+    "functionCall",
+    "functionResponse",
+    "fileData",
+    "executableCode",
+    "codeExecutionResult",
+    "toolCall",
+    "toolResponse",
+}
+
+
+def _validate_gemini_part(value: object, location: str, audit: _Audit) -> None:
+    part = audit.require_mapping(value, location)
+    if part is None:
+        return
+    if "thoughtSignature" in part:
+        audit.require_string(
+            part["thoughtSignature"],
+            f"{location}/thoughtSignature",
+            non_empty=True,
+        )
+    if "thought" in part and not isinstance(part["thought"], bool):
+        audit.add(f"{location}/thought", "TYPE_MISMATCH", "boolean")
+    payloads = sorted(_GEMINI_PART_PAYLOADS.intersection(part))
+    if len(payloads) != 1:
+        difference_kind = "MISSING_FIELD" if not payloads else "VALUE_MISMATCH"
+        audit.add(
+            location,
+            difference_kind,
+            "exactly one provider-native Part payload",
+        )
+    for payload in payloads:
+        payload_path = f"{location}/{payload}"
+        payload_value = part[payload]
+        if payload == "text":
+            audit.require_string(payload_value, payload_path)
+        elif payload == "inlineData":
+            blob = audit.require_mapping(payload_value, payload_path)
+            if blob is not None:
+                for field in ("mimeType", "data"):
+                    if audit.required(blob, field, payload_path):
+                        audit.require_string(
+                            blob[field],
+                            f"{payload_path}/{field}",
+                            non_empty=True,
+                        )
+        elif payload == "fileData":
+            file_data = audit.require_mapping(payload_value, payload_path)
+            if file_data is not None:
+                if audit.required(file_data, "fileUri", payload_path):
+                    audit.require_string(
+                        file_data["fileUri"],
+                        f"{payload_path}/fileUri",
+                        non_empty=True,
+                    )
+                if "mimeType" in file_data:
+                    audit.require_string(
+                        file_data["mimeType"],
+                        f"{payload_path}/mimeType",
+                        non_empty=True,
+                    )
+        elif payload == "executableCode":
+            code = audit.require_mapping(payload_value, payload_path)
+            if code is not None:
+                if audit.required(code, "language", payload_path):
+                    language = code["language"]
+                    if language not in {"LANGUAGE_UNSPECIFIED", "PYTHON"}:
+                        audit.add(
+                            f"{payload_path}/language",
+                            "VALUE_MISMATCH",
+                            "official Gemini executable-code language",
+                        )
+                if audit.required(code, "code", payload_path):
+                    audit.require_string(code["code"], f"{payload_path}/code")
+                if "id" in code:
+                    audit.require_string(code["id"], f"{payload_path}/id")
+        elif payload == "codeExecutionResult":
+            result = audit.require_mapping(payload_value, payload_path)
+            if result is not None:
+                if audit.required(result, "outcome", payload_path):
+                    outcome = result["outcome"]
+                    if outcome not in {
+                        "OUTCOME_UNSPECIFIED",
+                        "OUTCOME_OK",
+                        "OUTCOME_FAILED",
+                        "OUTCOME_DEADLINE_EXCEEDED",
+                    }:
+                        audit.add(
+                            f"{payload_path}/outcome",
+                            "VALUE_MISMATCH",
+                            "official Gemini execution outcome",
+                        )
+                for field in ("id", "output"):
+                    if field in result:
+                        audit.require_string(result[field], f"{payload_path}/{field}")
+        elif payload == "functionCall":
+            call = audit.require_mapping(payload_value, payload_path)
+            if call is not None:
+                if audit.required(call, "name", payload_path):
+                    audit.require_string(
+                        call["name"],
+                        f"{payload_path}/name",
+                        non_empty=True,
+                    )
+                if "args" in call:
+                    audit.require_mapping(call["args"], f"{payload_path}/args")
+                if "id" in call:
+                    audit.require_string(
+                        call["id"],
+                        f"{payload_path}/id",
+                        non_empty=True,
+                    )
+        elif payload == "functionResponse":
+            response = audit.require_mapping(payload_value, payload_path)
+            if response is not None:
+                if audit.required(response, "name", payload_path):
+                    audit.require_string(
+                        response["name"],
+                        f"{payload_path}/name",
+                        non_empty=True,
+                    )
+                if audit.required(response, "response", payload_path):
+                    audit.require_mapping(
+                        response["response"],
+                        f"{payload_path}/response",
+                    )
+                if "id" in response:
+                    audit.require_string(
+                        response["id"],
+                        f"{payload_path}/id",
+                        non_empty=True,
+                    )
+        else:
+            audit.require_mapping(payload_value, payload_path)
+
+
 def _validate_contents(body: dict, audit: _Audit) -> None:
     contents = audit.require_list(body.get("contents"), "/requestBody/contents")
     if contents is None:
@@ -532,64 +964,61 @@ def _validate_contents(body: dict, audit: _Audit) -> None:
         if parts is None:
             continue
         for part_index, part_value in enumerate(parts):
-            part_path = f"{path}/parts/{part_index}"
-            part = audit.require_mapping(part_value, part_path)
-            if part is None:
-                continue
-            if "thoughtSignature" in part:
-                audit.require_string(
-                    part["thoughtSignature"],
-                    f"{part_path}/thoughtSignature",
-                    non_empty=True,
-                )
-            if "thought" in part and not isinstance(part["thought"], bool):
-                audit.add(f"{part_path}/thought", "TYPE_MISMATCH", "boolean")
-            payload_fields = {
-                "text",
-                "inlineData",
-                "functionCall",
-                "functionResponse",
-                "fileData",
-                "executableCode",
-                "codeExecutionResult",
-            }
-            if not payload_fields.intersection(part):
+            _validate_gemini_part(
+                part_value,
+                f"{path}/parts/{part_index}",
+                audit,
+            )
+
+
+def _validate_responses_output(
+    value: object,
+    location: str,
+    audit: _Audit,
+) -> None:
+    if isinstance(value, str):
+        return
+    parts = audit.require_list(value, location)
+    if parts is None:
+        return
+    for index, raw_part in enumerate(parts):
+        path = f"{location}/{index}"
+        part = audit.require_mapping(raw_part, path)
+        if part is None:
+            continue
+        part_type = part.get("type")
+        if part_type not in {"input_text", "input_image", "input_file"}:
+            difference_kind = "MISSING_FIELD" if "type" not in part else "VALUE_MISMATCH"
+            audit.add(
+                f"{path}/type",
+                difference_kind,
+                '"input_text", "input_image", or "input_file"',
+            )
+            continue
+        if part_type == "input_text":
+            if audit.required(part, "text", path):
+                audit.require_string(part["text"], f"{path}/text")
+            continue
+        nullable_string_fields = (
+            ("image_url", "file_id")
+            if part_type == "input_image"
+            else ("file_id", "filename", "file_data", "file_url")
+        )
+        for field in nullable_string_fields:
+            if field in part and part[field] is not None:
+                audit.require_string(part[field], f"{path}/{field}")
+        if "detail" in part and part["detail"] is not None:
+            allowed_details = (
+                {"auto", "low", "high", "original"}
+                if part_type == "input_image"
+                else {"auto", "low", "high"}
+            )
+            if part["detail"] not in allowed_details:
                 audit.add(
-                    part_path,
-                    "MISSING_FIELD",
-                    "one provider-native Part payload",
+                    f"{path}/detail",
+                    "VALUE_MISMATCH",
+                    "official OpenAI input detail value",
                 )
-            if "text" in part:
-                audit.require_string(part["text"], f"{part_path}/text")
-            function_call = part.get("functionCall")
-            if function_call is not None:
-                call_path = f"{part_path}/functionCall"
-                call = audit.require_mapping(function_call, call_path)
-                if call is not None:
-                    if audit.required(call, "name", call_path):
-                        audit.require_string(
-                            call["name"],
-                            f"{call_path}/name",
-                            non_empty=True,
-                        )
-                    if audit.required(call, "args", call_path):
-                        audit.require_mapping(call["args"], f"{call_path}/args")
-                    if "id" in call:
-                        audit.require_string(
-                            call["id"],
-                            f"{call_path}/id",
-                            non_empty=True,
-                        )
-            response = part.get("functionResponse")
-            if response is not None:
-                response_path = f"{part_path}/functionResponse"
-                response_object = audit.require_mapping(response, response_path)
-                if response_object is None:
-                    continue
-                if audit.required(response_object, "name", response_path):
-                    audit.require_string(response_object["name"], f"{response_path}/name", non_empty=True)
-                if audit.required(response_object, "response", response_path):
-                    audit.require_mapping(response_object["response"], f"{response_path}/response")
 
 
 def _validate_responses_input(value: object, audit: _Audit) -> None:
@@ -611,7 +1040,7 @@ def _validate_responses_input(value: object, audit: _Audit) -> None:
         if audit.required(item, "call_id", path):
             audit.require_string(item["call_id"], f"{path}/call_id", non_empty=True)
         if audit.required(item, "output", path):
-            audit.require_string(item["output"], f"{path}/output")
+            _validate_responses_output(item["output"], f"{path}/output", audit)
 
 
 def _non_empty_content(value: object) -> bool:
@@ -622,7 +1051,114 @@ def _non_empty_content(value: object) -> bool:
     return False
 
 
-def _validate_openai_controls(body: dict, audit: _Audit) -> None:
+def _validate_allowed_tools(
+    value: object,
+    location: str,
+    audit: _Audit,
+) -> None:
+    allowed = audit.require_mapping(value, location)
+    if allowed is None:
+        return
+    if audit.required(allowed, "mode", location):
+        if allowed["mode"] not in {"auto", "required"}:
+            audit.add(
+                f"{location}/mode",
+                "VALUE_MISMATCH",
+                '"auto" or "required"',
+            )
+    if not audit.required(allowed, "tools", location):
+        return
+    tools = audit.require_list(allowed["tools"], f"{location}/tools")
+    if tools is None:
+        return
+    for index, tool in enumerate(tools):
+        audit.require_mapping(tool, f"{location}/tools/{index}")
+
+
+def _validate_openai_tool_choice(
+    protocol: str,
+    choice: object,
+    audit: _Audit,
+) -> None:
+    location = "/requestBody/tool_choice"
+    if isinstance(choice, str):
+        if choice not in {"none", "auto", "required"}:
+            audit.add(
+                location,
+                "VALUE_MISMATCH",
+                '"none", "auto", "required", or provider-native object',
+            )
+        return
+    value = audit.require_mapping(choice, location)
+    if value is None:
+        return
+    if not audit.required(value, "type", location):
+        return
+    choice_type = value["type"]
+    if not audit.require_string(choice_type, f"{location}/type", non_empty=True):
+        return
+    if protocol == "openai_chat":
+        if choice_type in {"function", "custom"}:
+            field = choice_type
+            if not audit.required(value, field, location):
+                return
+            named = audit.require_mapping(value[field], f"{location}/{field}")
+            if named is not None and audit.required(named, "name", f"{location}/{field}"):
+                audit.require_string(
+                    named["name"],
+                    f"{location}/{field}/name",
+                    non_empty=True,
+                )
+        elif choice_type == "allowed_tools":
+            if audit.required(value, "allowed_tools", location):
+                _validate_allowed_tools(
+                    value["allowed_tools"],
+                    f"{location}/allowed_tools",
+                    audit,
+                )
+        else:
+            audit.add(
+                f"{location}/type",
+                "VALUE_MISMATCH",
+                '"function", "custom", or "allowed_tools"',
+            )
+        return
+    hosted_types = {
+        "file_search",
+        "web_search_preview",
+        "computer",
+        "computer_use_preview",
+        "computer_use",
+        "web_search_preview_2025_03_11",
+        "image_generation",
+        "code_interpreter",
+        "programmatic_tool_calling",
+        "apply_patch",
+        "shell",
+    }
+    if choice_type in {"function", "custom"}:
+        if audit.required(value, "name", location):
+            audit.require_string(value["name"], f"{location}/name", non_empty=True)
+    elif choice_type == "mcp":
+        if audit.required(value, "server_label", location):
+            audit.require_string(
+                value["server_label"],
+                f"{location}/server_label",
+                non_empty=True,
+            )
+        if "name" in value and value["name"] is not None:
+            audit.require_string(value["name"], f"{location}/name", non_empty=True)
+    elif choice_type == "allowed_tools":
+        _validate_allowed_tools(value, location, audit)
+    elif choice_type not in hosted_types:
+        audit.add(
+            f"{location}/type",
+            "VALUE_MISMATCH",
+            "official OpenAI Responses tool-choice type",
+        )
+
+
+def _validate_openai_controls(protocol: str, body: dict, audit: _Audit) -> None:
     if "parallel_tool_calls" in body and not isinstance(
         body["parallel_tool_calls"], bool
     ):
@@ -632,20 +1168,7 @@ def _validate_openai_controls(body: dict, audit: _Audit) -> None:
             "boolean",
         )
     if "tool_choice" in body:
-        choice = body["tool_choice"]
-        if isinstance(choice, str):
-            if choice not in {"none", "auto", "required"}:
-                audit.add(
-                    "/requestBody/tool_choice",
-                    "VALUE_MISMATCH",
-                    '"none", "auto", "required", or provider-native object',
-                )
-        elif not isinstance(choice, dict):
-            audit.add(
-                "/requestBody/tool_choice",
-                "TYPE_MISMATCH",
-                "string or provider-native object",
-            )
+        _validate_openai_tool_choice(protocol, body["tool_choice"], audit)
 
 
 def _validate_anthropic_controls(body: dict, audit: _Audit) -> None:
@@ -746,11 +1269,11 @@ def _validate_request_body(
             audit.add("/requestBody/stream", kind, "true")
         if protocol == "openai_chat":
             audit.reject(body, {"contents", "input", "previous_response_id"}, "/requestBody")
-            _validate_openai_controls(body, audit)
+            _validate_openai_controls(protocol, body, audit)
             _validate_messages(protocol, body, audit)
         elif protocol == "openai_responses":
             audit.reject(body, {"contents", "messages"}, "/requestBody")
-            _validate_openai_controls(body, audit)
+            _validate_openai_controls(protocol, body, audit)
             if body.get("store") is not True:
                 kind = "MISSING_FIELD" if "store" not in body else "VALUE_MISMATCH"
                 audit.add("/requestBody/store", kind, "true")
@@ -1118,7 +1641,7 @@ def _validate_transition(
                 audit.add(f"{path}/type", "VALUE_MISMATCH", '"function_call_output"')
             _correlate(item.get("call_id"), call.get("id"), f"{path}/call_id", audit, "matching streamed function call ID")
             if audit.required(item, "output", path):
-                audit.require_string(item["output"], f"{path}/output")
+                _validate_responses_output(item["output"], f"{path}/output", audit)
         return
 
     if protocol == "anthropic_messages":

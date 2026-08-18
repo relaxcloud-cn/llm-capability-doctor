@@ -2483,7 +2483,14 @@ class _OllamaValidator(_ChatValidator):
             return
         assert isinstance(value, dict)
         if "id" in value:
-            self.string(value["id"], _path(location, "id"))
+            id_path = _path(location, "id")
+            if self.string(value["id"], id_path) and not value["id"].strip():
+                self.add(
+                    id_path,
+                    "VALUE_MISMATCH",
+                    "non-empty string",
+                    "empty string",
+                )
         if "function" not in value:
             return
 
@@ -2508,7 +2515,14 @@ class _OllamaValidator(_ChatValidator):
                 lambda item: isinstance(item, dict),
             )
         if "index" in function:
-            self.integer(function["index"], _path(function_path, "index"))
+            index_path = _path(function_path, "index")
+            if self.integer(function["index"], index_path) and function["index"] < 0:
+                self.add(
+                    index_path,
+                    "VALUE_MISMATCH",
+                    "non-negative integer",
+                    str(function["index"]),
+                )
 
     def validate_logprob(self, value: object, location: str) -> None:
         if not self.object_shape(
