@@ -9,11 +9,11 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = "Model Capability Doctor 0.10.0 - Run all 46 checks",
+    about = concat!("Model Capability Doctor ", env!("CARGO_PKG_VERSION"), " - Run all 46 checks"),
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// Complete model endpoint URL. The collector never rewrites it.
+    /// Complete model endpoint URL. Google official streaming methods are derived when detected.
     #[arg(long, value_name = "URL")]
     pub url: Option<Url>,
 

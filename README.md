@@ -2,7 +2,8 @@
 
 用于客户现场采集大模型接口能力证据，为判断模型是否满足项目要求提供依据。
 Rust CLI 在现场一次性采集完整请求与响应，生成
-`llm-capability-doctor.evidence.v2` 日志；日志带回分析环境后，由 Model Doctor
+`llm-capability-doctor.evidence.v3` 日志；v3 日志记录
+`compatibility_profile: opencodex-2.7.42-data-format`。日志带回分析环境后，由 Model Doctor
 Report Skill 逐项判定并生成 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
@@ -17,8 +18,8 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 | 客户机器 | Release 文件 |
 | --- | --- |
-| Linux x86_64 | `model-capability-doctor-v0.10.0-linux-x86_64` |
-| Linux ARM64 | `model-capability-doctor-v0.10.0-linux-arm64` |
+| Linux x86_64 | `model-capability-doctor-v0.11.0-linux-x86_64` |
+| Linux ARM64 | `model-capability-doctor-v0.11.0-linux-arm64` |
 
 Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
 执行权限，不需要创建软链接。
@@ -26,7 +27,7 @@ Release 文件不是压缩包。下载后将对应文件重命名为 `model-capa
 Linux x86_64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-linux-x86_64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.11.0-linux-x86_64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -35,7 +36,7 @@ sha256sum ./model-capability-doctor
 Linux ARM64：
 
 ```bash
-mv ./model-capability-doctor-v0.10.0-linux-arm64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.11.0-linux-arm64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -92,7 +93,10 @@ export MODEL_API_KEY
 ./model-capability-doctor --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file "$MODEL_DOCTOR_OUTPUT/your-model-model-doctor.log"
 ```
 
-`--url` 必须是完整模型接口地址，CLI 不会自动补充或改写路径。未指定
+`--url` 必须是完整模型接口地址，CLI 通常不会自动补充或改写路径。唯一例外是已识别的
+Google 流式请求：当路径以官方方法 `:generateContent` 或
+`:streamGenerateContent` 结尾时，CLI 会派生 `:streamGenerateContent` 并设置
+`alt=sse`。自定义路径（包括方法后的尾随斜杠）保持不变。未指定
 `--log-file` 时，日志写入当前目录下的
 `model-doctor-YYYYMMDD-HHMMSS.log`；Unix 平台会将日志权限设置为 `0600`。
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
@@ -168,10 +172,10 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 
 | 参数 | 说明 |
 | --- | --- |
-| `--url URL` | 完整模型接口 URL，不自动改写路径。 |
+| `--url URL` | 完整模型接口 URL；仅已识别的 Google 官方流式方法会派生 `:streamGenerateContent` 和 `alt=sse`，自定义路径不变。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
-| `--log-file PATH` | 指定 evidence-v2 日志路径。 |
+| `--log-file PATH` | 指定 evidence-v3 日志路径。 |
 | `--timeout SECONDS` | 单次请求超时，默认 120 秒。 |
 | `--list-tests` | 输出完整 46 项目录并退出。 |
 | `--insecure` | 跳过 HTTPS 证书和主机身份校验。 |
