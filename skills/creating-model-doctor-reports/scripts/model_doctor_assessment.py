@@ -177,6 +177,9 @@ def _evidence_ref_belongs_to_test(
 def _validate_parsed_structure(parsed: object) -> List[str]:
     if not isinstance(parsed, dict):
         return ["Parsed evidence must be an object"]
+    run = parsed.get("run")
+    if not isinstance(run, dict):
+        return ["Parsed run must be an object"]
     tests = parsed.get("tests")
     if not isinstance(tests, dict):
         return ["Parsed tests must be an object keyed by test ID"]

@@ -350,6 +350,14 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             validate_reviews(parsed, reviews),
         )
 
+    def test_reviews_reject_non_object_parsed_run_before_assembly(self) -> None:
+        parsed, reviews = self._fixture({"001": "PASS"})
+        parsed["run"] = []
+
+        self.assertIn("Parsed run must be an object", validate_reviews(parsed, reviews))
+        with self.assertRaisesRegex(ValueError, "Parsed run must be an object"):
+            assemble_assessment(parsed, reviews)
+
     def test_assessment_rejects_every_tampered_opencodex_field(self) -> None:
         parsed, reviews = self._v3_fixture()
         assessment = assemble_assessment(parsed, reviews)
