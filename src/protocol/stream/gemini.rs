@@ -12,6 +12,8 @@ struct ParserState {
     role: Option<String>,
     parts: Vec<Value>,
     tool_calls: Vec<ToolCall>,
+    seen_function_ids: BTreeSet<String>,
+    duplicate_function_id: bool,
     final_text: String,
     finish_reason: Option<String>,
     saw_content: bool,
@@ -405,7 +407,26 @@ fn process_part(
                     &base,
                     &mut state.contract_errors,
                 ) {
-                    state.tool_calls.push(call);
+                    let duplicate_id = match &call.correlation {
+                        ToolCorrelation::Optional(Some(id)) => {
+                            !state.seen_function_ids.insert(id.clone())
+                        }
+                        ToolCorrelation::Optional(None) => false,
+                        ToolCorrelation::Required(_) | ToolCorrelation::None => {
+                            unreachable!("Gemini calls always use optional correlation")
+                        }
+                    };
+                    if duplicate_id {
+                        push_error(
+                            &mut state.contract_errors,
+                            "duplicate_function_id",
+                            &format!("{base}/functionCall/id"),
+                        );
+                        state.duplicate_function_id = true;
+                        state.tool_calls.clear();
+                    } else if !state.duplicate_function_id {
+                        state.tool_calls.push(call);
+                    }
                 } else {
                     native.remove("functionCall");
                 }
@@ -567,6 +588,85 @@ mod tests {
                 }],
                 final_text: String::new(),
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_function_ids_in_one_turn_make_every_call_non_executable() {
+        let duplicate_id = "PRIVATE_DUPLICATE_ID";
+        let same_frame = sse(&[json!({"candidates": [{
+            "index": 0,
+            "content": {"parts": [
+                {"functionCall": {"id": duplicate_id, "name": "get_weather", "args": {"city": "Beijing"}}},
+                {"functionCall": {"id": duplicate_id, "name": "get_time", "args": {"zone": "UTC"}}}
+            ]},
+            "finishReason": "STOP"
+        }]})]);
+        let across_frames = sse(&[
+            json!({"candidates": [{
+                "index": 0,
+                "content": {"parts": [{"functionCall": {
+                    "id": duplicate_id,
+                    "name": "get_weather",
+                    "args": {"city": "Beijing"}
+                }}]}
+            }]}),
+            json!({"candidates": [{
+                "index": 0,
+                "content": {"parts": [{"functionCall": {
+                    "id": duplicate_id,
+                    "name": "get_time",
+                    "args": {"zone": "UTC"}
+                }}]},
+                "finishReason": "STOP"
+            }]}),
+        ]);
+
+        for (body, expected_error) in [
+            (
+                same_frame,
+                "gemini.duplicate_function_id:/events/0/data/candidates/0/content/parts/1/functionCall/id",
+            ),
+            (
+                across_frames,
+                "gemini.duplicate_function_id:/events/1/data/candidates/0/content/parts/0/functionCall/id",
+            ),
+        ] {
+            let parsed = parse(body.as_bytes()).await;
+            assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+            assert!(parsed.contract_errors.contains(&expected_error.to_owned()));
+            assert!(
+                parsed
+                    .assistant_turn
+                    .expect("native history")
+                    .tool_calls
+                    .is_empty()
+            );
+            assert!(!parsed.contract_errors.join(" ").contains(duplicate_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn multiple_calls_without_ids_do_not_conflict() {
+        let body = sse(&[json!({"candidates": [{
+            "index": 0,
+            "content": {"parts": [
+                {"functionCall": {"name": "get_weather", "args": {"city": "Beijing"}}},
+                {"functionCall": {"name": "get_time", "args": {"zone": "UTC"}}}
+            ]},
+            "finishReason": "STOP"
+        }]})]);
+        let parsed = parse(body.as_bytes()).await;
+
+        assert_eq!(parsed.stream_termination, StreamTermination::Completed);
+        assert!(parsed.contract_errors.is_empty());
+        assert_eq!(
+            parsed
+                .assistant_turn
+                .expect("assistant turn")
+                .tool_calls
+                .len(),
+            2
         );
     }
 
