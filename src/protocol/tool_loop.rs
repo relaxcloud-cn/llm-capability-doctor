@@ -51,7 +51,7 @@ impl ToolLoopState {
         }
 
         let mut contract_errors = Vec::new();
-        if turn.tool_calls.len() > 1 {
+        if self.check_id == "049" && turn.tool_calls.len() > 1 {
             contract_errors.push("tool_loop.multiple_tool_calls:/tool_calls".into());
         }
         contract_errors.extend(
@@ -415,6 +415,129 @@ mod tests {
             let executed = results(state.advance(&turn(vec![expected.clone()], "")));
             assert_eq!(executed[0].call, expected);
         }
+    }
+
+    fn assert_valid_batch_executes_in_order(
+        check_id: &'static str,
+        calls: Vec<ToolCall>,
+        expected_outputs: &[&str],
+    ) {
+        let mut state = ToolLoopState::new(check_id).expect("known loop check");
+
+        let executed = results(state.advance(&turn(calls.clone(), "")));
+
+        assert_eq!(executed.len(), calls.len());
+        for ((result, expected_call), expected_output) in
+            executed.iter().zip(&calls).zip(expected_outputs)
+        {
+            assert_eq!(&result.call, expected_call);
+            assert_eq!(result.output, *expected_output);
+            assert!(!result.is_error);
+        }
+    }
+
+    #[test]
+    fn check_046_executes_multiple_valid_weather_calls_in_input_order() {
+        assert_valid_batch_executes_in_order(
+            "046",
+            vec![
+                custom_call(
+                    7,
+                    ToolCorrelation::Optional(None),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+                custom_call(
+                    2,
+                    ToolCorrelation::Required("weather-second".into()),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+            ],
+            &["WEATHER_SUNNY", "WEATHER_SUNNY"],
+        );
+    }
+
+    #[test]
+    fn check_047_executes_multiple_valid_allowlisted_calls_in_input_order() {
+        assert_valid_batch_executes_in_order(
+            "047",
+            vec![
+                custom_call(
+                    10,
+                    ToolCorrelation::Optional(Some("weather-first".into())),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+                custom_call(
+                    3,
+                    ToolCorrelation::Required("time-second".into()),
+                    "get_time",
+                    json!({"zone": "UTC"}),
+                ),
+                custom_call(
+                    8,
+                    ToolCorrelation::Optional(None),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+            ],
+            &["WEATHER_SUNNY", "TIME_UTC_12:00", "WEATHER_SUNNY"],
+        );
+    }
+
+    #[test]
+    fn check_048_executes_multiple_valid_weather_calls_in_input_order() {
+        assert_valid_batch_executes_in_order(
+            "048",
+            vec![
+                custom_call(
+                    5,
+                    ToolCorrelation::Required("weather-first".into()),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+                custom_call(
+                    1,
+                    ToolCorrelation::Optional(Some("weather-second".into())),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+            ],
+            &["WEATHER_SUNNY", "WEATHER_SUNNY"],
+        );
+    }
+
+    #[test]
+    fn valid_multi_call_check_rejects_an_entire_batch_when_one_call_is_invalid() {
+        let mut state = ToolLoopState::new("046").expect("known loop check");
+
+        let decision = state.advance(&turn(
+            vec![
+                custom_call(
+                    4,
+                    ToolCorrelation::Required("valid-first".into()),
+                    "get_weather",
+                    json!({"city": "Beijing"}),
+                ),
+                custom_call(
+                    9,
+                    ToolCorrelation::Optional(None),
+                    "get_weather",
+                    json!({"city": "Shanghai"}),
+                ),
+            ],
+            "",
+        ));
+
+        assert_eq!(
+            decision,
+            LoopDecision::Stop {
+                outcome: ToolLoopOutcome::InvalidTurn,
+                contract_errors: vec!["tool_loop.invalid_arguments:/tool_calls/1/arguments".into()],
+            }
+        );
+        assert_eq!(state.weather_attempts, 0);
     }
 
     #[test]
