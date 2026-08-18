@@ -1931,7 +1931,7 @@ test_manifest_count: 1
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             "interfaceProtocol",
             "contextWindow",
             "highestVerifiedInputTokens",
@@ -1943,6 +1943,75 @@ test_manifest_count: 1
             workflow.index("capabilitySummary.verifiedFacts"),
             workflow.index("capabilitySummary.issues"),
         )
+
+    def test_skill_documents_opencodex_contract_and_program_ownership(self) -> None:
+        skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "collector v0.11.0",
+            "llm-capability-doctor.evidence.v3",
+            "compatibility_profile: opencodex-2.7.42-data-format",
+            "llm-capability-doctor.assessment.v7",
+            "openCodexCompatibility",
+            "002、004、005、006、040、041、043、047",
+            "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
+        ):
+            self.assertIn(marker, skill_text)
+        self.assertIn("不得填写 `generalVerdict` 或 `openCodexCompatibility`", skill_text)
+        self.assertIn("v1/v2", skill_text)
+        self.assertIn("NOT_ASSESSED", skill_text)
+
+    def test_evaluation_rules_define_opencodex_v3_format_contract(self) -> None:
+        rules = (SKILL_DIR / "references" / "evaluation-rules.md").read_text(
+            encoding="utf-8"
+        )
+
+        for marker in (
+            "collector v0.11.0",
+            "llm-capability-doctor.evidence.v3",
+            "compatibility_profile: opencodex-2.7.42-data-format",
+            "assessment.v7.capabilitySummary.openCodexCompatibility",
+            "002、004、005、006、040、041、043、047",
+            "OPENAI_CHAT_COMPLETIONS",
+            "OPENAI_RESPONSES",
+            "ANTHROPIC_MESSAGES",
+            "GEMINI_GENERATE_CONTENT",
+            "OLLAMA_CHAT",
+            "CUSTOM",
+            "UNKNOWN",
+            "doctor/get_weather",
+            "doctor__get_weather",
+            "response.completed",
+            "message_stop",
+            "finishReason",
+            "usageMetadata",
+            "tool_call_id",
+            "call_id",
+            "tool_use_id",
+            "Google 本地调用 ID",
+        ):
+            self.assertIn(marker, rules)
+        self.assertIn("045 仍是增强能力项", rules)
+        self.assertIn("v1/v2", rules)
+        self.assertIn("NOT_ASSESSED", rules)
+
+    def test_readme_explains_bounded_opencodex_compatibility_result(self) -> None:
+        readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "llm-capability-doctor.assessment.v7",
+            "002、004、005、006、040、041、043、047",
+            "OpenAI Chat Completions",
+            "OpenAI Responses",
+            "Anthropic Messages",
+            "Gemini GenerateContent",
+            "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
+            "python3 -m unittest discover",
+        ):
+            self.assertIn(marker, readme)
+        self.assertIn("46 个固定检测项", readme)
+        self.assertIn("v1/v2", readme)
+        self.assertIn("NOT_ASSESSED", readme)
 
     def test_skill_reviews_example_is_valid_and_evidence_bounded(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
