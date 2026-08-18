@@ -317,6 +317,9 @@ def _validate_history_tool_calls(
         return
     if not calls:
         audit.add(location, "VALUE_MISMATCH", "non-empty tool-call array")
+    ollama_indexes: list[tuple[str, object]] = []
+    ollama_unindexed: list[str] = []
+    ollama_ids: list[tuple[str, str]] = []
     for index, raw_call in enumerate(calls):
         path = f"{location}/{index}"
         call = audit.require_mapping(raw_call, path)
@@ -361,7 +364,9 @@ def _validate_history_tool_calls(
                     "absent from the native Ollama ToolCall",
                 )
             if "id" in call:
-                audit.require_string(call["id"], f"{path}/id", non_empty=True)
+                id_path = f"{path}/id"
+                if audit.require_string(call["id"], id_path, non_empty=True):
+                    ollama_ids.append((id_path, call["id"]))
             if "index" in call:
                 audit.add(
                     f"{path}/index",
@@ -370,6 +375,7 @@ def _validate_history_tool_calls(
                 )
             if "index" in function:
                 native_index = function["index"]
+                ollama_indexes.append((f"{path}/function/index", native_index))
                 if not isinstance(native_index, int) or isinstance(native_index, bool):
                     audit.add(
                         f"{path}/function/index",
@@ -382,6 +388,39 @@ def _validate_history_tool_calls(
                         "VALUE_MISMATCH",
                         "non-negative integer",
                     )
+            else:
+                ollama_unindexed.append(f"{path}/function/index")
+    if protocol == "ollama_chat":
+        if ollama_indexes and ollama_unindexed:
+            audit.add(
+                ollama_unindexed[0],
+                "MISSING_FIELD",
+                "function.index on every call or on no calls in the turn",
+            )
+        elif ollama_indexes:
+            seen: set[int] = set()
+            for index_path, native_index in ollama_indexes:
+                if (
+                    isinstance(native_index, int)
+                    and not isinstance(native_index, bool)
+                    and native_index >= 0
+                ):
+                    if native_index in seen:
+                        audit.add(
+                            index_path,
+                            "VALUE_MISMATCH",
+                            "unique function.index within the turn",
+                        )
+                    seen.add(native_index)
+        seen_ids: set[str] = set()
+        for id_path, call_id in ollama_ids:
+            if call_id in seen_ids:
+                audit.add(
+                    id_path,
+                    "VALUE_MISMATCH",
+                    "unique optional tool-call ID within the turn",
+                )
+            seen_ids.add(call_id)
 
 
 def _validate_chat_content_part(
@@ -508,8 +547,8 @@ def _validate_anthropic_source(
     if not audit.require_string(source_type, f"{source_path}/type", non_empty=True):
         return
     allowed_source_types = {
-        "image": {"base64", "url", "file"},
-        "document": {"base64", "text", "content", "url", "file"},
+        "image": {"base64", "url"},
+        "document": {"base64", "text", "content", "url"},
     }[block_type]
     if source_type not in allowed_source_types:
         audit.add(
@@ -522,22 +561,58 @@ def _validate_anthropic_source(
         "base64": ("media_type", "data"),
         "text": ("media_type", "data"),
         "url": ("url",),
-        "file": ("file_id",),
         "content": ("content",),
     }[source_type]
     for field in required_fields:
         if not audit.required(source, field, source_path):
             continue
         field_path = f"{source_path}/{field}"
-        if field == "content" and isinstance(source[field], list):
-            for index, nested in enumerate(source[field]):
-                _validate_anthropic_result_block(
-                    nested,
-                    f"{field_path}/{index}",
-                    audit,
+        if field == "content":
+            content = source[field]
+            if isinstance(content, str):
+                continue
+            blocks = audit.require_list(content, field_path)
+            if blocks is None:
+                continue
+            for index, nested in enumerate(blocks):
+                block = audit.require_mapping(nested, f"{field_path}/{index}")
+                if block is None:
+                    continue
+                nested_type = block.get("type")
+                if nested_type == "text":
+                    if audit.required(block, "text", f"{field_path}/{index}"):
+                        audit.require_string(
+                            block["text"],
+                            f"{field_path}/{index}/text",
+                        )
+                elif nested_type == "image":
+                    _validate_anthropic_source(
+                        block,
+                        f"{field_path}/{index}",
+                        audit,
+                        block_type="image",
+                    )
+                else:
+                    kind = "MISSING_FIELD" if "type" not in block else "VALUE_MISMATCH"
+                    audit.add(
+                        f"{field_path}/{index}/type",
+                        kind,
+                        '"text" or "image"',
+                    )
+            continue
+        if audit.require_string(source[field], field_path, non_empty=True):
+            if field == "media_type":
+                allowed_media_types = (
+                    {"image/jpeg", "image/png", "image/gif", "image/webp"}
+                    if block_type == "image"
+                    else {"application/pdf"} if source_type == "base64" else {"text/plain"}
                 )
-        else:
-            audit.require_string(source[field], field_path, non_empty=True)
+                if source[field] not in allowed_media_types:
+                    audit.add(
+                        field_path,
+                        "VALUE_MISMATCH",
+                        f"official Anthropic {block_type} media type",
+                    )
 
 
 def _validate_anthropic_result_block(
@@ -581,17 +656,34 @@ def _validate_anthropic_result_block(
                 "non-empty text-block array",
             )
         for index, nested in enumerate(content):
-            _validate_anthropic_result_block(
-                nested,
-                f"{location}/content/{index}",
-                audit,
+            nested_path = f"{location}/content/{index}"
+            text_block = audit.require_mapping(nested, nested_path)
+            if text_block is None:
+                continue
+            if text_block.get("type") != "text":
+                kind = "MISSING_FIELD" if "type" not in text_block else "VALUE_MISMATCH"
+                audit.add(f"{nested_path}/type", kind, '"text"')
+                continue
+            if audit.required(text_block, "text", nested_path):
+                audit.require_string(
+                    text_block["text"],
+                    f"{nested_path}/text",
+                    non_empty=True,
+                )
+        return
+    if block_type == "tool_reference":
+        if audit.required(block, "tool_name", location):
+            audit.require_string(
+                block["tool_name"],
+                f"{location}/tool_name",
+                non_empty=True,
             )
         return
     difference_kind = "MISSING_FIELD" if "type" not in block else "VALUE_MISMATCH"
     audit.add(
         f"{location}/type",
         difference_kind,
-        "text, image, document, or search_result",
+        "text, image, document, search_result, or tool_reference",
     )
 
 
@@ -820,6 +912,15 @@ _GEMINI_PART_PAYLOADS = {
     "toolResponse",
 }
 
+_GEMINI_SERVER_TOOL_TYPES = {
+    "TOOL_TYPE_UNSPECIFIED",
+    "GOOGLE_SEARCH_WEB",
+    "GOOGLE_SEARCH_IMAGE",
+    "URL_CONTEXT",
+    "GOOGLE_MAPS",
+    "FILE_SEARCH",
+}
+
 
 def _validate_gemini_part(value: object, location: str, audit: _Audit) -> None:
     part = audit.require_mapping(value, location)
@@ -942,6 +1043,38 @@ def _validate_gemini_part(value: object, location: str, audit: _Audit) -> None:
                         f"{payload_path}/id",
                         non_empty=True,
                     )
+        elif payload in {"toolCall", "toolResponse"}:
+            server_tool = audit.require_mapping(payload_value, payload_path)
+            if server_tool is not None:
+                string_fields = (
+                    ("id", "toolName") if payload == "toolCall" else ("id",)
+                )
+                for field in string_fields:
+                    if field in server_tool:
+                        audit.require_string(
+                            server_tool[field],
+                            f"{payload_path}/{field}",
+                        )
+                if audit.required(server_tool, "toolType", payload_path):
+                    tool_type = server_tool["toolType"]
+                    if not isinstance(tool_type, str):
+                        audit.add(
+                            f"{payload_path}/toolType",
+                            "TYPE_MISMATCH",
+                            "string",
+                        )
+                    elif tool_type not in _GEMINI_SERVER_TOOL_TYPES:
+                        audit.add(
+                            f"{payload_path}/toolType",
+                            "VALUE_MISMATCH",
+                            "official Gemini server tool type",
+                        )
+                object_field = "args" if payload == "toolCall" else "response"
+                if object_field in server_tool:
+                    audit.require_mapping(
+                        server_tool[object_field],
+                        f"{payload_path}/{object_field}",
+                    )
         else:
             audit.require_mapping(payload_value, payload_path)
 
@@ -957,9 +1090,8 @@ def _validate_contents(body: dict, audit: _Audit) -> None:
         content = audit.require_mapping(value, path)
         if content is None:
             continue
-        if content.get("role") not in {"user", "model"}:
-            kind = "MISSING_FIELD" if "role" not in content else "VALUE_MISMATCH"
-            audit.add(f"{path}/role", kind, "user or model")
+        if "role" in content and content["role"] not in {"user", "model"}:
+            audit.add(f"{path}/role", "VALUE_MISMATCH", "user or model")
         parts = audit.require_list(content.get("parts"), f"{path}/parts")
         if parts is None:
             continue
@@ -1007,13 +1139,16 @@ def _validate_responses_output(
         for field in nullable_string_fields:
             if field in part and part[field] is not None:
                 audit.require_string(part[field], f"{path}/{field}")
-        if "detail" in part and part["detail"] is not None:
+        if "detail" in part:
+            detail = part["detail"]
+            if part_type == "input_image" and detail is None:
+                continue
             allowed_details = (
                 {"auto", "low", "high", "original"}
                 if part_type == "input_image"
                 else {"auto", "low", "high"}
             )
-            if part["detail"] not in allowed_details:
+            if detail not in allowed_details:
                 audit.add(
                     f"{path}/detail",
                     "VALUE_MISMATCH",
@@ -1229,13 +1364,13 @@ def _validate_initial_prompt(protocol: str, body: dict, audit: _Audit) -> None:
         )
         if not (
             isinstance(first, dict)
-            and first.get("role") == "user"
+            and first.get("role", "user") == "user"
             and has_text
         ):
             audit.add(
                 "/requestBody/contents",
                 "VALUE_MISMATCH",
-                "first user content with a non-empty text part",
+                "first content with optional user role and a non-empty text part",
             )
 
 
@@ -1465,7 +1600,7 @@ def _anthropic_turn(raw: object) -> Optional[tuple[list[dict], list[dict]]]:
 
 
 def _gemini_turn(raw: object) -> Optional[tuple[dict, list[dict]]]:
-    role = "model"
+    history: dict[str, object] = {}
     parts: list[dict] = []
     for _, payload in _sse_payloads(raw):
         candidates = payload.get("candidates")
@@ -1475,7 +1610,7 @@ def _gemini_turn(raw: object) -> Optional[tuple[dict, list[dict]]]:
         if not isinstance(content, dict):
             continue
         if isinstance(content.get("role"), str):
-            role = content["role"]
+            history["role"] = content["role"]
         if isinstance(content.get("parts"), list):
             parts.extend(deepcopy(part) for part in content["parts"] if isinstance(part, dict))
     calls = []
@@ -1483,7 +1618,8 @@ def _gemini_turn(raw: object) -> Optional[tuple[dict, list[dict]]]:
         call = part.get("functionCall")
         if isinstance(call, dict):
             calls.append({"id": call.get("id"), "name": call.get("name")})
-    return ({"role": role, "parts": parts}, calls) if calls else None
+    history["parts"] = parts
+    return (history, calls) if calls else None
 
 
 def _ollama_turn(raw: object) -> Optional[tuple[dict, list[dict]]]:

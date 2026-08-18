@@ -2036,7 +2036,7 @@ class _GeminiValidator(_ChatValidator):
             return
         assert isinstance(value, dict)
         if "role" in value:
-            self.enum(value["role"], _path(location, "role"), ("user", "model"))
+            self.enum(value["role"], _path(location, "role"), ("model",))
         if "parts" not in value:
             return
         parts = value["parts"]
@@ -2395,6 +2395,12 @@ class _OllamaValidator(_ChatValidator):
         "eval_duration",
     )
 
+    def __init__(self, request_id: str, protocol: str) -> None:
+        super().__init__(request_id, protocol)
+        self._index_mode: Optional[bool] = None
+        self._seen_indexes: set[int] = set()
+        self._seen_call_ids: set[str] = set()
+
     def validate_success(self, value: object) -> List[dict]:
         if not self.object_shape(
             value,
@@ -2466,6 +2472,7 @@ class _OllamaValidator(_ChatValidator):
             ):
                 for index, tool_call in enumerate(tool_calls):
                     self.validate_tool_call(tool_call, f"{tool_calls_path}/{index}")
+                self.validate_tool_call_indexes(tool_calls, tool_calls_path)
         if "images" in value:
             images = value["images"]
             images_path = _path(location, "images")
@@ -2523,6 +2530,50 @@ class _OllamaValidator(_ChatValidator):
                     "non-negative integer",
                     str(function["index"]),
                 )
+
+    def validate_tool_call_indexes(self, value: list, location: str) -> None:
+        for position, raw_call in enumerate(value):
+            if not isinstance(raw_call, dict):
+                continue
+            function = raw_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            index_path = f"{location}/{position}/function/index"
+            indexed = "index" in function
+            if self._index_mode is None:
+                self._index_mode = indexed
+            elif indexed != self._index_mode:
+                self.add(
+                    index_path,
+                    "MISSING_FIELD" if not indexed else "VALUE_MISMATCH",
+                    "function.index on every call or on no calls in the turn",
+                    "missing" if not indexed else "mixed index mode",
+                )
+            native_index = function.get("index")
+            if (
+                indexed
+                and isinstance(native_index, int)
+                and not isinstance(native_index, bool)
+                and native_index >= 0
+            ):
+                if native_index in self._seen_indexes:
+                    self.add(
+                        index_path,
+                        "VALUE_MISMATCH",
+                        "unique function.index within the turn",
+                        str(native_index),
+                    )
+                self._seen_indexes.add(native_index)
+            call_id = raw_call.get("id")
+            if isinstance(call_id, str) and call_id:
+                if call_id in self._seen_call_ids:
+                    self.add(
+                        f"{location}/{position}/id",
+                        "VALUE_MISMATCH",
+                        "unique optional tool-call ID within the turn",
+                        call_id,
+                    )
+                self._seen_call_ids.add(call_id)
 
     def validate_logprob(self, value: object, location: str) -> None:
         if not self.object_shape(

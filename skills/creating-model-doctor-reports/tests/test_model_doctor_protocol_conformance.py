@@ -1416,11 +1416,81 @@ class ProtocolConformanceTests(unittest.TestCase):
 
                 self.assertEqual("DIFFERENT", result["status"], result)
 
+        invalid_anthropic_blocks = (
+            (
+                "search-result-image-content",
+                {
+                    "type": "search_result",
+                    "source": "https://example.com/result",
+                    "title": "Result",
+                    "content": [{
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "YQ==",
+                        },
+                    }],
+                },
+            ),
+            (
+                "document-file-source",
+                {
+                    "type": "document",
+                    "source": {"type": "file", "file_id": "file_fixture"},
+                },
+            ),
+            (
+                "image-invalid-media-type",
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "application/pdf",
+                        "data": "YQ==",
+                    },
+                },
+            ),
+        )
+        for mutation, block in invalid_anthropic_blocks:
+            with self.subTest(protocol="anthropic_messages", mutation=mutation):
+                parsed = self._tool_loop_parsed("anthropic_messages")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["messages"].append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_fixture",
+                        "content": [block],
+                    }],
+                })
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual("DIFFERENT", report["results"][0]["status"], report)
+
         invalid_parts = (
             ("null-inline-data", {"inlineData": None}),
             ("empty-inline-data", {"inlineData": {}}),
             ("empty-executable-code", {"executableCode": {}}),
             ("null-function-call", {"functionCall": None}),
+            ("empty-server-tool-call", {"toolCall": {}}),
+            ("empty-server-tool-response", {"toolResponse": {}}),
+            (
+                "invalid-server-tool-type",
+                {"toolCall": {"toolType": "NOT_A_TOOL_TYPE"}},
+            ),
+            ("invalid-server-tool-id", {"toolCall": {"toolType": "FILE_SEARCH", "id": 1}}),
+            (
+                "invalid-server-tool-response",
+                {"toolResponse": {"toolType": "FILE_SEARCH", "response": []}},
+            ),
             (
                 "multiple-payloads",
                 {
@@ -1445,6 +1515,114 @@ class ProtocolConformanceTests(unittest.TestCase):
                 result = report["results"][0]
 
                 self.assertEqual("DIFFERENT", result["status"], result)
+
+        for part in (
+            {"toolCall": {"toolType": "GOOGLE_SEARCH_WEB"}},
+            {"toolResponse": {"toolType": "GOOGLE_SEARCH_WEB"}},
+        ):
+            with self.subTest(protocol="gemini_generate_content", valid_part=part):
+                parsed = self._tool_loop_parsed("gemini_generate_content")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["contents"][0]["parts"].append(part)
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual("CONSISTENT", report["results"][0]["status"], report)
+
+    def test_v3_gemini_preserves_optional_model_role_without_inventing_it(self) -> None:
+        parsed = self._tool_loop_parsed("gemini_generate_content")
+        first = parsed["requests"]["test-046-turn-1"]
+        events = []
+        for frame in first["responseBody"].strip().split("\n\n"):
+            payload = json.loads(frame.removeprefix("data: "))
+            del payload["candidates"][0]["content"]["role"]
+            events.append((None, payload))
+        first["responseBody"] = self._encode_sse(events)
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        del body["contents"][1]["role"]
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertTrue(
+            all(result["status"] == "CONSISTENT" for result in report["results"]),
+            report,
+        )
+
+        invalid = self._tool_loop_parsed("gemini_generate_content")
+        invalid_first = invalid["requests"]["test-046-turn-1"]
+        invalid_events = []
+        for frame in invalid_first["responseBody"].strip().split("\n\n"):
+            payload = json.loads(frame.removeprefix("data: "))
+            payload["candidates"][0]["content"]["role"] = "user"
+            invalid_events.append((None, payload))
+        invalid_first["responseBody"] = self._encode_sse(invalid_events)
+
+        invalid_report = analyze_protocol_conformance(invalid)
+
+        self.assertEqual("DIFFERENT", invalid_report["results"][0]["status"], invalid_report)
+
+    def test_v3_gemini_accepts_initial_content_without_optional_role(self) -> None:
+        parsed = self._tool_loop_parsed("gemini_generate_content")
+        parsed["requests"] = {
+            "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+        }
+        parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+        request = parsed["requests"]["test-046-turn-1"]
+        body = json.loads(request["requestBody"])
+        del body["contents"][0]["role"]
+        request["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual("CONSISTENT", report["results"][0]["status"], report)
+
+    def test_v3_anthropic_accepts_official_tool_result_union_members(self) -> None:
+        valid_blocks = (
+            {"type": "tool_reference", "tool_name": "get_weather"},
+            {
+                "type": "document",
+                "source": {
+                    "type": "content",
+                    "content": [{
+                        "type": "image",
+                        "source": {
+                            "type": "url",
+                            "url": "https://example.com/weather.png",
+                        },
+                    }],
+                },
+            },
+        )
+        for block in valid_blocks:
+            with self.subTest(block=block):
+                parsed = self._tool_loop_parsed("anthropic_messages")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(request["requestBody"])
+                body["messages"].append({
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_fixture",
+                        "content": [block],
+                    }],
+                })
+                request["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual("CONSISTENT", report["results"][0]["status"], report)
 
     def test_v3_openai_tool_choice_objects_require_official_inner_shape(self) -> None:
         cases = (
@@ -1501,7 +1679,7 @@ class ProtocolConformanceTests(unittest.TestCase):
                 )
 
     def test_v3_ollama_rejects_blank_ids_and_negative_function_indexes(self) -> None:
-        for mutation in ("blank-id", "negative-index"):
+        for mutation in ("blank-id", "negative-index", "string-index"):
             with self.subTest(mutation=mutation):
                 parsed = self._ollama_tool_loop_with_ids()
                 first = parsed["requests"]["test-046-turn-1"]
@@ -1517,9 +1695,12 @@ class ProtocolConformanceTests(unittest.TestCase):
                     calls[0]["id"] = ""
                     body["messages"][1]["tool_calls"][0]["id"] = ""
                     del body["messages"][2]["tool_call_id"]
-                else:
+                elif mutation == "negative-index":
                     calls[0]["function"]["index"] = -1
                     body["messages"][1]["tool_calls"][0]["function"]["index"] = -1
+                else:
+                    calls[0]["function"]["index"] = "0"
+                    body["messages"][1]["tool_calls"][0]["function"]["index"] = "0"
                 first["responseBody"] = self._encode_ndjson(records)
                 follow["requestBody"] = json.dumps(body)
 
@@ -1530,23 +1711,100 @@ class ProtocolConformanceTests(unittest.TestCase):
                     report["results"],
                 )
 
+    def test_v3_ollama_rejects_duplicate_or_mixed_function_indexes(self) -> None:
+        for mutation in ("duplicate", "mixed"):
+            with self.subTest(mutation=mutation):
+                parsed = self._ollama_tool_loop_with_ids()
+                first = parsed["requests"]["test-046-turn-1"]
+                records = [
+                    json.loads(line)
+                    for line in first["responseBody"].splitlines()
+                    if line.strip()
+                ]
+                response_calls = records[0]["message"]["tool_calls"]
+                follow = parsed["requests"]["test-046-turn-2"]
+                body = json.loads(follow["requestBody"])
+                history_calls = body["messages"][1]["tool_calls"]
+                if mutation == "duplicate":
+                    response_calls[1]["function"]["index"] = 0
+                    history_calls[1]["function"]["index"] = 0
+                else:
+                    del response_calls[1]["function"]["index"]
+                    del history_calls[1]["function"]["index"]
+                first["responseBody"] = self._encode_ndjson(records)
+                follow["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertTrue(
+                    any(result["status"] == "DIFFERENT" for result in report["results"]),
+                    report["results"],
+                )
+
+    def test_v3_ollama_rejects_duplicate_optional_tool_call_ids(self) -> None:
+        parsed = self._ollama_tool_loop_with_ids()
+        first = parsed["requests"]["test-046-turn-1"]
+        records = [
+            json.loads(line)
+            for line in first["responseBody"].splitlines()
+            if line.strip()
+        ]
+        response_calls = records[0]["message"]["tool_calls"]
+        response_calls[1]["id"] = response_calls[0]["id"]
+        first["responseBody"] = self._encode_ndjson(records)
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        history_calls = body["messages"][1]["tool_calls"]
+        history_calls[1]["id"] = history_calls[0]["id"]
+        body["messages"][3]["tool_call_id"] = body["messages"][2]["tool_call_id"]
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertTrue(
+            any(result["status"] == "DIFFERENT" for result in report["results"]),
+            report["results"],
+        )
+
     def test_v3_responses_accepts_official_function_output_content_array(self) -> None:
+        outputs = (
+            [{"type": "input_text", "text": "WEATHER_SUNNY"}],
+            [{"type": "input_image"}],
+            [{"type": "input_image", "detail": None}],
+        )
+        for output in outputs:
+            with self.subTest(output=output):
+                parsed = self._tool_loop_parsed("openai_responses")
+                follow = parsed["requests"]["test-046-turn-2"]
+                body = json.loads(follow["requestBody"])
+                body["input"][0]["output"] = output
+                follow["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual([], validate_protocol_conformance(report))
+                self.assertTrue(
+                    all(result["status"] == "CONSISTENT" for result in report["results"]),
+                    report,
+                )
+
+    def test_v3_responses_rejects_null_input_file_detail(self) -> None:
         parsed = self._tool_loop_parsed("openai_responses")
         follow = parsed["requests"]["test-046-turn-2"]
         body = json.loads(follow["requestBody"])
         body["input"][0]["output"] = [{
-            "type": "input_text",
-            "text": "WEATHER_SUNNY",
+            "type": "input_file",
+            "detail": None,
         }]
         follow["requestBody"] = json.dumps(body)
 
         report = analyze_protocol_conformance(parsed)
 
-        self.assertEqual([], validate_protocol_conformance(report))
-        self.assertTrue(
-            all(result["status"] == "CONSISTENT" for result in report["results"]),
-            report["results"],
+        follow_result = next(
+            result for result in report["results"]
+            if result["requestId"] == "test-046-turn-2"
         )
+        self.assertEqual("DIFFERENT", follow_result["status"], report)
 
     def test_v3_pass_gate_rejects_invalid_required_and_control_fields(self) -> None:
         cases = (
