@@ -68,14 +68,20 @@ fn matches_response_rejects_non_native_or_malformed_envelopes() {
         Protocol::OpenAiResponses,
         json!({
             "id": "",
-            "output": [{"content": [{"type": "output_text", "text": "hello"}]}]
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }]
         })
     ));
     assert!(!matches(
         Protocol::OpenAiResponses,
         json!({
             "id": 1,
-            "output": [{"content": [{"type": "output_text", "text": "hello"}]}]
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "hello"}]
+            }]
         })
     ));
     assert!(!matches(
@@ -90,7 +96,10 @@ fn matches_response_rejects_non_native_or_malformed_envelopes() {
         Protocol::OpenAiResponses,
         json!({
             "id": "resp_123",
-            "output": [{"content": [{"type": "output_text", "text": ""}]}],
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": ""}]
+            }],
             "metadata": {"output_text": "hello"}
         })
     ));
