@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import base64
+import copy
+import json
 import sys
 import tempfile
 import unittest
@@ -13,6 +15,12 @@ SCRIPT_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_doctor_log import RETAINED_TEST_IDS, parse_log  # noqa: E402
+from model_doctor_assessment import (  # noqa: E402
+    CAPABILITY_SCOPE_BOUNDARY,
+    assemble_assessment,
+    validate_assessment,
+    validate_reviews,
+)
 
 
 V3_TEST_IDS = frozenset(RETAINED_TEST_IDS) | {"046"}
@@ -135,6 +143,327 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         path = Path(directory.name) / name
         path.write_text(value, encoding="utf-8")
         return parse_log(path)
+
+    @staticmethod
+    def _tool_declaration() -> dict:
+        return {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather.",
+                "strict": True,
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+    @staticmethod
+    def _tool_stream() -> str:
+        fixture = SKILL_DIR.parents[1] / "src/protocol/fixtures/openai_chat_tool.sse"
+        return fixture.read_text(encoding="utf-8")
+
+    @staticmethod
+    def _final_stream() -> str:
+        fixture = SKILL_DIR.parents[1] / "src/protocol/fixtures/openai_chat_final.sse"
+        return fixture.read_text(encoding="utf-8")
+
+    def _guard_request(
+        self,
+        test_id: str,
+        turn: int,
+        total_turns: int,
+    ) -> dict:
+        request_id = f"test-{test_id}-turn-{turn}"
+        initial_message = {
+            "role": "user",
+            "content": f"MODEL_DOCTOR_CASE_{test_id}",
+        }
+        body = {
+            "model": "gpt-test",
+            "messages": [initial_message],
+            "tools": [self._tool_declaration()],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": True,
+        }
+        if turn > 1:
+            body["messages"].extend([
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_weather_046",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city":"Beijing"}',
+                        },
+                    }],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_weather_046",
+                    "content": "WEATHER_SUNNY",
+                },
+            ])
+        final = turn == total_turns
+        return {
+            "request_id": request_id,
+            "protocol": "openai_chat",
+            "stream": "1",
+            "requestBody": json.dumps(body),
+            "responseHeaders": "content-type: text/event-stream",
+            "responseBody": self._final_stream() if final else self._tool_stream(),
+            "stderr": "",
+            "metrics": {"http_status": "200", "curl_exit_code": "0"},
+            "transport_outcome": "completed_eof",
+            "stream_termination": "completed",
+            "stream_end_signal": "[DONE]",
+            "model_stop_reason": "stop" if final else "tool_calls",
+            "stream_event_count": "4" if final else "5",
+            "tool_contract_status": "conformant",
+            "tool_contract_errors_json": "[]",
+            "tool_loop_turn": str(turn),
+            "tool_loop_outcome": "completed" if final else "continued",
+        }
+
+    @staticmethod
+    def _logic() -> dict:
+        return {
+            "purpose": "Check the tool loop.",
+            "method": "Inspect all recorded turns.",
+            "passCriteria": ["The official tool loop completes."],
+            "failCriteria": ["Any required turn is incomplete."],
+            "capabilityBoundary": "This conclusion covers only this run.",
+        }
+
+    @staticmethod
+    def _verified_facts() -> dict:
+        unavailable = {
+            "interfaceProtocol": {
+                "evidenceState": "NOT_COLLECTED",
+                "family": "UNKNOWN",
+                "requestFormat": "No interface request format was collected.",
+                "responseFormat": "No interface response format was collected.",
+                "statement": "No interface protocol fact was collected.",
+                "evidenceRefs": [],
+                "boundary": "No protocol can be inferred without evidence.",
+            },
+            "contextWindow": {
+                "evidenceState": "NOT_COLLECTED",
+                "highestVerifiedTier": None,
+                "highestVerifiedInputTokens": None,
+                "firstFailedTier": None,
+                "firstFailedInputTokens": None,
+                "statement": "No context tier evidence was collected.",
+                "evidenceRefs": [],
+                "boundary": "No context limit can be inferred.",
+            },
+            "concurrency": {
+                "evidenceState": "NOT_COLLECTED",
+                "highestVerifiedConcurrentRequests": None,
+                "statement": "No concurrency wave was collected.",
+                "evidenceRefs": [],
+                "boundary": "No concurrency limit can be inferred.",
+            },
+        }
+        return unavailable
+
+    def _guard_fixture(
+        self,
+        test_id: str = "046",
+        turns: int | None = None,
+        *,
+        contract: tuple[str, str] = (
+            "llm-capability-doctor.evidence.v3",
+            "0.11.0",
+        ),
+    ) -> tuple[dict, dict]:
+        turn_count = turns if turns is not None else {"046": 2, "047": 3, "048": 2, "049": 3}[test_id]
+        request_refs = [f"test-{test_id}-turn-{turn}" for turn in range(1, turn_count + 1)]
+        parsed = {
+            "run": {"log_schema": contract[0], "script_version": contract[1]},
+            "tests": {
+                test_id: {
+                    "name": f"Tool loop {test_id}",
+                    "category": "Core",
+                    "requestRefs": request_refs,
+                }
+            },
+            "requests": {
+                request_id: self._guard_request(test_id, turn, turn_count)
+                for turn, request_id in enumerate(request_refs, start=1)
+            },
+            "source": {},
+            "tokenTotals": {},
+            "warnings": [],
+        }
+        reviews = {
+            "schemaVersion": "llm-capability-doctor.reviews.v2",
+            "tests": {
+                test_id: {
+                    "testId": test_id,
+                    "reviewedStatus": "PASS",
+                    "conclusion": "The official tool loop completed.",
+                    "logic": self._logic(),
+                    "evidenceRefs": [f"request:{request_id}" for request_id in request_refs],
+                    "evidenceExcerpts": ["All recorded turns completed."],
+                    "limitations": [],
+                    "retestInstructions": [],
+                }
+            },
+            "capabilitySummary": {
+                "headline": "The collected capability evidence was reviewed.",
+                "verifiedFacts": self._verified_facts(),
+                "issues": [],
+                "scopeBoundary": CAPABILITY_SCOPE_BOUNDARY,
+            },
+        }
+        return parsed, reviews
+
+    def test_v3_tool_pass_guard_accepts_complete_ordered_loop(self) -> None:
+        parsed, reviews = self._guard_fixture()
+
+        self.assertEqual([], validate_reviews(parsed, reviews))
+
+    def test_v3_tool_pass_guard_rejects_non_contiguous_turn_ids(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        request = parsed["requests"].pop("test-046-turn-2")
+        request["request_id"] = "test-046-turn-3"
+        parsed["requests"]["test-046-turn-3"] = request
+        parsed["tests"]["046"]["requestRefs"][1] = "test-046-turn-3"
+        reviews["tests"]["046"]["evidenceRefs"][1] = "request:test-046-turn-3"
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("contiguous ordered turns" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_incomplete_stream(self) -> None:
+        mutations = (
+            ("stream_termination", "timeout", "did not complete its stream"),
+            ("transport_outcome", "timeout", "clean transport EOF"),
+            ("stream_end_signal", "none", "terminal signal"),
+        )
+        for field, value, expected_error in mutations:
+            with self.subTest(field=field):
+                parsed, reviews = self._guard_fixture()
+                parsed["requests"]["test-046-turn-1"][field] = value
+
+                errors = validate_reviews(parsed, reviews)
+
+                self.assertTrue(
+                    any(expected_error in error for error in errors), errors
+                )
+
+    def test_v3_tool_pass_guard_rejects_non_conformant_contract(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        request = parsed["requests"]["test-046-turn-1"]
+        request["tool_contract_status"] = "non_conformant"
+        request["tool_contract_errors_json"] = '["chat.invalid:/"]'
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("not contract-conformant" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_incomplete_final_loop_outcome(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        parsed["requests"]["test-046-turn-2"]["tool_loop_outcome"] = "continued"
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("tool_loop_outcome=completed" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_non_continued_intermediate_outcome(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        parsed["requests"]["test-046-turn-1"]["tool_loop_outcome"] = "completed"
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("tool_loop_outcome=continued" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_non_contiguous_manifest_refs_with_matching_embedded_ids(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        request = parsed["requests"].pop("test-046-turn-2")
+        request["request_id"] = "test-046-turn-4"
+        request["tool_loop_turn"] = "4"
+        parsed["requests"]["test-046-turn-4"] = request
+        parsed["tests"]["046"]["requestRefs"][1] = "test-046-turn-4"
+        reviews["tests"]["046"]["evidenceRefs"][1] = "request:test-046-turn-4"
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("contiguous ordered turns" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_non_mapping_request(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        parsed["requests"]["test-046-turn-1"] = "not-an-object"
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("must be an object" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_integer_turn_metadata(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        parsed["requests"]["test-046-turn-1"]["tool_loop_turn"] = 1
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("mismatched tool_loop_turn" in error for error in errors), errors)
+
+    def test_assessment_validator_reports_a_damaged_run_contract_without_crashing(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        assessment = assemble_assessment(parsed, reviews)
+        assessment["run"] = []
+
+        errors = validate_assessment(assessment)
+
+        self.assertTrue(any("run contract is invalid" in error for error in errors), errors)
+
+    def test_v2_tool_reviews_are_not_rescored_by_v3_guard(self) -> None:
+        parsed, reviews = self._guard_fixture(
+            contract=("llm-capability-doctor.evidence.v2", "0.10.0")
+        )
+        parsed["tests"]["046"]["requestRefs"] = ["legacy-tool-call"]
+        parsed["requests"] = {
+            "legacy-tool-call": {
+                "request_id": "legacy-tool-call",
+                "metrics": {},
+            }
+        }
+        reviews["tests"]["046"]["evidenceRefs"] = ["request:legacy-tool-call"]
+
+        self.assertEqual([], validate_reviews(parsed, reviews))
+
+    def test_assessment_validator_independently_rejects_tampered_v3_tool_pass(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        assessment = assemble_assessment(parsed, reviews)
+        tool_test = next(item for item in assessment["tests"] if item["testId"] == "046")
+        body = json.loads(tool_test["requests"][1]["requestBody"])
+        body["messages"][-1]["tool_call_id"] = "attacker-replaced-call"
+        tool_test["requests"][1]["requestBody"] = json.dumps(body)
+        supplied = {
+            result["requestId"]: result
+            for result in assessment["protocolConformance"]["results"]
+        }
+        self.assertEqual("CONSISTENT", supplied["test-046-turn-2"]["status"])
+
+        errors = validate_assessment(assessment)
+
+        self.assertTrue(any("official protocol" in error for error in errors), errors)
+
+    def test_v3_tool_pass_guard_rejects_protocol_difference(self) -> None:
+        parsed, reviews = self._guard_fixture()
+        body = json.loads(parsed["requests"]["test-046-turn-2"]["requestBody"])
+        body["messages"][-1]["tool_call_id"] = "wrong-call"
+        parsed["requests"]["test-046-turn-2"]["requestBody"] = json.dumps(body)
+
+        errors = validate_reviews(parsed, reviews)
+
+        self.assertTrue(any("official protocol" in error for error in errors), errors)
 
     def test_parser_accepts_complete_profile_free_v3_with_47_manifests(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())

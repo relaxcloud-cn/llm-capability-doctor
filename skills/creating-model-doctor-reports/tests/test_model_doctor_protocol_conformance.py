@@ -669,6 +669,280 @@ class ProtocolConformanceTests(unittest.TestCase):
             ),
         }
 
+    @staticmethod
+    def _fixture_body(name: str) -> str:
+        return (SKILL_DIR.parents[1] / "src/protocol/fixtures" / name).read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _tool_schema(*, closed: bool) -> dict:
+        schema = {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"],
+        }
+        if closed:
+            schema["additionalProperties"] = False
+        return schema
+
+    def _tool_loop_bodies(self, protocol: str) -> tuple[dict, dict, str, str]:
+        prompt = "MODEL_DOCTOR_CASE_046"
+        output = "WEATHER_SUNNY"
+        if protocol == "openai_chat":
+            tool = {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "strict": True,
+                    "parameters": self._tool_schema(closed=True),
+                },
+            }
+            initial = {
+                "model": "gpt-test",
+                "messages": [{"role": "user", "content": prompt}],
+                "tools": [tool],
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+                "stream": True,
+            }
+            follow = copy.deepcopy(initial)
+            follow["messages"].extend([
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_weather_046",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"city":"Beijing"}',
+                        },
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_weather_046", "content": output},
+            ])
+            return initial, follow, "openai_chat_tool.sse", "openai_chat_final.sse"
+        if protocol == "openai_responses":
+            tool = {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get weather.",
+                "parameters": self._tool_schema(closed=True),
+                "strict": True,
+            }
+            initial = {
+                "model": "gpt-test",
+                "input": prompt,
+                "tools": [tool],
+                "tool_choice": "auto",
+                "parallel_tool_calls": False,
+                "store": True,
+                "stream": True,
+            }
+            follow = {
+                **copy.deepcopy(initial),
+                "input": [{
+                    "type": "function_call_output",
+                    "call_id": "call_fixture",
+                    "output": output,
+                }],
+                "previous_response_id": "resp_fixture",
+            }
+            return initial, follow, "openai_responses_tool.sse", "openai_responses_final.sse"
+        if protocol == "anthropic_messages":
+            tool = {
+                "name": "get_weather",
+                "description": "Get weather.",
+                "input_schema": self._tool_schema(closed=False),
+            }
+            initial = {
+                "model": "claude-test",
+                "max_tokens": 1024,
+                "messages": [{"role": "user", "content": prompt}],
+                "tools": [tool],
+                "stream": True,
+            }
+            follow = copy.deepcopy(initial)
+            follow["messages"].extend([
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "get_weather",
+                        "input": {"city": "Beijing"},
+                    }],
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": output,
+                    }],
+                },
+            ])
+            return initial, follow, "anthropic_tool.sse", "anthropic_final.sse"
+        if protocol == "gemini_generate_content":
+            tool = {
+                "functionDeclarations": [{
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": self._tool_schema(closed=False),
+                }]
+            }
+            initial = {
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "tools": [tool],
+            }
+            follow = copy.deepcopy(initial)
+            follow["contents"].extend([
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "text": "private reasoning",
+                            "thought": True,
+                            "thoughtSignature": "sig-thought",
+                        },
+                        {
+                            "functionCall": {
+                                "id": "call_weather_046",
+                                "name": "get_weather",
+                                "args": {"city": "Beijing"},
+                            },
+                            "thoughtSignature": "sig-call",
+                        },
+                        {"text": "", "thoughtSignature": "sig-empty"},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "parts": [{
+                        "functionResponse": {
+                            "id": "call_weather_046",
+                            "name": "get_weather",
+                            "response": {"result": output},
+                        }
+                    }],
+                },
+            ])
+            return initial, follow, "gemini_tool.sse", "gemini_final.sse"
+        if protocol == "ollama_chat":
+            tool = {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": self._tool_schema(closed=False),
+                },
+            }
+            initial = {
+                "model": "qwen3",
+                "messages": [{"role": "user", "content": prompt}],
+                "tools": [tool],
+                "stream": True,
+            }
+            follow = copy.deepcopy(initial)
+            follow["messages"].extend([
+                {
+                    "role": "assistant",
+                    "thinking": "Need weather.",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "get_time",
+                                "arguments": {"zone": "UTC"},
+                            },
+                        },
+                        {
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": {"city": "Beijing"},
+                            },
+                        },
+                    ],
+                },
+                {"role": "tool", "tool_name": "get_time", "content": "TIME_UTC_00:00"},
+                {"role": "tool", "tool_name": "get_weather", "content": output},
+            ])
+            return initial, follow, "ollama_tool.ndjson", "ollama_final.ndjson"
+        raise AssertionError(protocol)
+
+    def _tool_loop_parsed(self, protocol: str) -> dict:
+        initial, follow, tool_fixture, final_fixture = self._tool_loop_bodies(protocol)
+        content_type = (
+            "content-type: application/x-ndjson"
+            if protocol == "ollama_chat"
+            else "content-type: text/event-stream"
+        )
+        tool_response = self._fixture_body(tool_fixture)
+        final_response = self._fixture_body(final_fixture)
+        if protocol == "openai_responses":
+            tool_response = self._encode_sse(self._responses_function_stream_events())
+            final_response = self._encode_sse(self._responses_stream_events())
+        elif protocol == "anthropic_messages":
+            tool_response = self._encode_sse(self._anthropic_stream_events())
+        elif protocol == "ollama_chat":
+            tool_response = self._encode_ndjson([
+                {
+                    "model": "ollama-fixture",
+                    "created_at": "2026-08-18T00:00:00Z",
+                    "message": {
+                        "role": "assistant",
+                        "thinking": "Need weather.",
+                        "content": "",
+                        "tool_calls": [
+                            {"function": {"name": "get_time", "arguments": {"zone": "UTC"}}},
+                            {"function": {"name": "get_weather", "arguments": {"city": "Beijing"}}},
+                        ],
+                    },
+                    "done": False,
+                },
+                {
+                    "model": "ollama-fixture",
+                    "created_at": "2026-08-18T00:00:01Z",
+                    "message": {"role": "assistant", "content": ""},
+                    "done": True,
+                    "done_reason": "stop",
+                    "total_duration": 10,
+                    "load_duration": 2,
+                    "prompt_eval_count": 1,
+                    "prompt_eval_duration": 3,
+                    "eval_count": 1,
+                    "eval_duration": 4,
+                },
+            ])
+            final_response = self._encode_ndjson(self._ollama_stream_records())
+        requests = {}
+        for turn, (body, response) in enumerate(
+            ((initial, tool_response), (follow, final_response)), start=1
+        ):
+            request_id = f"test-046-turn-{turn}"
+            requests[request_id] = self._request(
+                request_id,
+                protocol,
+                request_body=body,
+                raw_response=response,
+                stream="1",
+                response_headers=content_type,
+            )
+        return {
+            "run": {
+                "log_schema": "llm-capability-doctor.evidence.v3",
+                "script_version": "0.11.0",
+            },
+            "requests": requests,
+            "tests": {
+                "046": {
+                    "requestRefs": ["test-046-turn-1", "test-046-turn-2"],
+                }
+            },
+        }
+
     def _single_result(self, request: dict) -> dict:
         report = analyze_protocol_conformance(
             self._parsed({request["request_id"]: request})
@@ -705,6 +979,242 @@ class ProtocolConformanceTests(unittest.TestCase):
             ],
             result["differences"],
         )
+
+    def test_v3_tool_transition_matrix_accepts_all_five_official_follow_ups(self) -> None:
+        for protocol in SUPPORTED_PROTOCOLS:
+            with self.subTest(protocol=protocol):
+                report = analyze_protocol_conformance(self._tool_loop_parsed(protocol))
+                self.assertEqual([], validate_protocol_conformance(report))
+                results = {item["requestId"]: item for item in report["results"]}
+                self.assertEqual(
+                    "CONSISTENT",
+                    results["test-046-turn-2"]["status"],
+                    results["test-046-turn-2"]["differences"],
+                )
+
+    def test_v3_tool_transition_matrix_rejects_all_five_correlation_mutations(self) -> None:
+        mutations = {
+            "openai_chat": lambda body: body["messages"][-1].__setitem__(
+                "tool_call_id", "wrong-call"
+            ),
+            "openai_responses": lambda body: body.__setitem__(
+                "previous_response_id", "wrong-response"
+            ),
+            "anthropic_messages": lambda body: body["messages"][-1]["content"][0].__setitem__(
+                "tool_use_id", "wrong-tool"
+            ),
+            "gemini_generate_content": lambda body: body["contents"][-1]["parts"][0][
+                "functionResponse"
+            ].__setitem__("id", "wrong-call"),
+            "ollama_chat": lambda body: body["messages"][-1].__setitem__(
+                "tool_name", "wrong_tool"
+            ),
+        }
+        for protocol, mutate in mutations.items():
+            with self.subTest(protocol=protocol):
+                parsed = self._tool_loop_parsed(protocol)
+                follow = parsed["requests"]["test-046-turn-2"]
+                body = json.loads(follow["requestBody"])
+                mutate(body)
+                follow["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                self.assertEqual([], validate_protocol_conformance(report))
+                result = next(
+                    item for item in report["results"]
+                    if item["requestId"] == "test-046-turn-2"
+                )
+
+                self.assertEqual("DIFFERENT", result["status"], result)
+                self.assertTrue(
+                    any(
+                        difference["differenceKind"] == "CORRELATION"
+                        for difference in result["differences"]
+                    ),
+                    result["differences"],
+                )
+
+    def test_v3_tool_transition_rejects_foreign_initial_fields(self) -> None:
+        mutations = {
+            "openai_chat": ("contents", []),
+            "openai_responses": ("messages", []),
+            "anthropic_messages": ("previous_response_id", "resp-foreign"),
+            "gemini_generate_content": ("stream", True),
+            "ollama_chat": ("tool_choice", "auto"),
+        }
+        for protocol, (field, value) in mutations.items():
+            with self.subTest(protocol=protocol):
+                parsed = self._tool_loop_parsed(protocol)
+                initial = parsed["requests"]["test-046-turn-1"]
+                body = json.loads(initial["requestBody"])
+                body[field] = value
+                initial["requestBody"] = json.dumps(body)
+
+                report = analyze_protocol_conformance(parsed)
+                self.assertEqual([], validate_protocol_conformance(report))
+                result = next(
+                    item
+                    for item in report["results"]
+                    if item["requestId"] == "test-046-turn-1"
+                )
+                self.assertEqual("DIFFERENT", result["status"])
+                self.assertTrue(
+                    any(
+                        difference["differenceKind"] == "UNEXPECTED_FIELD"
+                        and difference["location"] == f"/requestBody/{field}"
+                        for difference in result["differences"]
+                    ),
+                    result["differences"],
+                )
+
+    def test_v3_tool_transition_rejects_adjacent_protocol_switch(self) -> None:
+        parsed = self._tool_loop_parsed("openai_chat")
+        parsed["requests"]["test-046-turn-2"]["protocol"] = "ollama_chat"
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual([], validate_protocol_conformance(report))
+        result = next(
+            item for item in report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self.assertTrue(
+            any(
+                difference["location"] == "/protocol"
+                and difference["differenceKind"] == "CORRELATION"
+                for difference in result["differences"]
+            ),
+            result["differences"],
+        )
+
+    def test_anthropic_timeout_transition_requires_is_error(self) -> None:
+        parsed = self._tool_loop_parsed("anthropic_messages")
+        renamed = {}
+        for turn in (1, 2):
+            old_id = f"test-046-turn-{turn}"
+            new_id = f"test-049-turn-{turn}"
+            request = parsed["requests"][old_id]
+            request["request_id"] = new_id
+            renamed[new_id] = request
+        parsed["requests"] = renamed
+        parsed["tests"] = {
+            "049": {"requestRefs": ["test-049-turn-1", "test-049-turn-2"]}
+        }
+        follow = parsed["requests"]["test-049-turn-2"]
+        body = json.loads(follow["requestBody"])
+        body["messages"][-1]["content"][0]["content"] = "ERROR: timeout"
+        follow["requestBody"] = json.dumps(body)
+
+        missing_flag = analyze_protocol_conformance(parsed)
+        result = next(
+            item for item in missing_flag["results"]
+            if item["requestId"] == "test-049-turn-2"
+        )
+        self.assertTrue(
+            any(
+                difference["location"].endswith("/is_error")
+                for difference in result["differences"]
+            ),
+            result["differences"],
+        )
+
+        body["messages"][-1]["content"][0]["is_error"] = True
+        follow["requestBody"] = json.dumps(body)
+        complete = analyze_protocol_conformance(parsed)
+        result = next(
+            item for item in complete["results"]
+            if item["requestId"] == "test-049-turn-2"
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_gemini_transition_accepts_omitted_optional_call_id(self) -> None:
+        parsed = self._tool_loop_parsed("gemini_generate_content")
+        initial = parsed["requests"]["test-046-turn-1"]
+        initial["responseBody"] = initial["responseBody"].replace(
+            '"id":"call_weather_046",',
+            "",
+        )
+        follow = parsed["requests"]["test-046-turn-2"]
+        body = json.loads(follow["requestBody"])
+        del body["contents"][-2]["parts"][1]["functionCall"]["id"]
+        del body["contents"][-1]["parts"][0]["functionResponse"]["id"]
+        follow["requestBody"] = json.dumps(body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual([], validate_protocol_conformance(report))
+        result = next(
+            item for item in report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
+
+    def test_ollama_transition_preserves_extensions_and_uses_function_index_order(self) -> None:
+        parsed = self._tool_loop_parsed("ollama_chat")
+        initial = parsed["requests"]["test-046-turn-1"]
+        initial["responseBody"] = self._fixture_body("ollama_tool.ndjson")
+        initial_body = json.loads(initial["requestBody"])
+        initial_body["tools"].append({
+            "type": "function",
+            "function": {
+                "name": "get_time",
+                "description": "Get time.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"zone": {"type": "string"}},
+                    "required": ["zone"],
+                },
+            },
+        })
+        initial["requestBody"] = json.dumps(initial_body)
+
+        follow = parsed["requests"]["test-046-turn-2"]
+        follow_body = copy.deepcopy(initial_body)
+        follow_body["messages"].extend([
+            {
+                "role": "assistant",
+                "content": "Calling tools.",
+                "thinking": "Need weather. ",
+                "future_message": {"trace": 1},
+                "tool_calls": [
+                    {
+                        "id": "call_weather_046",
+                        "type": "function",
+                        "function": {
+                            "index": 1,
+                            "name": "get_weather",
+                            "arguments": {
+                                "city": "Beijing",
+                                "units": {"temperature": "celsius"},
+                            },
+                            "future_function": "keep",
+                        },
+                        "future_call": "keep",
+                    },
+                    {
+                        "id": "call_time_046",
+                        "type": "function",
+                        "function": {
+                            "index": 0,
+                            "name": "get_time",
+                            "arguments": {"zone": "UTC"},
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_name": "get_time", "content": "TIME_UTC_00:00"},
+            {"role": "tool", "tool_name": "get_weather", "content": "WEATHER_SUNNY"},
+        ])
+        follow["requestBody"] = json.dumps(follow_body)
+
+        report = analyze_protocol_conformance(parsed)
+
+        self.assertEqual([], validate_protocol_conformance(report))
+        result = next(
+            item for item in report["results"]
+            if item["requestId"] == "test-046-turn-2"
+        )
+        self.assertEqual("CONSISTENT", result["status"], result["differences"])
 
     def test_public_constants_and_pinned_baselines(self) -> None:
         self.assertEqual(

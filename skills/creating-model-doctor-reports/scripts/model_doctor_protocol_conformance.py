@@ -11,6 +11,8 @@ import json
 from collections import Counter, defaultdict
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from model_doctor_tool_loop_conformance import validate_tool_loop_transitions
+
 
 RULE_SET_VERSION = "official-protocol-conformance.2026-08-18"
 BASELINE_DATE = "2026-08-18"
@@ -2867,6 +2869,17 @@ def analyze_protocol_conformance(parsed: dict) -> dict:
         _analyze_request(str(request_id), request, associations.get(str(request_id), []))
         for request_id, request in requests.items()
     ]
+    results_by_id = {result["requestId"]: result for result in results}
+    for request_id, differences in validate_tool_loop_transitions(
+        parsed_mapping
+    ).items():
+        result = results_by_id.get(request_id)
+        if result is None:
+            continue
+        for difference in differences:
+            if difference not in result["differences"]:
+                result["differences"].append(difference)
+        result["status"] = "DIFFERENT" if result["differences"] else "CONSISTENT"
     return {
         "ruleSetVersion": RULE_SET_VERSION,
         "baselineDate": BASELINE_DATE,

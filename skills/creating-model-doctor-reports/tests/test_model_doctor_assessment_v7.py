@@ -140,6 +140,102 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         )
         return request
 
+    def _v3_tool_loop(self, test_id: str) -> list[dict]:
+        turn_count = {"046": 2, "047": 3, "048": 2, "049": 3}[test_id]
+        fixture_dir = SKILL_DIR.parents[1] / "src" / "protocol" / "fixtures"
+        tool_stream = (fixture_dir / "openai_chat_tool.sse").read_text(
+            encoding="utf-8"
+        )
+        final_stream = (fixture_dir / "openai_chat_final.sse").read_text(
+            encoding="utf-8"
+        )
+        body = {
+            "model": "gpt-test",
+            "messages": [
+                {"role": "user", "content": f"MODEL_DOCTOR_CASE_{test_id}"}
+            ],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "description": "Get weather.",
+                        "strict": True,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                            "required": ["city"],
+                            "additionalProperties": False,
+                        },
+                    },
+                }
+            ],
+            "tool_choice": "auto",
+            "parallel_tool_calls": False,
+            "stream": True,
+        }
+        requests = []
+        for turn in range(1, turn_count + 1):
+            final = turn == turn_count
+            request_id = f"test-{test_id}-turn-{turn}"
+            call_id = f"call-{test_id}-{turn}"
+            response_body = (
+                final_stream
+                if final
+                else tool_stream.replace("call_weather_046", call_id)
+            )
+            requests.append(
+                {
+                    "request_id": request_id,
+                    "protocol": "openai_chat",
+                    "stream": "1",
+                    "requestBody": json.dumps(body),
+                    "responseHeaders": "content-type: text/event-stream",
+                    "responseBody": response_body,
+                    "stderr": "",
+                    "metrics": {"http_status": "200", "curl_exit_code": "0"},
+                    "transport_outcome": "completed_eof",
+                    "stream_termination": "completed",
+                    "stream_end_signal": "[DONE]",
+                    "model_stop_reason": "stop" if final else "tool_calls",
+                    "stream_event_count": "4" if final else "5",
+                    "tool_contract_status": "conformant",
+                    "tool_contract_errors_json": "[]",
+                    "tool_loop_turn": str(turn),
+                    "tool_loop_outcome": "completed" if final else "continued",
+                }
+            )
+            if not final:
+                body = deepcopy(body)
+                body["messages"].extend(
+                    [
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": call_id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": "get_weather",
+                                        "arguments": '{"city":"Beijing"}',
+                                    },
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "content": (
+                                "ERROR: timeout"
+                                if test_id == "049" and turn == 1
+                                else "WEATHER_SUNNY"
+                            ),
+                        },
+                    ]
+                )
+        return requests
+
     def _fixture(self, *, second_request_is_different: bool = True) -> tuple[dict, dict]:
         referenced_id = "request-referenced"
         unreferenced_id = "request-unreferenced"
@@ -239,19 +335,30 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                 )
                 for request_id in parsed["requests"]
             }
+            for test_id in ("046", "047", "048", "049"):
+                requests = self._v3_tool_loop(test_id)
+                request_ids = [request["request_id"] for request in requests]
+                parsed["requests"].update(
+                    {request["request_id"]: request for request in requests}
+                )
+                parsed["tests"][test_id]["requestRefs"] = request_ids
+                reviews["tests"][test_id]["evidenceRefs"] = [
+                    f"request:{request_id}" for request_id in request_ids
+                ]
         return parsed, reviews
 
     def _v3_tool_turn_fixture(self) -> tuple[dict, dict]:
         parsed, reviews = self._complete_fixture(V3_CONTRACT)
-        parsed["requests"] = {}
-        for test_id in ("046", "047", "048", "049"):
-            request_id = f"test-{test_id}-turn-1"
-            parsed["requests"][request_id] = self._v3_request(
-                request_id,
-                self._chat_response(request_id),
-            )
-            parsed["tests"][test_id]["requestRefs"] = [request_id]
-            reviews["tests"][test_id]["evidenceRefs"] = [f"request:{request_id}"]
+        tool_request_ids = {
+            request_id
+            for test_id in ("046", "047", "048", "049")
+            for request_id in parsed["tests"][test_id]["requestRefs"]
+        }
+        parsed["requests"] = {
+            request_id: request
+            for request_id, request in parsed["requests"].items()
+            if request_id in tool_request_ids
+        }
         parsed["tests"]["001"]["requestRefs"] = []
         reviews["tests"]["001"]["evidenceRefs"] = ["test:001:manifest"]
         return parsed, reviews
@@ -359,6 +466,34 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         verdict = different["capabilitySummary"]["generalVerdict"]
         self.assertEqual(1, verdict["collectedTests"])
         self.assertEqual(1, verdict["passedTests"])
+
+    def test_protocol_differences_remain_diagnostic_only_for_legacy_and_non_tool_checks(self) -> None:
+        legacy_parsed, legacy_reviews = self._fixture(second_request_is_different=True)
+        legacy = assemble_assessment(legacy_parsed, legacy_reviews)
+        self.assertEqual([], validate_assessment(legacy))
+        self.assertEqual("PASS", legacy["tests"][0]["reviewedStatus"])
+        self.assertGreater(
+            legacy["protocolConformance"]["summary"]["differentRequests"],
+            0,
+        )
+
+        v3_parsed, v3_reviews = self._fixture(second_request_is_different=True)
+        v3_parsed["run"].update({
+            "log_schema": V3_CONTRACT[0],
+            "script_version": V3_CONTRACT[1],
+        })
+        v3_parsed["requests"] = {
+            request_id: self._v3_request(request_id, json.loads(request["responseBody"]))
+            for request_id, request in v3_parsed["requests"].items()
+        }
+        v3 = assemble_assessment(v3_parsed, v3_reviews)
+
+        self.assertEqual([], validate_assessment(v3))
+        self.assertEqual("PASS", v3["tests"][0]["reviewedStatus"])
+        self.assertGreater(
+            v3["protocolConformance"]["summary"]["differentRequests"],
+            0,
+        )
 
     def test_validate_assessment_requires_one_closed_top_level_result(self) -> None:
         parsed, reviews = self._fixture()
@@ -708,12 +843,12 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         assessment = assemble_assessment(parsed, reviews)
 
         results = assessment["protocolConformance"]["results"]
-        self.assertEqual(4, len(results))
+        self.assertEqual(10, len(results))
         for check_id in ("046", "047", "048", "049"):
-            request_id = f"test-{check_id}-turn-1"
-            matches = [item for item in results if item["requestId"] == request_id]
-            self.assertEqual(1, len(matches), request_id)
-            self.assertEqual([check_id], matches[0]["checkIds"])
+            for request_id in parsed["tests"][check_id]["requestRefs"]:
+                matches = [item for item in results if item["requestId"] == request_id]
+                self.assertEqual(1, len(matches), request_id)
+                self.assertEqual([check_id], matches[0]["checkIds"])
 
     def test_combined_v7_schema_requires_conformance_and_contract_totals(self) -> None:
         schema = self._schema()
