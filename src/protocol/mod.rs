@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+pub(crate) mod stream;
 pub mod tools;
 
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;

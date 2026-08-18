@@ -352,7 +352,7 @@ Expected: all transport and combined-precedence cases retain the correct bytes a
 - Create: `src/protocol/stream/framing.rs`
 - Modify: `src/protocol/mod.rs`
 
-- [ ] **Step 1: Add failing framing tests.**
+- [x] **Step 1: Add failing framing tests.**
 
 Add these tests under `protocol::stream::framing::tests`:
 
@@ -369,7 +369,7 @@ ndjson_rejects_a_partial_final_object
 
 `sse_is_invariant_across_every_byte_split` must feed the same fixture at every split offset and compare decoded events with a one-chunk parse. The general fixture naturally contains official optional field-value spacing; do not create a separate spacing test, fixture, or diagnostic.
 
-- [ ] **Step 2: Run the framing module and confirm it is absent.**
+- [x] **Step 2: Run the framing module and confirm it is absent.**
 
 ```bash
 cargo test --locked --lib protocol::stream::framing::tests -- --nocapture
@@ -377,7 +377,7 @@ cargo test --locked --lib protocol::stream::framing::tests -- --nocapture
 
 Expected: compilation fails because the stream module does not exist.
 
-- [ ] **Step 3: Add the parser dependency and framing API.**
+- [x] **Step 3: Add the parser dependency and framing API.**
 
 Add `eventsource-stream = "0.2.3"`. Expose this internal API:
 
@@ -405,7 +405,7 @@ pub(crate) fn decode_ndjson_chunks(
 
 Use `eventsource_stream::Eventsource` to parse SSE fields and dispatch. The wrapper detects a non-empty undispatched trailing frame so a half packet cannot silently become a missing-terminal case. For NDJSON, concatenate only for line framing, parse each complete line as JSON, and parse a non-newline final tail only when it is a complete JSON object.
 
-- [ ] **Step 4: Run framing tests and the Rust library suite.**
+- [x] **Step 4: Run framing tests and the Rust library suite.**
 
 ```bash
 cargo test --locked --lib protocol::stream::framing::tests -- --nocapture
@@ -414,7 +414,7 @@ cargo test --locked --lib
 
 Expected: all byte-split variants produce identical events/objects and partial final frames fail.
 
-- [ ] **Step 5: Commit framing.**
+- [x] **Step 5: Commit framing.**
 
 ```bash
 git add Cargo.toml Cargo.lock src/protocol/mod.rs src/protocol/stream/mod.rs src/protocol/stream/framing.rs
