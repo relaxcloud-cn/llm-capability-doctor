@@ -31,9 +31,9 @@ pub fn normalize_request_url(protocol: Protocol, configured: &Url, stream: bool)
     );
 
     let mut query_pairs = query
+        .filter(|query| !query.is_empty())
         .into_iter()
         .flat_map(|query| query.split('&'))
-        .filter(|pair| !pair.is_empty())
         .filter(|pair| !query_key_is_alt(pair))
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -395,6 +395,18 @@ mod tests {
         assert_eq!(
             normalize_request_url(Protocol::GeminiGenerateContent, &empty_query, true).as_str(),
             "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn gemini_stream_url_preserves_empty_segments_inside_a_nonempty_query() {
+        let configured =
+            Url::parse("https://example.com/v1/models/gemini:generateContent?x=1&&alt=json&y=2&")
+                .expect("valid URL with raw empty query segments");
+
+        assert_eq!(
+            normalize_request_url(Protocol::GeminiGenerateContent, &configured, true).as_str(),
+            "https://example.com/v1/models/gemini:streamGenerateContent?x=1&&y=2&&alt=sse"
         );
     }
 }
