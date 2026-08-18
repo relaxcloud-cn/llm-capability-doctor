@@ -15,7 +15,9 @@ from urllib.parse import parse_qsl, urlsplit
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
 V1_CONTRACT = ("llm-capability-doctor.evidence.v1", "0.9.0")
 V2_CONTRACT = ("llm-capability-doctor.evidence.v2", "0.10.0")
-SUPPORTED_CONTRACTS = {V1_CONTRACT, V2_CONTRACT}
+V3_CONTRACT = ("llm-capability-doctor.evidence.v3", "0.11.0")
+SUPPORTED_CONTRACTS = {V1_CONTRACT, V2_CONTRACT, V3_CONTRACT}
+V3_COMPATIBILITY_PROFILE = "opencodex-2.7.42-data-format"
 SECTION_ENCODING = "base64"
 RETAINED_TEST_IDS = {
     *(f"{value:03d}" for value in range(1, 21)),
@@ -453,6 +455,8 @@ def parse_log(path: Path) -> Dict[str, object]:
         raise ValueError("Missing RUN SUMMARY")
     discovered_test_ids = set(tests)
     if contract == V1_CONTRACT:
+        if "compatibility_profile" in run:
+            raise ValueError("Evidence v1 must not contain compatibility_profile")
         profile = run.get("collection_profile")
         if profile == "full" and discovered_test_ids != RETAINED_TEST_IDS:
             raise ValueError(
@@ -470,11 +474,24 @@ def parse_log(path: Path) -> Dict[str, object]:
             raise ValueError(
                 f"Unsupported or missing collection_profile: {profile!r}"
             )
-    else:
+    elif contract == V2_CONTRACT:
         if "collection_profile" in run:
             raise ValueError("Evidence v2 must not contain collection_profile")
+        if "compatibility_profile" in run:
+            raise ValueError("Evidence v2 must not contain compatibility_profile")
         if discovered_test_ids != RETAINED_TEST_IDS:
             raise ValueError("Evidence v2 must contain all 46 retained tests")
+    else:
+        if "collection_profile" in run:
+            raise ValueError("Evidence v3 must not contain collection_profile")
+        profile = run.pop("compatibility_profile", None)
+        if profile != V3_COMPATIBILITY_PROFILE:
+            raise ValueError(
+                f"Unsupported or missing compatibility_profile: {profile!r}"
+            )
+        if discovered_test_ids != RETAINED_TEST_IDS:
+            raise ValueError("Evidence v3 must contain all 46 retained tests")
+        run["compatibilityProfile"] = profile
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))
