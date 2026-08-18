@@ -1584,6 +1584,56 @@ class ProtocolConformanceTests(unittest.TestCase):
 
         self.assertEqual("CONSISTENT", report["results"][0]["status"], report)
 
+    def test_v3_gemini_response_server_tool_parts_follow_official_schema(self) -> None:
+        cases = (
+            ({"toolCall": {}}, "DIFFERENT"),
+            ({"toolResponse": {}}, "DIFFERENT"),
+            ({"toolCall": {"toolType": "NOT_A_TOOL_TYPE"}}, "DIFFERENT"),
+            ({"toolCall": {"toolType": "FILE_SEARCH", "id": 1}}, "DIFFERENT"),
+            (
+                {"toolResponse": {"toolType": "FILE_SEARCH", "response": []}},
+                "DIFFERENT",
+            ),
+            (
+                {
+                    "toolCall": {
+                        "toolType": "FILE_SEARCH",
+                        "toolName": "file_search",
+                        "id": "server-call-1",
+                        "args": {"query": "weather"},
+                    },
+                },
+                "CONSISTENT",
+            ),
+            (
+                {
+                    "toolResponse": {
+                        "toolType": "FILE_SEARCH",
+                        "id": "server-call-1",
+                        "response": {"result": "WEATHER_SUNNY"},
+                    },
+                },
+                "CONSISTENT",
+            ),
+        )
+        for part, expected in cases:
+            with self.subTest(part=part):
+                parsed = self._tool_loop_parsed("gemini_generate_content")
+                parsed["requests"] = {
+                    "test-046-turn-1": parsed["requests"]["test-046-turn-1"]
+                }
+                parsed["tests"]["046"]["requestRefs"] = ["test-046-turn-1"]
+                request = parsed["requests"]["test-046-turn-1"]
+                events = []
+                for frame in request["responseBody"].strip().split("\n\n"):
+                    events.append((None, json.loads(frame.removeprefix("data: "))))
+                events[0][1]["candidates"][0]["content"]["parts"] = [part]
+                request["responseBody"] = self._encode_sse(events)
+
+                report = analyze_protocol_conformance(parsed)
+
+                self.assertEqual(expected, report["results"][0]["status"], report)
+
     def test_v3_anthropic_accepts_official_tool_result_union_members(self) -> None:
         valid_blocks = (
             {"type": "tool_reference", "tool_name": "get_weather"},

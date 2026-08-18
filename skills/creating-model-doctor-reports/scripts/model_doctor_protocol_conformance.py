@@ -1868,6 +1868,14 @@ class _GeminiValidator(_ChatValidator):
         "AUDIO",
         "DOCUMENT",
     )
+    _SERVER_TOOL_TYPES = (
+        "TOOL_TYPE_UNSPECIFIED",
+        "GOOGLE_SEARCH_WEB",
+        "GOOGLE_SEARCH_IMAGE",
+        "URL_CONTEXT",
+        "GOOGLE_MAPS",
+        "FILE_SEARCH",
+    )
 
     def __init__(
         self,
@@ -2080,6 +2088,18 @@ class _GeminiValidator(_ChatValidator):
             self.validate_function_call(
                 value["functionCall"], _path(location, "functionCall")
             )
+        if "toolCall" in value:
+            self.validate_server_tool(
+                value["toolCall"],
+                _path(location, "toolCall"),
+                response=False,
+            )
+        if "toolResponse" in value:
+            self.validate_server_tool(
+                value["toolResponse"],
+                _path(location, "toolResponse"),
+                response=True,
+            )
         if "executableCode" in value:
             self.validate_executable_code(
                 value["executableCode"], _path(location, "executableCode")
@@ -2097,10 +2117,8 @@ class _GeminiValidator(_ChatValidator):
         for field in (
             "mediaResolution",
             "functionResponse",
-            "toolResponse",
             "videoMetadata",
             "inlineData",
-            "toolCall",
             "fileData",
             "codeExecutionResult",
             "partMetadata",
@@ -2112,6 +2130,36 @@ class _GeminiValidator(_ChatValidator):
                     "object",
                     lambda item: isinstance(item, dict),
                 )
+
+    def validate_server_tool(
+        self,
+        value: object,
+        location: str,
+        *,
+        response: bool,
+    ) -> None:
+        optional = ("id", "response") if response else ("id", "toolName", "args")
+        if not self.object_shape(value, location, ("toolType",), optional):
+            return
+        assert isinstance(value, dict)
+        if "toolType" in value:
+            self.enum(
+                value["toolType"],
+                _path(location, "toolType"),
+                self._SERVER_TOOL_TYPES,
+            )
+        string_fields = ("id",) if response else ("id", "toolName")
+        for field in string_fields:
+            if field in value:
+                self.string(value[field], _path(location, field))
+        object_field = "response" if response else "args"
+        if object_field in value:
+            self.typed(
+                value[object_field],
+                _path(location, object_field),
+                "object",
+                lambda item: isinstance(item, dict),
+            )
 
     def validate_citation_metadata(self, value: object, location: str) -> None:
         if not self.object_shape(value, location, (), ("citationSources",)):
