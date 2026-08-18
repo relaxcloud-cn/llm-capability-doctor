@@ -1620,6 +1620,13 @@ test_manifest_count: 1
             print_css,
             r"\.opencodex-compatibility\s*\{[^}]*break-inside:\s*avoid;",
         )
+        for variable, value in {
+            "--verdict-pass": "#18794e",
+            "--verdict-fail": "#b42318",
+            "--verdict-neutral": "#5b6168",
+        }.items():
+            with self.subTest(variable=variable):
+                self.assertIn(f"{variable}: {value};", print_css)
 
     def test_final_conclusion_renders_all_three_fact_rows(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())

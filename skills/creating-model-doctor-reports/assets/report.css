@@ -649,6 +649,9 @@ pre {
     --line: rgba(26, 28, 31, 0.12);
     --detail: rgba(26, 28, 31, 0.035);
     --code: #f5f6f7;
+    --verdict-pass: #18794e;
+    --verdict-fail: #b42318;
+    --verdict-neutral: #5b6168;
   }
 
   body {
