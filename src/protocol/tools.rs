@@ -325,6 +325,15 @@ fn history_for(protocol: Protocol, history: &ProtocolHistory) -> Result<Value, T
         (Protocol::AnthropicMessages, ProtocolHistory::Anthropic(content)) => {
             Value::Array(content.clone())
         }
+        (Protocol::OpenAiResponses, ProtocolHistory::OpenAiResponses { response_id })
+            if response_id.trim().is_empty() =>
+        {
+            return Err(ToolProtocolError::InvalidRequest(vec![request_error(
+                protocol,
+                "previous_response_id",
+                "/history/response_id",
+            )]));
+        }
         (Protocol::OpenAiResponses, ProtocolHistory::OpenAiResponses { response_id }) => {
             Value::String(response_id.clone())
         }
@@ -1325,7 +1334,229 @@ fn validate_turn_history(
                 }
             }
         }
+        (Protocol::GeminiGenerateContent, ProtocolHistory::Gemini(history)) => {
+            let Some(parts) = history.get("parts").and_then(Value::as_array) else {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/parts",
+                ));
+                return;
+            };
+            let history_calls = parts
+                .iter()
+                .enumerate()
+                .filter_map(|(part_index, part)| {
+                    part.get("functionCall")
+                        .map(|function_call| (part_index, function_call))
+                })
+                .collect::<Vec<_>>();
+            if history_calls.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/parts",
+                ));
+            }
+            let mut seen_ids = BTreeSet::new();
+            let mut matched_indexes = BTreeSet::new();
+            for (part_index, history_call) in history_calls {
+                let pointer = format!("/history/parts/{part_index}/functionCall");
+                let Some(call) = previous
+                    .tool_calls
+                    .iter()
+                    .find(|call| call.index == part_index)
+                else {
+                    errors.insert(request_error(protocol, "mismatched_call_index", &pointer));
+                    continue;
+                };
+                if !matched_indexes.insert(call.index) {
+                    errors.insert(request_error(protocol, "mismatched_call_index", &pointer));
+                }
+                validate_optional_history_call(
+                    protocol,
+                    OptionalHistoryCall {
+                        id: history_call.get("id"),
+                        name: history_call.get("name"),
+                        arguments: history_call.get("args"),
+                        pointer: &pointer,
+                        name_pointer: "name",
+                        arguments_pointer: "args",
+                    },
+                    call,
+                    &mut seen_ids,
+                    errors,
+                );
+            }
+            if matched_indexes.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/parts",
+                ));
+            }
+        }
+        (Protocol::OllamaChat, ProtocolHistory::Ollama(history)) => {
+            if history.get("role").and_then(Value::as_str) != Some("assistant") {
+                errors.insert(request_error(protocol, "history_mismatch", "/history/role"));
+            }
+            let Some(history_calls) = history.get("tool_calls").and_then(Value::as_array) else {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/tool_calls",
+                ));
+                return;
+            };
+            if history_calls.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/tool_calls",
+                ));
+            }
+            let native_indexes = history_calls
+                .iter()
+                .map(|history_call| {
+                    history_call
+                        .pointer("/function/index")
+                        .and_then(Value::as_u64)
+                        .and_then(|index| usize::try_from(index).ok())
+                })
+                .collect::<Vec<_>>();
+            let indexed = native_indexes.iter().all(Option::is_some);
+            let unindexed = history_calls
+                .iter()
+                .all(|history_call| history_call.pointer("/function/index").is_none());
+            if !indexed && !unindexed {
+                errors.insert(request_error(
+                    protocol,
+                    "mismatched_call_index",
+                    "/history/tool_calls",
+                ));
+            }
+
+            let mut seen_ids = BTreeSet::new();
+            let mut matched_indexes = BTreeSet::new();
+            for (position, history_call) in history_calls.iter().enumerate() {
+                let pointer = format!("/history/tool_calls/{position}");
+                let native_index = if indexed {
+                    native_indexes[position]
+                } else if unindexed {
+                    Some(position)
+                } else {
+                    None
+                };
+                let Some(native_index) = native_index else {
+                    continue;
+                };
+                let Some(call) = previous
+                    .tool_calls
+                    .iter()
+                    .find(|call| call.index == native_index)
+                else {
+                    errors.insert(request_error(
+                        protocol,
+                        "mismatched_call_index",
+                        &format!("{pointer}/function/index"),
+                    ));
+                    continue;
+                };
+                if !matched_indexes.insert(call.index) {
+                    errors.insert(request_error(
+                        protocol,
+                        "mismatched_call_index",
+                        &format!("{pointer}/function/index"),
+                    ));
+                }
+                let Some(function) = history_call.get("function") else {
+                    errors.insert(request_error(
+                        protocol,
+                        "history_mismatch",
+                        &format!("{pointer}/function"),
+                    ));
+                    continue;
+                };
+                validate_optional_history_call(
+                    protocol,
+                    OptionalHistoryCall {
+                        id: history_call.get("id"),
+                        name: function.get("name"),
+                        arguments: function.get("arguments"),
+                        pointer: &pointer,
+                        name_pointer: "function/name",
+                        arguments_pointer: "function/arguments",
+                    },
+                    call,
+                    &mut seen_ids,
+                    errors,
+                );
+            }
+            if matched_indexes.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/tool_calls",
+                ));
+            }
+        }
         _ => {}
+    }
+}
+
+struct OptionalHistoryCall<'a> {
+    id: Option<&'a Value>,
+    name: Option<&'a Value>,
+    arguments: Option<&'a Value>,
+    pointer: &'a str,
+    name_pointer: &'static str,
+    arguments_pointer: &'static str,
+}
+
+fn validate_optional_history_call(
+    protocol: Protocol,
+    history: OptionalHistoryCall<'_>,
+    call: &ToolCall,
+    seen_ids: &mut BTreeSet<String>,
+    errors: &mut BTreeSet<String>,
+) {
+    let actual_id_text = history.id.and_then(Value::as_str);
+    if let Some(id) = actual_id_text
+        && !seen_ids.insert(id.to_owned())
+    {
+        errors.insert(request_error(
+            protocol,
+            "duplicate_call_id",
+            &format!("{}/id", history.pointer),
+        ));
+    }
+    let id_matches = match (&call.correlation, history.id) {
+        (ToolCorrelation::Optional(None), None) => true,
+        (ToolCorrelation::Optional(Some(expected)), Some(Value::String(actual))) => {
+            actual == expected
+        }
+        _ => false,
+    };
+    if !id_matches {
+        errors.insert(request_error(
+            protocol,
+            "mismatched_call_id",
+            &format!("{}/id", history.pointer),
+        ));
+    }
+    if history.name.and_then(Value::as_str) != Some(call.name.as_str()) {
+        errors.insert(request_error(
+            protocol,
+            "name_mismatch",
+            &format!("{}/{}", history.pointer, history.name_pointer),
+        ));
+    }
+    if history.arguments != Some(&call.arguments) {
+        errors.insert(request_error(
+            protocol,
+            "history_arguments_mismatch",
+            &format!("{}/{}", history.pointer, history.arguments_pointer),
+        ));
     }
 }
 
@@ -2770,6 +3001,187 @@ mod tests {
                 "{mutation}: {errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn gemini_validator_correlates_all_native_function_calls_transactionally() {
+        let protocol = Protocol::GeminiGenerateContent;
+        let calls = vec![
+            optional_call(0, Some("weather-id"), "get_weather"),
+            optional_call(1, None, "get_time"),
+        ];
+        let normal = turn(protocol, "unused", calls.clone());
+        let results = vec![
+            result(&calls[0], "WEATHER_SUNNY", false),
+            result(&calls[1], "TIME_UTC_00:00", false),
+        ];
+        let mutations = [
+            ("missing", "history_call_count_mismatch"),
+            ("id_presence", "mismatched_call_id"),
+            ("id_null", "mismatched_call_id"),
+            ("name", "name_mismatch"),
+            ("args", "history_arguments_mismatch"),
+        ];
+
+        for (mutation, expected_code) in mutations {
+            let mut malformed = normal.clone();
+            let ProtocolHistory::Gemini(history) = &mut malformed.history else {
+                unreachable!()
+            };
+            match mutation {
+                "missing" => {
+                    history["parts"].as_array_mut().unwrap().pop();
+                }
+                "id_presence" => {
+                    history["parts"][1]["functionCall"]["id"] = Value::String("invented-id".into());
+                }
+                "id_null" => history["parts"][1]["functionCall"]["id"] = Value::Null,
+                "name" => {
+                    history["parts"][0]["functionCall"]["name"] = Value::String("get_time".into());
+                }
+                "args" => {
+                    history["parts"][0]["functionCall"]["args"] = json!({"city": "Shanghai"});
+                }
+                _ => unreachable!(),
+            }
+            let mut conversation =
+                ToolConversation::from_initial(protocol, initial(protocol, "047").body).unwrap();
+            let before = conversation.current_request();
+            let error = conversation
+                .append_follow_up(&malformed, &results)
+                .expect_err("malformed Gemini native history");
+            assert!(
+                error
+                    .codes()
+                    .iter()
+                    .any(|error| error.contains(expected_code)),
+                "{mutation}: {error:?}"
+            );
+            assert_eq!(conversation.current_request(), before);
+            assert!(!error.codes().join(" ").contains("invented-id"));
+        }
+    }
+
+    #[test]
+    fn ollama_validator_uses_native_function_indexes_and_rolls_back_mutations() {
+        let protocol = Protocol::OllamaChat;
+        let calls = vec![
+            ToolCall {
+                index: 2,
+                correlation: ToolCorrelation::Optional(None),
+                name: "get_time".into(),
+                arguments: json!({"zone": "UTC"}),
+            },
+            ToolCall {
+                index: 9,
+                correlation: ToolCorrelation::Optional(Some("weather-id".into())),
+                name: "get_weather".into(),
+                arguments: json!({"city": "Beijing"}),
+            },
+        ];
+        let normal = AssistantTurn {
+            history: ProtocolHistory::Ollama(json!({
+                "role": "assistant",
+                "content": "",
+                "future_message": {"kept": true},
+                "tool_calls": [
+                    {
+                        "id": "weather-id",
+                        "future_call": "kept",
+                        "function": {
+                            "index": 9,
+                            "name": "get_weather",
+                            "arguments": {"city": "Beijing"},
+                            "future_function": true
+                        }
+                    },
+                    {
+                        "function": {
+                            "index": 2,
+                            "name": "get_time",
+                            "arguments": {"zone": "UTC"}
+                        }
+                    }
+                ]
+            })),
+            tool_calls: calls.clone(),
+            final_text: String::new(),
+        };
+        let results = vec![
+            result(&calls[1], "WEATHER_SUNNY", false),
+            result(&calls[0], "TIME_UTC_00:00", false),
+        ];
+        let mut valid_conversation =
+            ToolConversation::from_initial(protocol, initial(protocol, "047").body).unwrap();
+        valid_conversation
+            .append_follow_up(&normal, &results)
+            .expect("native index order is independent of array position");
+
+        for (mutation, expected_code) in [
+            ("missing", "history_call_count_mismatch"),
+            ("id_presence", "mismatched_call_id"),
+            ("id_null", "mismatched_call_id"),
+            ("index", "mismatched_call_index"),
+            ("name", "name_mismatch"),
+            ("arguments", "history_arguments_mismatch"),
+        ] {
+            let mut malformed = normal.clone();
+            let ProtocolHistory::Ollama(history) = &mut malformed.history else {
+                unreachable!()
+            };
+            match mutation {
+                "missing" => {
+                    history["tool_calls"].as_array_mut().unwrap().pop();
+                }
+                "id_presence" => {
+                    history["tool_calls"][1]["id"] = Value::String("invented-id".into());
+                }
+                "id_null" => history["tool_calls"][1]["id"] = Value::Null,
+                "index" => history["tool_calls"][1]["function"]["index"] = Value::from(7),
+                "name" => {
+                    history["tool_calls"][0]["function"]["name"] = Value::String("get_time".into());
+                }
+                "arguments" => {
+                    history["tool_calls"][0]["function"]["arguments"] = json!({"city": "Shanghai"});
+                }
+                _ => unreachable!(),
+            }
+            let mut conversation =
+                ToolConversation::from_initial(protocol, initial(protocol, "047").body).unwrap();
+            let before = conversation.current_request();
+            let error = conversation
+                .append_follow_up(&malformed, &results)
+                .expect_err("malformed Ollama native history");
+            assert!(
+                error
+                    .codes()
+                    .iter()
+                    .any(|error| error.contains(expected_code)),
+                "{mutation}: {error:?}"
+            );
+            assert_eq!(conversation.current_request(), before);
+            assert!(!error.codes().join(" ").contains("invented-id"));
+        }
+    }
+
+    #[test]
+    fn responses_rejects_blank_response_id_transactionally() {
+        let protocol = Protocol::OpenAiResponses;
+        let assistant_call = call(0, Some("weather-id"), "get_weather");
+        let assistant = turn(protocol, "   ", vec![assistant_call.clone()]);
+        let results = vec![result(&assistant_call, "WEATHER_SUNNY", false)];
+        let mut conversation =
+            ToolConversation::from_initial(protocol, initial(protocol, "046").body).unwrap();
+        let before = conversation.current_request();
+
+        let error = conversation
+            .append_follow_up(&assistant, &results)
+            .expect_err("blank response IDs cannot anchor a stateful follow-up");
+        assert_eq!(
+            error.codes(),
+            ["request.openai_responses.previous_response_id:/history/response_id"]
+        );
+        assert_eq!(conversation.current_request(), before);
     }
 
     #[test]
