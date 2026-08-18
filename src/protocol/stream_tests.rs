@@ -305,3 +305,46 @@ fn eof_without_a_native_terminal_stays_pending() {
     assert_eq!(inspector.finish(), StreamControl::Continue);
     assert_eq!(inspector.state(), StreamState::Pending);
 }
+
+#[test]
+fn tool_events_stay_pending_until_protocol_native_terminals() {
+    let cases: [(Protocol, &[u8], &[u8]); 4] = [
+        (
+            Protocol::OpenAiChat,
+            b"data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-weather\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{}\"}},{\"index\":1,\"id\":\"call-time\",\"function\":{\"name\":\"get_time\",\"arguments\":\"{}\"}}]},\"finish_reason\":null}]}\n\n",
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        ),
+        (
+            Protocol::OpenAiResponses,
+            b"event: response.output_item.added\ndata: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"call_id\":\"call-weather\",\"name\":\"get_weather\",\"arguments\":\"{}\"}}\n\n",
+            b"event: response.completed\ndata: {\"type\":\"response.completed\"}\n\n",
+        ),
+        (
+            Protocol::AnthropicMessages,
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"content_block\":{\"type\":\"tool_use\",\"id\":\"call-weather\",\"name\":\"doctor__get_weather\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\\\"Beijing\\\"}\"}}\n\n",
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        ),
+        (
+            Protocol::GeminiGenerateContent,
+            b"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"id\":\"upstream-call\",\"name\":\"doctor__get_weather\",\"args\":{\"city\":\"Beijing\"}}}]}}]}\n\n",
+            b"data: {\"candidates\":[{\"finishReason\":\"STOP\"}]}\n\n",
+        ),
+    ];
+
+    for (protocol, tool_event, terminal) in cases {
+        let mut inspector = StreamInspector::new(protocol);
+
+        assert_eq!(
+            inspector.push(tool_event),
+            StreamControl::Continue,
+            "{protocol}"
+        );
+        assert_eq!(inspector.state(), StreamState::Pending, "{protocol}");
+        assert_eq!(
+            inspector.push(terminal),
+            StreamControl::Continue,
+            "{protocol}"
+        );
+        assert_eq!(inspector.state(), StreamState::Success, "{protocol}");
+    }
+}

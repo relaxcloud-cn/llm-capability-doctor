@@ -36,19 +36,29 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
 pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> RequestSpec {
     let tools = tool_definitions(protocol, id);
     let parallel = id == "045";
+    let stream = matches!(id, "040" | "045")
+        && matches!(
+            protocol,
+            Protocol::OpenAiChat
+                | Protocol::OpenAiResponses
+                | Protocol::AnthropicMessages
+                | Protocol::GeminiGenerateContent
+        );
     let body = match protocol {
         Protocol::OpenAiResponses => json!({
             "model": model,
             "input": prompt,
             "tools": tools,
             "tool_choice": "auto",
-            "parallel_tool_calls": parallel
+            "parallel_tool_calls": parallel,
+            "stream": stream
         }),
         Protocol::AnthropicMessages => json!({
             "model": model,
             "max_tokens": ANTHROPIC_MAX_TOKENS,
             "messages": [{"role": "user", "content": prompt}],
-            "tools": tools
+            "tools": tools,
+            "stream": stream
         }),
         Protocol::GeminiGenerateContent => json!({
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -60,13 +70,10 @@ pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> 
             "tools": tools,
             "tool_choice": "auto",
             "parallel_tool_calls": parallel,
-            "stream": false
+            "stream": stream
         }),
     };
-    RequestSpec {
-        body,
-        stream: false,
-    }
+    RequestSpec { body, stream }
 }
 
 pub fn build_follow_up(
@@ -146,13 +153,27 @@ pub fn build_follow_up(
             } else {
                 json!({"result": tool_output})
             };
+            let tool_name = required(observation.tool_name, "tool name")?;
+            let call_id = google_call_id(id, observation.call_id.as_deref());
+            let mut assistant = required_value(observation.assistant, "candidate content")?;
+            let function_call = assistant
+                .get_mut("parts")
+                .and_then(Value::as_array_mut)
+                .and_then(|parts| {
+                    parts
+                        .iter_mut()
+                        .find_map(|part| part.get_mut("functionCall"))
+                })
+                .and_then(Value::as_object_mut)
+                .ok_or(FollowUpError::MissingField("function call"))?;
+            function_call.insert("id".into(), Value::String(call_id.clone()));
             json!({
                 "contents": [
                     {"role": "user", "parts": [{"text": prompt}]},
-                    required_value(observation.assistant, "candidate content")?,
+                    assistant,
                     {"role": "user", "parts": [{"functionResponse": {
-                        "id": required(observation.call_id, "call id")?,
-                        "name": required(observation.tool_name, "tool name")?,
+                        "id": call_id,
+                        "name": tool_name,
                         "response": response_payload
                     }}]}
                 ],
@@ -294,11 +315,22 @@ fn string_at(value: Option<&Value>, pointer: &str) -> Option<String> {
 }
 
 fn required(value: Option<String>, field: &'static str) -> Result<String, FollowUpError> {
-    value.ok_or(FollowUpError::MissingField(field))
+    value
+        .filter(|value| !value.is_empty())
+        .ok_or(FollowUpError::MissingField(field))
 }
 
 fn required_value(value: Option<Value>, field: &'static str) -> Result<Value, FollowUpError> {
     value.ok_or(FollowUpError::MissingField(field))
+}
+
+fn google_call_id(id: &str, upstream_id: Option<&str>) -> String {
+    let base = format!("call_model_doctor_{id}");
+    if upstream_id == Some(base.as_str()) {
+        format!("{base}_2")
+    } else {
+        base
+    }
 }
 
 fn tool_definitions(protocol: Protocol, id: &str) -> Vec<Value> {
@@ -309,10 +341,32 @@ fn tool_definitions(protocol: Protocol, id: &str) -> Vec<Value> {
             "Inspect a network target",
             inspect_parameters(protocol),
         )]
+    } else if matches!(id, "041" | "047") && protocol == Protocol::OpenAiResponses {
+        vec![json!({
+            "type": "namespace",
+            "name": "doctor",
+            "tools": [definition(
+                protocol,
+                "get_weather",
+                "Get weather",
+                weather_parameters(false),
+            )]
+        })]
     } else {
+        let name = if matches!(id, "041" | "047")
+            && matches!(
+                protocol,
+                Protocol::OpenAiChat
+                    | Protocol::AnthropicMessages
+                    | Protocol::GeminiGenerateContent
+            ) {
+            "doctor__get_weather"
+        } else {
+            "get_weather"
+        };
         vec![definition(
             protocol,
-            "get_weather",
+            name,
             "Get weather",
             weather_parameters(id == "043"),
         )]

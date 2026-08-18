@@ -11,6 +11,9 @@ mod stream_tests;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod tools_tests;
+
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
