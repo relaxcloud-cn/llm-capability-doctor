@@ -96,7 +96,8 @@ export MODEL_API_KEY
 `--url` 必须是完整模型接口地址，CLI 通常不会自动补充或改写路径。唯一例外是已识别的
 Google 流式请求：当路径以官方方法 `:generateContent` 或
 `:streamGenerateContent` 结尾时，CLI 会派生 `:streamGenerateContent` 并设置
-`alt=sse`。自定义路径（包括方法后的尾随斜杠）保持不变。未指定
+`alt=sse`。自定义路径（包括方法后的尾随斜杠）保持不变。模型接口 URL 不接受
+fragment，包括空的 `#`。未指定
 `--log-file` 时，日志写入当前目录下的
 `model-doctor-YYYYMMDD-HHMMSS.log`；Unix 平台会将日志权限设置为 `0600`。
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
@@ -172,7 +173,7 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 
 | 参数 | 说明 |
 | --- | --- |
-| `--url URL` | 完整模型接口 URL；仅已识别的 Google 官方流式方法会派生 `:streamGenerateContent` 和 `alt=sse`，自定义路径不变。 |
+| `--url URL` | 不含 fragment 的完整模型接口 URL；仅已识别的 Google 官方流式方法会派生 `:streamGenerateContent` 和 `alt=sse`，自定义路径不变。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
 | `--log-file PATH` | 指定 evidence-v3 日志路径。 |

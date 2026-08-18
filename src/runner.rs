@@ -313,6 +313,7 @@ fn resolve_request_url(url: &url::Url, protocol: Protocol, stream: bool) -> url:
         .query()
         .into_iter()
         .flat_map(|query| query.split('&'))
+        .filter(|pair| !pair.is_empty())
         .filter(|pair| {
             let key = pair.split_once('=').map_or(*pair, |(key, _)| key);
             url::form_urlencoded::parse(key.as_bytes())
@@ -395,6 +396,38 @@ mod tests {
         assert_eq!(
             resolved.as_str(),
             "https://example.test/v1beta/models/gemini:streamGenerateContent?key=value&alt=sse#result"
+        );
+    }
+
+    #[test]
+    fn google_streaming_canonicalizes_empty_queries() {
+        for value in [
+            "https://example.test/v1beta/models/gemini:generateContent?",
+            "https://example.test/v1beta/models/gemini:generateContent?&",
+        ] {
+            let url = Url::parse(value).unwrap();
+
+            let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+            assert_eq!(
+                resolved.as_str(),
+                "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse"
+            );
+        }
+    }
+
+    #[test]
+    fn google_streaming_discards_empty_query_components_without_reencoding_pairs() {
+        let url = Url::parse(
+            "https://example.test/v1beta/models/gemini:generateContent?&&key=%2Fvalue&&alt=json&",
+        )
+        .unwrap();
+
+        let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+        assert_eq!(
+            resolved.as_str(),
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?key=%2Fvalue&alt=sse"
         );
     }
 
