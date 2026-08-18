@@ -931,6 +931,7 @@ fn validate_follow_up(
         }
         Err(ToolProtocolError::UnsupportedProtocol) => return,
     };
+    validate_turn_history(protocol, previous, errors);
     let ordered = match correlate_results(protocol, &previous.tool_calls, results) {
         Ok(ordered) => ordered,
         Err(ToolProtocolError::InvalidRequest(codes)) => {
@@ -1184,6 +1185,147 @@ fn validate_follow_up(
             }
         }
         Protocol::Unknown => {}
+    }
+}
+
+fn validate_turn_history(
+    protocol: Protocol,
+    previous: &AssistantTurn,
+    errors: &mut BTreeSet<String>,
+) {
+    match (protocol, &previous.history) {
+        (Protocol::OpenAiChat, ProtocolHistory::OpenAiChat(history)) => {
+            if history.get("role").and_then(Value::as_str) != Some("assistant") {
+                errors.insert(request_error(protocol, "history_mismatch", "/history/role"));
+            }
+            let Some(history_calls) = history.get("tool_calls").and_then(Value::as_array) else {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/tool_calls",
+                ));
+                return;
+            };
+            if history_calls.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history/tool_calls",
+                ));
+            }
+            let mut seen_ids = BTreeSet::new();
+            for (index, (history_call, call)) in
+                history_calls.iter().zip(&previous.tool_calls).enumerate()
+            {
+                let pointer = format!("/history/tool_calls/{index}");
+                if history_call.get("index").is_some() {
+                    errors.insert(request_error(
+                        protocol,
+                        "stream_only_field",
+                        &format!("{pointer}/index"),
+                    ));
+                }
+                let actual_id = history_call.get("id").and_then(Value::as_str);
+                if let Some(id) = actual_id
+                    && !seen_ids.insert(id)
+                {
+                    errors.insert(request_error(
+                        protocol,
+                        "duplicate_call_id",
+                        &format!("{pointer}/id"),
+                    ));
+                }
+                if actual_id != correlation_id(call) {
+                    errors.insert(request_error(
+                        protocol,
+                        "mismatched_call_id",
+                        &format!("{pointer}/id"),
+                    ));
+                }
+                if history_call.get("type").and_then(Value::as_str) != Some("function") {
+                    errors.insert(request_error(
+                        protocol,
+                        "history_mismatch",
+                        &format!("{pointer}/type"),
+                    ));
+                }
+                if history_call
+                    .pointer("/function/name")
+                    .and_then(Value::as_str)
+                    != Some(call.name.as_str())
+                {
+                    errors.insert(request_error(
+                        protocol,
+                        "name_mismatch",
+                        &format!("{pointer}/function/name"),
+                    ));
+                }
+                let arguments_match = history_call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .and_then(|arguments| serde_json::from_str::<Value>(arguments).ok())
+                    .is_some_and(|arguments| arguments == call.arguments);
+                if !arguments_match {
+                    errors.insert(request_error(
+                        protocol,
+                        "history_arguments_mismatch",
+                        &format!("{pointer}/function/arguments"),
+                    ));
+                }
+            }
+        }
+        (Protocol::AnthropicMessages, ProtocolHistory::Anthropic(content)) => {
+            let history_calls = content
+                .iter()
+                .enumerate()
+                .filter(|(_, block)| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+                .collect::<Vec<_>>();
+            if history_calls.len() != previous.tool_calls.len() {
+                errors.insert(request_error(
+                    protocol,
+                    "history_call_count_mismatch",
+                    "/history",
+                ));
+            }
+            let mut seen_ids = BTreeSet::new();
+            for ((content_index, history_call), call) in
+                history_calls.into_iter().zip(&previous.tool_calls)
+            {
+                let pointer = format!("/history/{content_index}");
+                let actual_id = history_call.get("id").and_then(Value::as_str);
+                if let Some(id) = actual_id
+                    && !seen_ids.insert(id)
+                {
+                    errors.insert(request_error(
+                        protocol,
+                        "duplicate_call_id",
+                        &format!("{pointer}/id"),
+                    ));
+                }
+                if actual_id != correlation_id(call) {
+                    errors.insert(request_error(
+                        protocol,
+                        "mismatched_call_id",
+                        &format!("{pointer}/id"),
+                    ));
+                }
+                if history_call.get("name").and_then(Value::as_str) != Some(call.name.as_str()) {
+                    errors.insert(request_error(
+                        protocol,
+                        "name_mismatch",
+                        &format!("{pointer}/name"),
+                    ));
+                }
+                if history_call.get("input") != Some(&call.arguments) {
+                    errors.insert(request_error(
+                        protocol,
+                        "history_arguments_mismatch",
+                        &format!("{pointer}/input"),
+                    ));
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1765,7 +1907,6 @@ mod tests {
                 "role": "assistant",
                 "content": null,
                 "tool_calls": calls.iter().map(|call| json!({
-                    "index": call.index,
                     "id": correlation_id(&call.correlation),
                     "type": "function",
                     "function": {"name": call.name, "arguments": call.arguments.to_string()}
@@ -1774,16 +1915,21 @@ mod tests {
             Protocol::OpenAiResponses => ProtocolHistory::OpenAiResponses {
                 response_id: response_id.into(),
             },
-            Protocol::AnthropicMessages => ProtocolHistory::Anthropic(vec![
-                json!({"type": "thinking", "thinking": "private", "signature": "sig"}),
-                json!({"type": "text", "text": "checking"}),
-                json!({
-                    "type": "tool_use",
-                    "id": correlation_id(&calls[0].correlation),
-                    "name": calls[0].name,
-                    "input": calls[0].arguments
-                }),
-            ]),
+            Protocol::AnthropicMessages => {
+                let mut content = vec![
+                    json!({"type": "thinking", "thinking": "private", "signature": "sig"}),
+                    json!({"type": "text", "text": "checking"}),
+                ];
+                content.extend(calls.iter().map(|call| {
+                    json!({
+                        "type": "tool_use",
+                        "id": correlation_id(&call.correlation),
+                        "name": call.name,
+                        "input": call.arguments
+                    })
+                }));
+                ProtocolHistory::Anthropic(content)
+            }
             Protocol::GeminiGenerateContent => ProtocolHistory::Gemini(json!({
                 "role": "model",
                 "parts": calls.iter().map(|call| {
@@ -2053,6 +2199,23 @@ mod tests {
                     < serialized.find("TIME_UTC_00:00").unwrap(),
                 "{protocol:?} must emit in assistant call order"
             );
+            if protocol == Protocol::AnthropicMessages {
+                let tool_use_ids = follow.body["messages"][1]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|block| block["type"] == "tool_use")
+                    .map(|block| block["id"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                let result_ids = follow.body["messages"][2]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|block| block["tool_use_id"].as_str().unwrap())
+                    .collect::<Vec<_>>();
+                assert_eq!(tool_use_ids, ["weather-id", "time-id"]);
+                assert_eq!(result_ids, tool_use_ids);
+            }
         }
     }
 
@@ -2519,6 +2682,92 @@ mod tests {
                     .iter()
                     .any(|error| error.contains("history_mismatch")),
                 "{protocol:?}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn chat_validator_rejects_stream_only_index_in_follow_up_history() {
+        let protocol = Protocol::OpenAiChat;
+        let assistant_call = call(0, Some("weather-id"), "get_weather");
+        let normal = turn(protocol, "unused", vec![assistant_call.clone()]);
+        let results = vec![result(&assistant_call, "WEATHER_SUNNY", false)];
+        let mut conversation =
+            ToolConversation::from_initial(protocol, initial(protocol, "046").body)
+                .expect("official initial request");
+        let mut follow = conversation.append_follow_up(&normal, &results).unwrap();
+        let mut malformed = normal;
+        let ProtocolHistory::OpenAiChat(history) = &mut malformed.history else {
+            unreachable!()
+        };
+        history["tool_calls"][0]["index"] = Value::from(0);
+        follow.body["messages"][1] = history.clone();
+
+        let errors = validate_tool_request(
+            protocol,
+            &endpoint(protocol),
+            true,
+            &follow.body,
+            ToolRequestPhase::FollowUp {
+                previous: &malformed,
+                results: &results,
+            },
+        );
+        assert_eq!(
+            errors,
+            ["request.openai_chat.stream_only_field:/history/tool_calls/0/index"]
+        );
+    }
+
+    #[test]
+    fn anthropic_validator_correlates_every_native_tool_use_with_the_turn() {
+        let protocol = Protocol::AnthropicMessages;
+        let calls = vec![
+            call(0, Some("weather-id"), "get_weather"),
+            call(1, Some("time-id"), "get_time"),
+        ];
+        let normal = turn(protocol, "unused", calls.clone());
+        let results = vec![
+            result(&calls[0], "WEATHER_SUNNY", false),
+            result(&calls[1], "TIME_UTC_00:00", false),
+        ];
+        let mut conversation =
+            ToolConversation::from_initial(protocol, initial(protocol, "047").body)
+                .expect("official initial request");
+        let normal_follow = conversation.append_follow_up(&normal, &results).unwrap();
+
+        for (mutation, expected_code) in [
+            ("missing", "history_call_count_mismatch"),
+            ("duplicate", "duplicate_call_id"),
+            ("wrong", "mismatched_call_id"),
+        ] {
+            let mut malformed = normal.clone();
+            let ProtocolHistory::Anthropic(content) = &mut malformed.history else {
+                unreachable!()
+            };
+            match mutation {
+                "missing" => {
+                    content.pop();
+                }
+                "duplicate" => content[3]["id"] = content[2]["id"].clone(),
+                "wrong" => content[3]["id"] = Value::String("stale-id".into()),
+                _ => unreachable!(),
+            }
+            let mut body = normal_follow.body.clone();
+            body["messages"][1]["content"] = Value::Array(content.clone());
+            let errors = validate_tool_request(
+                protocol,
+                &endpoint(protocol),
+                true,
+                &body,
+                ToolRequestPhase::FollowUp {
+                    previous: &malformed,
+                    results: &results,
+                },
+            );
+            assert!(
+                errors.iter().any(|error| error.contains(expected_code)),
+                "{mutation}: {errors:?}"
             );
         }
     }
