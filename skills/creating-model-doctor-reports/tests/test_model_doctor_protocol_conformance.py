@@ -1596,6 +1596,20 @@ class ProtocolConformanceTests(unittest.TestCase):
             ),
             (
                 {
+                    "text": "duplicate payload",
+                    "toolCall": {"toolType": "FILE_SEARCH"},
+                },
+                "DIFFERENT",
+            ),
+            (
+                {
+                    "toolCall": {"toolType": "FILE_SEARCH"},
+                    "toolResponse": {"toolType": "FILE_SEARCH"},
+                },
+                "DIFFERENT",
+            ),
+            (
+                {
                     "toolCall": {
                         "toolType": "FILE_SEARCH",
                         "toolName": "file_search",

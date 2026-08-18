@@ -1876,6 +1876,17 @@ class _GeminiValidator(_ChatValidator):
         "GOOGLE_MAPS",
         "FILE_SEARCH",
     )
+    _PART_DATA_FIELDS = (
+        "text",
+        "inlineData",
+        "functionCall",
+        "functionResponse",
+        "fileData",
+        "executableCode",
+        "codeExecutionResult",
+        "toolCall",
+        "toolResponse",
+    )
 
     def __init__(
         self,
@@ -2074,6 +2085,14 @@ class _GeminiValidator(_ChatValidator):
         if not self.object_shape(value, location, (), fields):
             return
         assert isinstance(value, dict)
+        payloads = [field for field in self._PART_DATA_FIELDS if field in value]
+        if len(payloads) > 1:
+            self.add(
+                location,
+                "VALUE_MISMATCH",
+                "at most one provider-native Part.data payload",
+                "multiple payload fields",
+            )
 
         if "thought" in value:
             self.typed(
