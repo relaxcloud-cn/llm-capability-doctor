@@ -22,7 +22,11 @@ from model_doctor_assessment import (  # noqa: E402
     validate_assessment,
     validate_reviews,
 )
-from model_doctor_html import _verified_facts, render_report  # noqa: E402
+from model_doctor_html import (  # noqa: E402
+    _opencodex_compatibility,
+    _verified_facts,
+    render_report,
+)
 from model_doctor_log import (  # noqa: E402
     RETAINED_TEST_IDS,
     _credential_is_masked,
@@ -57,6 +61,22 @@ def _full_v2_log() -> str:
 
 
 class _MainChildParser(HTMLParser):
+    VOID_ELEMENTS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.stack = []
@@ -66,7 +86,8 @@ class _MainChildParser(HTMLParser):
         if self.stack and self.stack[-1] == "main":
             attributes = dict(attrs)
             self.children.append((tag, attributes.get("class", "")))
-        self.stack.append(tag)
+        if tag not in self.VOID_ELEMENTS:
+            self.stack.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
         if self.stack and self.stack[-1] == tag:
@@ -1485,22 +1506,119 @@ test_manifest_count: 1
 
         expected_order = (
             '<section class="run-information"',
+            '<section class="opencodex-compatibility ',
             '<section class="final-conclusion"',
             '<table class="summary-table">',
+            '<section class="result-section"',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
         self.assertTrue(all(position >= 0 for position in positions), positions)
         self.assertEqual(tuple(sorted(positions)), positions)
+        self.assertEqual(1, html.count('<section class="opencodex-compatibility '))
         self.assertEqual(1, html.count('<section class="final-conclusion"'))
         parser = _MainChildParser()
         parser.feed(html)
         self.assertEqual(
             [
                 ("section", "run-information"),
+                (
+                    "section",
+                    "opencodex-compatibility "
+                    "opencodex-compatibility-NOT_ASSESSED",
+                ),
                 ("section", "final-conclusion"),
                 ("table", "summary-table"),
+                ("section", "result-section"),
             ],
-            parser.children[:3],
+            parser.children[:5],
+        )
+
+    def test_opencodex_compatibility_renders_all_levels(self) -> None:
+        for level, label in (
+            ("PASS", "OpenCodex 数据格式兼容"),
+            ("FAIL", "OpenCodex 数据格式不兼容"),
+            ("NOT_ASSESSED", "OpenCodex 数据格式未评定"),
+        ):
+            with self.subTest(level=level):
+                html = _opencodex_compatibility(
+                    {
+                        "profile": "opencodex-2.7.42-data-format",
+                        "level": level,
+                        "label": label,
+                        "protocolFamily": "OPENAI_CHAT_COMPLETIONS",
+                        "requiredTestIds": ["002", "004"],
+                        "failedTestIds": [],
+                        "statement": "固定兼容性结论。",
+                        "scopeBoundary": "固定范围边界。",
+                    }
+                )
+
+                self.assertIn(
+                    f'class="opencodex-compatibility '
+                    f'opencodex-compatibility-{level}"',
+                    html,
+                )
+                self.assertIn(label, html)
+                self.assertIn("OpenAI Chat Completions", html)
+                self.assertIn("002、004", html)
+                self.assertIn("<dd>无</dd>", html)
+
+    def test_opencodex_compatibility_escapes_all_dynamic_fields(self) -> None:
+        payloads = {
+            "profile": '<profile data-x="1">profile</profile>',
+            "level": '<level data-x="2">level</level>',
+            "label": '<label data-x="3">label</label>',
+            "protocolFamily": '<protocol data-x="4">protocol</protocol>',
+            "requiredTestIds": ['<required data-x="5">required</required>'],
+            "failedTestIds": ['<failed data-x="6">failed</failed>'],
+            "statement": '<statement data-x="7">statement</statement>',
+            "scopeBoundary": '<scope data-x="8">scope</scope>',
+        }
+
+        html = _opencodex_compatibility(payloads)
+
+        scalar_values = (
+            payloads["profile"],
+            payloads["level"],
+            payloads["label"],
+            payloads["protocolFamily"],
+            payloads["statement"],
+            payloads["scopeBoundary"],
+            payloads["requiredTestIds"][0],
+            payloads["failedTestIds"][0],
+        )
+        for payload in scalar_values:
+            with self.subTest(payload=payload):
+                self.assertNotIn(payload, html)
+                self.assertIn(escape(payload, quote=True), html)
+        self.assertIn(
+            'class="opencodex-compatibility '
+            'opencodex-compatibility-NOT_ASSESSED"',
+            html,
+        )
+        self.assertNotIn('class="<level', html)
+
+    def test_opencodex_compatibility_css_is_responsive_and_print_safe(self) -> None:
+        css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 640px)", 1)[1].split(
+            "@media print", 1
+        )[0]
+        print_css = css.split("@media print", 1)[1]
+
+        self.assertIn(".opencodex-compatibility", css)
+        self.assertRegex(
+            css,
+            r"\.opencodex-compatibility-details\s+dd\s*\{[^}]*"
+            r"overflow-wrap:\s*anywhere;",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.opencodex-compatibility-details\s*>\s*div\s*\{[^}]*"
+            r"grid-template-columns:\s*minmax\(0,\s*1fr\);",
+        )
+        self.assertRegex(
+            print_css,
+            r"\.opencodex-compatibility\s*\{[^}]*break-inside:\s*avoid;",
         )
 
     def test_final_conclusion_renders_all_three_fact_rows(self) -> None:

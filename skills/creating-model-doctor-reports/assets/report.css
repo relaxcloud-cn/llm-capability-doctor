@@ -87,6 +87,66 @@ button {
   overflow-wrap: anywhere;
 }
 
+.opencodex-compatibility {
+  margin: 0 0 24px;
+  padding: 1rem 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.opencodex-compatibility-heading {
+  margin: 0 0 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.opencodex-compatibility-label {
+  margin: 0;
+  color: var(--verdict-neutral);
+  font-size: 18px;
+  font-weight: 650;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.opencodex-compatibility-PASS .opencodex-compatibility-label {
+  color: var(--verdict-pass);
+}
+
+.opencodex-compatibility-FAIL .opencodex-compatibility-label {
+  color: var(--verdict-fail);
+}
+
+.opencodex-compatibility-statement {
+  margin: 0.4rem 0 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+
+.opencodex-compatibility-details {
+  margin: 0.75rem 0 0;
+}
+
+.opencodex-compatibility-details > div {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.25rem 0;
+}
+
+.opencodex-compatibility-details dt {
+  color: var(--muted-foreground);
+}
+
+.opencodex-compatibility-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
 .final-conclusion {
   margin: 0 0 24px;
   padding: 0 0 1rem;
@@ -478,6 +538,11 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .opencodex-compatibility-details > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
   .capability-fact-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -593,6 +658,10 @@ pre {
 
   .report-shell {
     max-width: none;
+  }
+
+  .opencodex-compatibility {
+    break-inside: avoid;
   }
 
   .result-row,
