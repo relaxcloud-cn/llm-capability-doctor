@@ -2020,9 +2020,17 @@ def _validate_v3_tool_pass_requests(test_id: str, requests: object) -> list[str]
             errors.append(f"Test {test_id} request {expected_id} has mismatched tool_loop_turn")
         if request.get("stream_termination") != "completed":
             errors.append(f"Test {test_id} request {expected_id} did not complete its stream")
-        if request.get("transport_outcome") != "completed_eof":
+        transport_outcome = request.get("transport_outcome")
+        terminal_signal = request.get("stream_end_signal")
+        protocol_terminated_chat = (
+            request.get("protocol") == "openai_chat"
+            and terminal_signal == "[DONE]"
+            and transport_outcome == "protocol_terminated"
+        )
+        if transport_outcome != "completed_eof" and not protocol_terminated_chat:
             errors.append(
-                f"Test {test_id} request {expected_id} did not reach clean transport EOF"
+                f"Test {test_id} request {expected_id} did not end at clean EOF "
+                "or a valid immediate protocol terminal"
             )
         expected_signal = {
             "openai_chat": "[DONE]",
@@ -2031,7 +2039,7 @@ def _validate_v3_tool_pass_requests(test_id: str, requests: object) -> list[str]
             "gemini_generate_content": "finishReason:STOP",
             "ollama_chat": "done:true",
         }.get(request.get("protocol"))
-        if expected_signal is None or request.get("stream_end_signal") != expected_signal:
+        if expected_signal is None or terminal_signal != expected_signal:
             errors.append(
                 f"Test {test_id} request {expected_id} has an invalid terminal signal"
             )

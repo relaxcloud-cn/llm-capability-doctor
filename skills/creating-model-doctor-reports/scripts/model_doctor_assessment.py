@@ -11,6 +11,7 @@ from typing import Dict, List
 
 from model_doctor_contracts import V3_CONTRACT, contract_key
 from model_doctor_general_verdict import derive_general_verdict
+from model_doctor_opencodex_compatibility import derive_opencodex_compatibility
 from model_doctor_protocol_conformance import (
     analyze_protocol_conformance,
     validate_protocol_conformance,
@@ -67,7 +68,8 @@ REVIEW_CAPABILITY_SUMMARY_FIELDS = {
     "scopeBoundary",
 }
 ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
-    "generalVerdict"
+    "generalVerdict",
+    "openCodexCompatibility",
 }
 GENERAL_VERDICT_COUNT_FIELDS = (
     "collectedTests",
@@ -193,6 +195,9 @@ def _evidence_ref_belongs_to_test(
 def _validate_parsed_structure(parsed: object) -> List[str]:
     if not isinstance(parsed, dict):
         return ["Parsed evidence must be an object"]
+    run = parsed.get("run")
+    if not isinstance(run, dict):
+        return ["Parsed run must be an object"]
     tests = parsed.get("tests")
     if not isinstance(tests, dict):
         return ["Parsed tests must be an object keyed by test ID"]
@@ -664,9 +669,20 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         items.append(item)
 
     capability_summary = deepcopy(reviews["capabilitySummary"])
+    statuses = {
+        item["testId"]: item["reviewedStatus"] for item in items
+    }
     capability_summary["generalVerdict"] = derive_general_verdict(
-        {item["testId"]: item["reviewedStatus"] for item in items},
+        statuses,
         contract,
+    )
+    protocol_family = capability_summary["verifiedFacts"]["interfaceProtocol"][
+        "family"
+    ]
+    capability_summary["openCodexCompatibility"] = derive_opencodex_compatibility(
+        parsed.get("run", {}),
+        statuses,
+        protocol_family,
     )
 
     return {
@@ -824,6 +840,7 @@ def _validate_assessment_summary(
     items: List[dict],
     summary: object,
     contract: tuple[str, str],
+    run: object,
 ) -> List[str]:
     errors: List[str] = []
     if not isinstance(summary, dict):
@@ -853,6 +870,28 @@ def _validate_assessment_summary(
             errors.append(
                 "capabilitySummary generalVerdict does not match test statuses"
             )
+    verified_facts = summary.get("verifiedFacts")
+    interface_protocol = (
+        verified_facts.get("interfaceProtocol")
+        if isinstance(verified_facts, dict)
+        else None
+    )
+    protocol_family = (
+        interface_protocol.get("family")
+        if isinstance(interface_protocol, dict)
+        and isinstance(interface_protocol.get("family"), str)
+        else "UNKNOWN"
+    )
+    expected_compatibility = derive_opencodex_compatibility(
+        run if isinstance(run, dict) else {},
+        statuses,
+        protocol_family,
+    )
+    if summary.get("openCodexCompatibility") != expected_compatibility:
+        errors.append(
+            "capabilitySummary openCodexCompatibility does not match run "
+            "metadata, protocol family, and test statuses"
+        )
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
     elif _contains_readiness_decision(summary.get("headline")):
@@ -1130,6 +1169,7 @@ def validate_assessment(assessment: object) -> List[str]:
             valid_items,
             assessment.get("capabilitySummary"),
             contract,
+            run,
         )
     )
     if "overall" in assessment:

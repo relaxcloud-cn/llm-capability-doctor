@@ -43,7 +43,15 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
 pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> RequestSpec {
     let tools = tool_definitions(protocol, id);
     let parallel = id == "045";
-    let stream = matches!(id, "046" | "047" | "048" | "049");
+    let stream = matches!(id, "046" | "047" | "048" | "049")
+        || (matches!(id, "040" | "045")
+            && matches!(
+                protocol,
+                Protocol::OpenAiChat
+                    | Protocol::OpenAiResponses
+                    | Protocol::AnthropicMessages
+                    | Protocol::GeminiGenerateContent
+            ));
     let mut body = match protocol {
         Protocol::OpenAiResponses => json!({
             "model": model,
@@ -111,6 +119,7 @@ pub enum ToolRequestPhase<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolConversation {
     protocol: Protocol,
+    check_id: Option<&'static str>,
     current_body: Value,
 }
 
@@ -142,6 +151,7 @@ impl ToolConversation {
         }
         Ok(Self {
             protocol,
+            check_id: request_check_id(protocol, &body),
             current_body: body,
         })
     }
@@ -163,7 +173,7 @@ impl ToolConversation {
         }
 
         let ordered = correlate_results(self.protocol, &turn.tool_calls, results)?;
-        let history = history_for(self.protocol, &turn.history)?;
+        let mut history = history_for(self.protocol, &turn.history)?;
         let mut next = self.current_body.clone();
 
         match self.protocol {
@@ -230,25 +240,26 @@ impl ToolConversation {
                 next["stream"] = Value::Bool(true);
             }
             Protocol::GeminiGenerateContent => {
+                let local_ids = gemini_local_call_ids(self.check_id, &turn.tool_calls);
+                rewrite_gemini_history_ids(&mut history, &local_ids)?;
                 let contents = array_mut(&mut next, "contents", self.protocol)?;
                 contents.push(history);
                 let parts = turn
                     .tool_calls
                     .iter()
                     .zip(ordered)
-                    .map(|(call, result)| {
+                    .zip(local_ids)
+                    .map(|((call, result), local_id)| {
                         let response = if result.is_error {
                             json!({"error": "timeout"})
                         } else {
                             json!({"result": result.output})
                         };
-                        let mut function_response = Map::from_iter([
+                        let function_response = Map::from_iter([
+                            ("id".into(), Value::String(local_id)),
                             ("name".into(), Value::String(call.name.clone())),
                             ("response".into(), response),
                         ]);
-                        if let ToolCorrelation::Optional(Some(id)) = &call.correlation {
-                            function_response.insert("id".into(), Value::String(id.clone()));
-                        }
                         json!({"functionResponse": Value::Object(function_response)})
                     })
                     .collect::<Vec<_>>();
@@ -291,6 +302,74 @@ impl ToolConversation {
         self.current_body = next;
         Ok(self.current_request())
     }
+}
+
+fn request_check_id(protocol: Protocol, body: &Value) -> Option<&'static str> {
+    let prompt = match protocol {
+        Protocol::OpenAiChat | Protocol::OllamaChat | Protocol::AnthropicMessages => {
+            body.pointer("/messages/0/content").and_then(Value::as_str)
+        }
+        Protocol::OpenAiResponses => body.get("input").and_then(Value::as_str),
+        Protocol::GeminiGenerateContent => body
+            .pointer("/contents/0/parts/0/text")
+            .and_then(Value::as_str),
+        Protocol::Unknown => None,
+    }?;
+    ["046", "047", "048", "049"]
+        .into_iter()
+        .find(|id| prompt.contains(&format!("MODEL_DOCTOR_CASE_{id}")))
+}
+
+fn gemini_local_call_ids(check_id: Option<&str>, calls: &[ToolCall]) -> Vec<String> {
+    let check_id = check_id.unwrap_or("tool");
+    calls
+        .iter()
+        .enumerate()
+        .map(|(position, call)| {
+            let base = format!("call_model_doctor_{check_id}_{position}");
+            match &call.correlation {
+                ToolCorrelation::Optional(Some(upstream)) if upstream == &base => {
+                    format!("{base}_local")
+                }
+                _ => base,
+            }
+        })
+        .collect()
+}
+
+fn rewrite_gemini_history_ids(
+    history: &mut Value,
+    local_ids: &[String],
+) -> Result<(), ToolProtocolError> {
+    let Some(parts) = history.get_mut("parts").and_then(Value::as_array_mut) else {
+        return Err(ToolProtocolError::InvalidRequest(vec![request_error(
+            Protocol::GeminiGenerateContent,
+            "history_mismatch",
+            "/history/parts",
+        )]));
+    };
+    let calls = parts
+        .iter_mut()
+        .filter_map(|part| part.get_mut("functionCall"))
+        .collect::<Vec<_>>();
+    if calls.len() != local_ids.len() {
+        return Err(ToolProtocolError::InvalidRequest(vec![request_error(
+            Protocol::GeminiGenerateContent,
+            "history_call_count_mismatch",
+            "/history/parts",
+        )]));
+    }
+    for (call, local_id) in calls.into_iter().zip(local_ids) {
+        let Some(call) = call.as_object_mut() else {
+            return Err(ToolProtocolError::InvalidRequest(vec![request_error(
+                Protocol::GeminiGenerateContent,
+                "history_mismatch",
+                "/history/parts/functionCall",
+            )]));
+        };
+        call.insert("id".into(), Value::String(local_id.clone()));
+    }
+    Ok(())
 }
 
 fn text_output(result: &ExecutedToolResult) -> &str {
@@ -707,24 +786,34 @@ fn validate_tool_shapes(protocol: Protocol, body: &Value, errors: &mut BTreeSet<
         Protocol::OpenAiResponses => {
             for (index, tool) in tools.iter().enumerate() {
                 let base = format!("/tools/{index}");
-                if tool.get("type").and_then(Value::as_str) != Some("function")
-                    || tool
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .is_none_or(|name| name.trim().is_empty())
-                    || tool.get("parameters").and_then(Value::as_object).is_none()
-                    || tool.get("strict") != Some(&Value::Bool(true))
-                    || tool.get("function").is_some()
-                {
-                    errors.insert(request_error(protocol, "invalid_tool_shape", &base));
-                }
-                if let Some(parameters) = tool.get("parameters") {
-                    validate_closed_object_schemas(
-                        protocol,
-                        parameters,
-                        &format!("{base}/parameters"),
-                        errors,
-                    );
+                if tool.get("type").and_then(Value::as_str) == Some("namespace") {
+                    if tool.get("name").and_then(Value::as_str) != Some("doctor") {
+                        errors.insert(request_error(protocol, "invalid_tool_shape", &base));
+                    }
+                    let Some(nested) = tool.get("tools").and_then(Value::as_array) else {
+                        errors.insert(request_error(
+                            protocol,
+                            "invalid_tool_shape",
+                            &format!("{base}/tools"),
+                        ));
+                        continue;
+                    };
+                    if nested.is_empty() {
+                        errors.insert(request_error(
+                            protocol,
+                            "invalid_tool_shape",
+                            &format!("{base}/tools"),
+                        ));
+                    }
+                    for (nested_index, function) in nested.iter().enumerate() {
+                        validate_responses_function(
+                            function,
+                            &format!("{base}/tools/{nested_index}"),
+                            errors,
+                        );
+                    }
+                } else {
+                    validate_responses_function(tool, &base, errors);
                 }
             }
         }
@@ -791,6 +880,29 @@ fn validate_tool_shapes(protocol: Protocol, body: &Value, errors: &mut BTreeSet<
         Protocol::Unknown => {
             errors.insert(request_error(protocol, "unsupported_protocol", "/"));
         }
+    }
+}
+
+fn validate_responses_function(tool: &Value, pointer: &str, errors: &mut BTreeSet<String>) {
+    let protocol = Protocol::OpenAiResponses;
+    if tool.get("type").and_then(Value::as_str) != Some("function")
+        || tool
+            .get("name")
+            .and_then(Value::as_str)
+            .is_none_or(|name| name.trim().is_empty())
+        || tool.get("parameters").and_then(Value::as_object).is_none()
+        || tool.get("strict") != Some(&Value::Bool(true))
+        || tool.get("function").is_some()
+    {
+        errors.insert(request_error(protocol, "invalid_tool_shape", pointer));
+    }
+    if let Some(parameters) = tool.get("parameters") {
+        validate_closed_object_schemas(
+            protocol,
+            parameters,
+            &format!("{pointer}/parameters"),
+            errors,
+        );
     }
 }
 
@@ -1088,6 +1200,15 @@ fn validate_follow_up(
             }
         }
         Protocol::GeminiGenerateContent => {
+            let local_ids =
+                gemini_local_call_ids(request_check_id(protocol, body), &previous.tool_calls);
+            let mut expected_history = history.clone();
+            if let Err(ToolProtocolError::InvalidRequest(codes)) =
+                rewrite_gemini_history_ids(&mut expected_history, &local_ids)
+            {
+                errors.extend(codes);
+                return;
+            }
             let Some(contents) = body.get("contents").and_then(Value::as_array) else {
                 errors.insert(request_error(protocol, "history_mismatch", "/contents"));
                 return;
@@ -1096,7 +1217,7 @@ fn validate_follow_up(
                 errors.insert(request_error(protocol, "history_mismatch", "/contents"));
                 return;
             };
-            if contents.get(start) != Some(&history) {
+            if contents.get(start) != Some(&expected_history) {
                 errors.insert(request_error(
                     protocol,
                     "history_mismatch",
@@ -1141,13 +1262,11 @@ fn validate_follow_up(
                 } else {
                     json!({"result": result.output})
                 };
-                let mut function_response = Map::from_iter([
+                let function_response = Map::from_iter([
+                    ("id".into(), Value::String(local_ids[index].clone())),
                     ("name".into(), Value::String(call.name.clone())),
                     ("response".into(), response),
                 ]);
-                if let ToolCorrelation::Optional(Some(id)) = &call.correlation {
-                    function_response.insert("id".into(), Value::String(id.clone()));
-                }
                 validate_result_message(
                     protocol,
                     parts.get(index),
@@ -1684,10 +1803,32 @@ fn tool_definitions(protocol: Protocol, id: &str) -> Vec<Value> {
             "Inspect a network target",
             inspect_parameters(protocol),
         )]
+    } else if matches!(id, "041" | "047") && protocol == Protocol::OpenAiResponses {
+        vec![json!({
+            "type": "namespace",
+            "name": "doctor",
+            "tools": [definition(
+                protocol,
+                "get_weather",
+                "Get weather",
+                weather_parameters(protocol, false),
+            )]
+        })]
     } else {
+        let name = if matches!(id, "041" | "047")
+            && matches!(
+                protocol,
+                Protocol::OpenAiChat
+                    | Protocol::AnthropicMessages
+                    | Protocol::GeminiGenerateContent
+            ) {
+            "doctor__get_weather"
+        } else {
+            "get_weather"
+        };
         vec![definition(
             protocol,
-            "get_weather",
+            name,
             "Get weather",
             weather_parameters(protocol, id == "043"),
         )]
@@ -2127,13 +2268,17 @@ mod tests {
                     );
                 }
                 Protocol::GeminiGenerateContent => {
-                    assert_eq!(follow.body["contents"][1], history_value(&assistant));
+                    let local_id = "call_model_doctor_046_0";
+                    let mut expected_history = history_value(&assistant);
+                    expected_history["parts"][0]["functionCall"]["id"] = json!(local_id);
+                    assert_eq!(follow.body["contents"][1], expected_history);
                     assert_eq!(
                         follow.body["contents"][2]["parts"][0]["functionResponse"],
                         json!({
-                            "id": "call_weather", "name": "get_weather", "response": {"result": "WEATHER_SUNNY"}
+                            "id": local_id, "name": "get_weather", "response": {"result": "WEATHER_SUNNY"}
                         })
                     );
+                    assert!(!follow.body.to_string().contains("call_weather"));
                     assert!(follow.body.get("stream").is_none());
                 }
                 Protocol::OllamaChat => {
@@ -2436,10 +2581,16 @@ mod tests {
 
             assert_eq!(first_request.body[collection].as_array().unwrap().len(), 3);
             assert_eq!(second_request.body[collection].as_array().unwrap().len(), 5);
-            let first_history = if protocol == Protocol::AnthropicMessages {
-                json!({"role": "assistant", "content": history_value(&first)})
-            } else {
-                history_value(&first)
+            let first_history = match protocol {
+                Protocol::AnthropicMessages => {
+                    json!({"role": "assistant", "content": history_value(&first)})
+                }
+                Protocol::GeminiGenerateContent => {
+                    let mut history = history_value(&first);
+                    history["parts"][0]["functionCall"]["id"] = json!("call_model_doctor_047_0");
+                    history
+                }
+                _ => history_value(&first),
             };
             assert_eq!(second_request.body[collection][1], first_history);
         }
@@ -2500,7 +2651,13 @@ mod tests {
                     .append_follow_up(&assistant, &results)
                     .expect("optional ID");
                 let serialized = follow.body.to_string();
-                assert_eq!(serialized.contains("provided-id"), id.is_some());
+                if protocol == Protocol::GeminiGenerateContent {
+                    let local_id = "call_model_doctor_046_0";
+                    assert!(!serialized.contains("provided-id"));
+                    assert_eq!(serialized.matches(local_id).count(), 2);
+                } else {
+                    assert_eq!(serialized.contains("provided-id"), id.is_some());
+                }
                 assert_valid(
                     protocol,
                     &follow,
@@ -2532,8 +2689,14 @@ mod tests {
                 .append_follow_up(&assistant, &results)
                 .expect("mixed optional IDs are official");
             let serialized = follow.body.to_string();
-            assert_eq!(serialized.matches("weather-id").count(), 2);
-            assert!(!serialized.contains("time-id"));
+            if protocol == Protocol::GeminiGenerateContent {
+                assert!(!serialized.contains("weather-id"));
+                assert_eq!(serialized.matches("call_model_doctor_047_0").count(), 2);
+                assert_eq!(serialized.matches("call_model_doctor_047_1").count(), 2);
+            } else {
+                assert_eq!(serialized.matches("weather-id").count(), 2);
+                assert!(!serialized.contains("time-id"));
+            }
             assert!(
                 serialized.find("WEATHER_SUNNY").unwrap()
                     < serialized.find("TIME_UTC_00:00").unwrap()

@@ -10,6 +10,7 @@ use crate::audit::{RequestEvidence, ResponseMetrics};
 use crate::evidence::{
     StreamEndSignal, StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome,
 };
+use crate::protocol::stream::{StreamControl, StreamInspector, StreamState};
 use crate::protocol::{AuthMode, Protocol};
 
 pub struct RequestInput {
@@ -35,6 +36,7 @@ struct TransportFacts {
     timed_out: bool,
     pre_response_error: bool,
     body_read_error: bool,
+    protocol_terminated: bool,
     http_status: Option<u16>,
 }
 
@@ -131,6 +133,7 @@ impl HttpExecutor {
                         timed_out: false,
                         pre_response_error: false,
                         body_read_error: false,
+                        protocol_terminated: false,
                         http_status: None,
                     },
                 );
@@ -152,6 +155,7 @@ impl HttpExecutor {
                         timed_out,
                         pre_response_error: !timed_out,
                         body_read_error: false,
+                        protocol_terminated: false,
                         http_status: None,
                     },
                 );
@@ -177,6 +181,11 @@ impl HttpExecutor {
         let mut cancelled = false;
         let mut timed_out = false;
         let mut body_read_error = false;
+        let mut reached_eof = false;
+        let mut protocol_terminated = false;
+        let mut protocol_failed = false;
+        let mut inspector = (input.stream && StreamInspector::supports(input.protocol))
+            .then(|| StreamInspector::new(input.protocol));
 
         loop {
             let next = tokio::select! {
@@ -195,6 +204,23 @@ impl HttpExecutor {
                     }
                     body.extend_from_slice(&chunk);
                     hooks.after_body_chunk();
+                    if inspector
+                        .as_mut()
+                        .is_some_and(|inspector| inspector.push(&chunk) == StreamControl::Stop)
+                    {
+                        protocol_terminated = true;
+                        let inspector = inspector
+                            .as_ref()
+                            .expect("an inspector stopped the response stream");
+                        if inspector.state() == StreamState::Error {
+                            error = inspector
+                                .error_message()
+                                .unwrap_or("stream ended with a protocol error")
+                                .into();
+                            protocol_failed = true;
+                        }
+                        break;
+                    }
                 }
                 Some(Err(stream_error)) => {
                     timed_out = stream_error.is_timeout();
@@ -202,7 +228,28 @@ impl HttpExecutor {
                     error = format_error_chain(&stream_error);
                     break;
                 }
-                None => break,
+                None => {
+                    reached_eof = true;
+                    break;
+                }
+            }
+        }
+
+        if reached_eof && let Some(inspector) = inspector.as_mut() {
+            let _ = inspector.finish();
+            match inspector.state() {
+                StreamState::Success => {}
+                StreamState::Error => {
+                    error = inspector
+                        .error_message()
+                        .unwrap_or("stream ended with a protocol error")
+                        .into();
+                    protocol_failed = true;
+                }
+                StreamState::Pending => {
+                    error = "stream ended without a terminal event".into();
+                    protocol_failed = true;
+                }
             }
         }
 
@@ -213,10 +260,11 @@ impl HttpExecutor {
             timed_out,
             pre_response_error: false,
             body_read_error,
+            protocol_terminated,
             http_status: Some(status),
         });
         let transport_exit_code =
-            i32::from(classification.transport_outcome != TransportOutcome::CompletedEof);
+            i32::from(!classification.transport_outcome.is_success() || protocol_failed);
         RequestEvidence {
             request_id: input.request_id,
             started_at,
@@ -319,6 +367,8 @@ fn classify_transport(facts: TransportFacts) -> TransportClassification {
         TransportOutcome::TransportError
     } else if facts.body_read_error {
         TransportOutcome::UpstreamDisconnect
+    } else if facts.protocol_terminated {
+        TransportOutcome::ProtocolTerminated
     } else {
         TransportOutcome::CompletedEof
     };
@@ -388,7 +438,12 @@ mod tests {
         ))]])
         .await;
 
-        let evidence = execute(&fixture, Duration::from_secs(1), CancellationToken::new()).await;
+        let mut input = request_input(fixture.url());
+        input.stream = false;
+        let evidence = HttpExecutor::new(Duration::from_secs(1), false)
+            .expect("HTTP executor")
+            .execute(input, CancellationToken::new())
+            .await;
 
         assert_eq!(evidence.response_body, b"hello");
         assert_eq!(evidence.transport_outcome, TransportOutcome::CompletedEof);
@@ -599,6 +654,7 @@ mod tests {
             timed_out: true,
             pre_response_error: false,
             body_read_error: false,
+            protocol_terminated: false,
             http_status: None,
         });
 
@@ -696,6 +752,102 @@ mod tests {
         }
     }
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
+    use url::Url;
+
+    use crate::protocol::stream::inspector::MAX_SSE_RECORD_BYTES;
+
+    struct SseFixture {
+        url: Url,
+        release: Option<oneshot::Sender<()>>,
+        task: JoinHandle<()>,
+    }
+
+    impl SseFixture {
+        async fn start(body_chunk: &[u8], hold_open: bool) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let body_chunk = body_chunk.to_vec();
+            let (release, wait_for_release) = oneshot::channel();
+            let task = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                read_request(&mut socket).await;
+                socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                socket
+                    .write_all(format!("{:x}\r\n", body_chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                socket.write_all(&body_chunk).await.unwrap();
+                socket.write_all(b"\r\n").await.unwrap();
+                socket.flush().await.unwrap();
+
+                if hold_open {
+                    let _ = wait_for_release.await;
+                }
+                let _ = socket.write_all(b"0\r\n\r\n").await;
+            });
+            Self {
+                url: Url::parse(&format!("http://{address}/v1/stream")).unwrap(),
+                release: hold_open.then_some(release),
+                task,
+            }
+        }
+
+        async fn close(mut self) {
+            if let Some(release) = self.release.take() {
+                let _ = release.send(());
+            }
+            self.task.await.unwrap();
+        }
+    }
+
+    async fn read_request(socket: &mut tokio::net::TcpStream) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            if count == 0 {
+                return;
+            }
+            request.extend_from_slice(&buffer[..count]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            if request.len() >= header_end + 4 + content_length {
+                return;
+            }
+        }
+    }
+
+    fn request(url: Url, protocol: Protocol, stream: bool) -> RequestInput {
+        RequestInput {
+            request_id: "http-stream-test".into(),
+            url,
+            protocol,
+            auth_mode: AuthMode::None,
+            body: b"{}".to_vec(),
+            stream,
+            api_key: String::new(),
+        }
+    }
+
     fn response(status: &str, content_length: usize, body: &[u8]) -> Vec<u8> {
         let mut response = format!(
             "HTTP/1.1 {status}\r\nContent-Length: {content_length}\r\nConnection: close\r\n\r\n"
@@ -723,5 +875,150 @@ mod tests {
             "{:?}",
             evidence.headers
         );
+    }
+
+    #[tokio::test]
+    async fn chat_done_is_recorded_before_returning_from_a_held_open_response() {
+        let terminal = b"data: [DONE]\n\n";
+        let fixture = SseFixture::start(terminal, true).await;
+        let executor = HttpExecutor::new(Duration::from_secs(10), false).unwrap();
+
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(2),
+            executor.execute(
+                request(fixture.url.clone(), Protocol::OpenAiChat, true),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("[DONE] should stop without waiting for the connection to close");
+
+        assert_eq!(evidence.metrics.transport_exit_code, 0);
+        assert_eq!(evidence.response_body, terminal);
+        assert_eq!(evidence.metrics.size_download, terminal.len());
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn explicit_stream_error_returns_failure() {
+        let fixture = SseFixture::start(b"event: error\ndata: {}\n\n", false).await;
+        let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+        let evidence = executor
+            .execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(evidence.metrics.transport_exit_code, 1);
+        assert!(evidence.error.contains("error event"), "{}", evidence.error);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn oversized_stream_record_is_fully_recorded_before_immediate_failure() {
+        let mut oversized = b"data: ".to_vec();
+        oversized.resize(MAX_SSE_RECORD_BYTES + 1, b'x');
+        let fixture = SseFixture::start(&oversized, true).await;
+        let executor = HttpExecutor::new(Duration::from_secs(10), false).unwrap();
+
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(2),
+            executor.execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("an oversized SSE record should stop before server EOF");
+
+        assert_eq!(evidence.metrics.transport_exit_code, 1);
+        assert_eq!(evidence.response_body, oversized);
+        assert!(evidence.error.contains("1 MiB"), "{}", evidence.error);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn responses_completed_then_eof_succeeds() {
+        let fixture =
+            SseFixture::start(b"data: {\"type\":\"response.completed\"}\n\n", false).await;
+        let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+        let evidence = executor
+            .execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(evidence.metrics.transport_exit_code, 0);
+        assert!(evidence.error.is_empty());
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn responses_completed_on_a_held_open_response_times_out() {
+        let fixture = SseFixture::start(b"data: {\"type\":\"response.completed\"}\n\n", true).await;
+        let executor = HttpExecutor::new(Duration::from_millis(100), false).unwrap();
+
+        let evidence = executor
+            .execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(evidence.metrics.transport_exit_code, 1);
+        assert!(!evidence.error.is_empty());
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn stream_eof_without_a_native_terminal_returns_failure() {
+        let fixture = SseFixture::start(
+            b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            false,
+        )
+        .await;
+        let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+        let evidence = executor
+            .execute(
+                request(fixture.url.clone(), Protocol::OpenAiResponses, true),
+                CancellationToken::new(),
+            )
+            .await;
+
+        assert_eq!(evidence.metrics.transport_exit_code, 1);
+        assert!(
+            evidence.error.contains("without a terminal"),
+            "{}",
+            evidence.error
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn non_stream_ollama_and_unknown_requests_keep_eof_behavior() {
+        for (protocol, stream) in [
+            (Protocol::OpenAiResponses, false),
+            (Protocol::OllamaChat, true),
+            (Protocol::Unknown, true),
+        ] {
+            let fixture = SseFixture::start(b"not an SSE terminal", false).await;
+            let executor = HttpExecutor::new(Duration::from_secs(2), false).unwrap();
+
+            let evidence = executor
+                .execute(
+                    request(fixture.url.clone(), protocol, stream),
+                    CancellationToken::new(),
+                )
+                .await;
+
+            assert_eq!(evidence.metrics.transport_exit_code, 0, "{protocol}");
+            assert!(evidence.error.is_empty(), "{protocol}: {}", evidence.error);
+            fixture.close().await;
+        }
     }
 }

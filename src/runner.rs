@@ -154,7 +154,7 @@ impl Runner {
 
             let parsed = parse_stream_evidence(&mut evidence).await;
             let mut contract_errors = std::mem::take(&mut outgoing_errors);
-            let transport_failure = evidence.transport_outcome != TransportOutcome::CompletedEof
+            let transport_failure = !evidence.transport_outcome.is_success()
                 || evidence.stream_termination == StreamTermination::HttpError;
             if let Some(parsed) = parsed.as_ref() {
                 merge_errors(&mut contract_errors, parsed.contract_errors.clone());
@@ -522,10 +522,7 @@ async fn parse_stream_evidence(evidence: &mut RequestEvidence) -> Option<StreamP
         .metrics
         .http_status
         .is_some_and(|status| (200..300).contains(&status));
-    if !evidence.stream
-        || evidence.transport_outcome != TransportOutcome::CompletedEof
-        || !is_success
-    {
+    if !evidence.stream || !evidence.transport_outcome.is_success() || !is_success {
         return None;
     }
 

@@ -687,10 +687,66 @@
       ],
       "additionalProperties": false
     },
+    "openCodexCompatibility": {
+      "type": "object",
+      "required": [
+        "profile",
+        "level",
+        "label",
+        "protocolFamily",
+        "requiredTestIds",
+        "failedTestIds",
+        "statement",
+        "scopeBoundary"
+      ],
+      "properties": {
+        "profile": {
+          "const": "opencodex-2.7.42-data-format"
+        },
+        "level": {
+          "enum": ["PASS", "FAIL", "NOT_ASSESSED"]
+        },
+        "label": {
+          "enum": [
+            "OpenCodex 数据格式兼容",
+            "OpenCodex 数据格式不兼容",
+            "OpenCodex 数据格式未评定"
+          ]
+        },
+        "protocolFamily": {
+          "enum": [
+            "OPENAI_CHAT_COMPLETIONS",
+            "OPENAI_RESPONSES",
+            "ANTHROPIC_MESSAGES",
+            "GEMINI_GENERATE_CONTENT",
+            "OLLAMA_CHAT",
+            "CUSTOM",
+            "UNKNOWN"
+          ]
+        },
+        "requiredTestIds": {
+          "const": ["002", "004", "005", "006", "040", "041", "043", "047"]
+        },
+        "failedTestIds": {
+          "type": "array",
+          "items": {
+            "enum": ["002", "004", "005", "006", "040", "041", "043", "047"]
+          },
+          "maxItems": 8,
+          "uniqueItems": true
+        },
+        "statement": {"type": "string", "minLength": 1},
+        "scopeBoundary": {
+          "const": "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。"
+        }
+      },
+      "additionalProperties": false
+    },
     "capabilitySummary": {
       "type": "object",
       "required": [
         "generalVerdict",
+        "openCodexCompatibility",
         "headline",
         "verifiedFacts",
         "issues",
@@ -699,6 +755,9 @@
       "properties": {
         "generalVerdict": {
           "$ref": "#/$defs/generalVerdict"
+        },
+        "openCodexCompatibility": {
+          "$ref": "#/$defs/openCodexCompatibility"
         },
         "headline": {
           "type": "string",

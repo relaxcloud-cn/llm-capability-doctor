@@ -79,7 +79,8 @@ impl ToolLoopState {
     }
 
     fn validate_call(&self, position: usize, call: &ToolCall) -> Option<String> {
-        let allowed = match call.name.as_str() {
+        let name = logical_tool_name(self.check_id, &call.name);
+        let allowed = match name {
             "get_weather" => true,
             "get_time" => self.check_id == "047",
             _ => {
@@ -94,7 +95,7 @@ impl ToolLoopState {
             ));
         }
 
-        let valid_arguments = match call.name.as_str() {
+        let valid_arguments = match name {
             "get_weather" => call.arguments == json!({"city": "Beijing"}),
             "get_time" => call.arguments == json!({"zone": "UTC"}),
             _ => unreachable!("unknown tools return before argument validation"),
@@ -104,7 +105,8 @@ impl ToolLoopState {
     }
 
     fn execute(&mut self, call: ToolCall) -> ExecutedToolResult {
-        let (output, is_error) = match call.name.as_str() {
+        let name = logical_tool_name(self.check_id, &call.name);
+        let (output, is_error) = match name {
             "get_weather" if self.check_id == "049" && self.weather_attempts == 0 => {
                 ("ERROR: timeout", true)
             }
@@ -112,7 +114,7 @@ impl ToolLoopState {
             "get_time" => ("TIME_UTC_12:00", false),
             _ => unreachable!("calls are allowlisted before execution"),
         };
-        if call.name == "get_weather" {
+        if name == "get_weather" {
             self.weather_attempts += 1;
         }
         ExecutedToolResult {
@@ -120,6 +122,14 @@ impl ToolLoopState {
             output: output.into(),
             is_error,
         }
+    }
+}
+
+fn logical_tool_name<'a>(check_id: &str, name: &'a str) -> &'a str {
+    if check_id == "047" && name == "doctor__get_weather" {
+        "get_weather"
+    } else {
+        name
     }
 }
 

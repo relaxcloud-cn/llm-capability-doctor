@@ -8,9 +8,12 @@ use crate::protocol::Protocol;
 pub(crate) mod anthropic;
 pub(crate) mod framing;
 pub(crate) mod gemini;
+pub(crate) mod inspector;
 pub(crate) mod ollama;
 pub(crate) mod openai_chat;
 pub(crate) mod openai_responses;
+
+pub(crate) use inspector::{StreamControl, StreamInspector, StreamState};
 
 #[derive(Debug, PartialEq)]
 pub struct StreamParseResult {

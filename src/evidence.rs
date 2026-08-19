@@ -3,6 +3,7 @@ use std::fmt;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TransportOutcome {
     CompletedEof,
+    ProtocolTerminated,
     Timeout,
     UpstreamDisconnect,
     ClientCancelled,
@@ -13,11 +14,18 @@ impl fmt::Display for TransportOutcome {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::CompletedEof => "completed_eof",
+            Self::ProtocolTerminated => "protocol_terminated",
             Self::Timeout => "timeout",
             Self::UpstreamDisconnect => "upstream_disconnect",
             Self::ClientCancelled => "client_cancelled",
             Self::TransportError => "transport_error",
         })
+    }
+}
+
+impl TransportOutcome {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::CompletedEof | Self::ProtocolTerminated)
     }
 }
 
@@ -127,6 +135,7 @@ mod tests {
     fn evidence_values_render_exact_wire_names() {
         let transport = [
             (TransportOutcome::CompletedEof, "completed_eof"),
+            (TransportOutcome::ProtocolTerminated, "protocol_terminated"),
             (TransportOutcome::Timeout, "timeout"),
             (TransportOutcome::UpstreamDisconnect, "upstream_disconnect"),
             (TransportOutcome::ClientCancelled, "client_cancelled"),

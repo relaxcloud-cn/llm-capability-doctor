@@ -7,6 +7,16 @@ pub(crate) mod stream;
 pub(crate) mod tool_loop;
 pub mod tools;
 
+#[cfg(test)]
+mod stream_tests;
+
+#[cfg(test)]
+#[path = "tests.rs"]
+mod compatibility_tests;
+
+#[cfg(test)]
+mod tools_tests;
+
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
 
 pub fn normalize_request_url(protocol: Protocol, configured: &Url, stream: bool) -> Url {
@@ -14,40 +24,19 @@ pub fn normalize_request_url(protocol: Protocol, configured: &Url, stream: bool)
         return configured.clone();
     }
 
-    let raw = configured.as_str();
-    let fragment_start = raw.find('#').unwrap_or(raw.len());
-    let before_fragment = &raw[..fragment_start];
-    let fragment = &raw[fragment_start..];
-    let query_start = before_fragment.find('?');
-    let (base, query) = match query_start {
-        Some(index) => (
-            &before_fragment[..index],
-            Some(&before_fragment[index + 1..]),
-        ),
-        None => (before_fragment, None),
+    let path = configured.path();
+    let normalized_path = if let Some(prefix) = path.strip_suffix(":generateContent") {
+        format!("{prefix}:streamGenerateContent")
+    } else if path.ends_with(":streamGenerateContent") {
+        path.to_owned()
+    } else {
+        return configured.clone();
     };
-    let base = base.strip_suffix(":generateContent").map_or_else(
-        || base.to_owned(),
-        |prefix| format!("{prefix}:streamGenerateContent"),
-    );
 
-    let mut query_pairs = query
-        .filter(|query| !query.is_empty())
-        .into_iter()
-        .flat_map(|query| query.split('&'))
-        .filter(|pair| !query_key_is_alt(pair))
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    query_pairs.push("alt=sse".into());
-
-    Url::parse(&format!("{base}?{}{fragment}", query_pairs.join("&")))
-        .expect("normalizing a parsed Gemini URL preserves URL validity")
-}
-
-fn query_key_is_alt(pair: &str) -> bool {
-    url::form_urlencoded::parse(pair.as_bytes())
-        .next()
-        .is_some_and(|(key, _)| key == "alt")
+    let mut normalized = configured.clone();
+    normalized.set_path(&normalized_path);
+    normalized.set_query(Some("alt=sse"));
+    normalized
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -268,56 +257,73 @@ pub fn matches_response(protocol: Protocol, body: &[u8]) -> bool {
         return false;
     };
     match protocol {
-        Protocol::OpenAiChat => {
-            has_key(&value, "choices") && (has_key(&value, "message") || has_key(&value, "delta"))
-        }
+        Protocol::OpenAiChat => value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(Value::as_object)
+            .is_some_and(|message| non_empty_string(message.get("content"))),
         Protocol::OpenAiResponses => {
-            (value.get("object").and_then(Value::as_str) == Some("response")
-                || has_key(&value, "output"))
-                && (has_key(&value, "output_text")
-                    || has_string(&value, "output_text")
-                    || has_string_prefix(&value, "response."))
+            non_empty_string(value.get("id"))
+                && value
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .is_some_and(|output| {
+                        !output.is_empty()
+                            && output.iter().any(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("message")
+                                    && item.get("content").and_then(Value::as_array).is_some_and(
+                                        |content| {
+                                            content.iter().any(|block| {
+                                                block.get("type").and_then(Value::as_str)
+                                                    == Some("output_text")
+                                                    && non_empty_string(block.get("text"))
+                                            })
+                                        },
+                                    )
+                            })
+                    })
         }
         Protocol::AnthropicMessages => {
             value.get("type").and_then(Value::as_str) == Some("message")
-                && (has_key(&value, "stop_reason") || has_key(&value, "content"))
+                && value
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        !content.is_empty()
+                            && content.iter().any(|block| {
+                                block.get("type").and_then(Value::as_str) == Some("text")
+                                    && non_empty_string(block.get("text"))
+                            })
+                    })
         }
-        Protocol::GeminiGenerateContent => {
-            has_key(&value, "candidates") && has_key(&value, "parts")
+        Protocol::GeminiGenerateContent => value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(Value::as_object)
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                !parts.is_empty() && parts.iter().any(|part| non_empty_string(part.get("text")))
+            }),
+        Protocol::OllamaChat => {
+            value
+                .get("message")
+                .and_then(Value::as_object)
+                .is_some_and(|message| non_empty_string(message.get("content")))
+                && value.get("done").and_then(Value::as_bool) == Some(true)
         }
-        Protocol::OllamaChat => has_key(&value, "message") && has_key(&value, "done"),
         Protocol::Unknown => false,
     }
 }
 
-fn has_key(value: &Value, wanted: &str) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.contains_key(wanted) || object.values().any(|child| has_key(child, wanted))
-        }
-        Value::Array(array) => array.iter().any(|child| has_key(child, wanted)),
-        _ => false,
-    }
-}
-
-fn has_string(value: &Value, wanted: &str) -> bool {
-    match value {
-        Value::String(text) => text == wanted,
-        Value::Object(object) => object.values().any(|child| has_string(child, wanted)),
-        Value::Array(array) => array.iter().any(|child| has_string(child, wanted)),
-        _ => false,
-    }
-}
-
-fn has_string_prefix(value: &Value, prefix: &str) -> bool {
-    match value {
-        Value::String(text) => text.starts_with(prefix),
-        Value::Object(object) => object
-            .values()
-            .any(|child| has_string_prefix(child, prefix)),
-        Value::Array(array) => array.iter().any(|child| has_string_prefix(child, prefix)),
-        _ => false,
-    }
+fn non_empty_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
 }
 
 #[cfg(test)]
@@ -331,11 +337,11 @@ mod tests {
         let cases = [
             (
                 "https://example.com/v1beta/models/gemini:generateContent?key=x&trace=1",
-                "https://example.com/v1beta/models/gemini:streamGenerateContent?key=x&trace=1&alt=sse",
+                "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse",
             ),
             (
                 "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=json&trace=1",
-                "https://example.com/v1beta/models/gemini:streamGenerateContent?trace=1&alt=sse",
+                "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse",
             ),
         ];
 
@@ -360,9 +366,10 @@ mod tests {
     }
 
     #[test]
-    fn gemini_stream_url_preserves_raw_unrelated_query_and_fragment() {
+    fn gemini_stream_url_discards_existing_query_and_preserves_fragment() {
         let raw = "https://example.com/v1beta/models/a%2Fb:generateContent?key=a+b&path=%2F&dup=1&dup=2&empty=&flag&alt=json&%61lt=proto&action=:generateContent#section";
-        let expected = "https://example.com/v1beta/models/a%2Fb:streamGenerateContent?key=a+b&path=%2F&dup=1&dup=2&empty=&flag&action=:generateContent&alt=sse#section";
+        let expected =
+            "https://example.com/v1beta/models/a%2Fb:streamGenerateContent?alt=sse#section";
         let configured = Url::parse(raw).expect("valid configured URL");
 
         assert_eq!(
@@ -384,7 +391,10 @@ mod tests {
         let once = normalize_request_url(Protocol::GeminiGenerateContent, &configured, true);
         let twice = normalize_request_url(Protocol::GeminiGenerateContent, &once, true);
 
-        assert_eq!(once.as_str(), raw);
+        assert_eq!(
+            once.as_str(),
+            "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse#fragment"
+        );
         assert_eq!(twice, once);
         assert_eq!(
             normalize_request_url(Protocol::OpenAiChat, &configured, true),
@@ -400,14 +410,28 @@ mod tests {
     }
 
     #[test]
-    fn gemini_stream_url_preserves_empty_segments_inside_a_nonempty_query() {
+    fn gemini_stream_url_discards_empty_query_segments() {
         let configured =
             Url::parse("https://example.com/v1/models/gemini:generateContent?x=1&&alt=json&y=2&")
                 .expect("valid URL with raw empty query segments");
 
         assert_eq!(
             normalize_request_url(Protocol::GeminiGenerateContent, &configured, true).as_str(),
-            "https://example.com/v1/models/gemini:streamGenerateContent?x=1&&y=2&&alt=sse"
+            "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn gemini_stream_url_leaves_custom_paths_unchanged() {
+        for raw in [
+            "https://example.com/custom/generate?alt=json&key=value",
+            "https://example.com/v1/models/gemini:generateContent/?alt=json",
+        ] {
+            let configured = Url::parse(raw).expect("valid custom URL");
+            assert_eq!(
+                normalize_request_url(Protocol::GeminiGenerateContent, &configured, true),
+                configured
+            );
+        }
     }
 }

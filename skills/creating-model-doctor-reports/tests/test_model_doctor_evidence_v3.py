@@ -15,16 +15,16 @@ SCRIPT_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_doctor_log import RETAINED_TEST_IDS, parse_log  # noqa: E402
+from model_doctor_contracts import V3_TEST_IDS  # noqa: E402
+from model_doctor_opencodex_compatibility import (  # noqa: E402
+    COMPATIBILITY_PROFILE,
+)
 from model_doctor_assessment import (  # noqa: E402
     CAPABILITY_SCOPE_BOUNDARY,
     assemble_assessment,
     validate_assessment,
     validate_reviews,
 )
-
-
-V3_TEST_IDS = frozenset(RETAINED_TEST_IDS) | {"046"}
-
 
 def valid_v3_request_metadata() -> dict[str, str]:
     """Return a complete, conformant request-metadata fixture."""
@@ -49,6 +49,7 @@ def build_evidence_log(
     test_ids: Iterable[str] = V3_TEST_IDS,
     request_metadata: Mapping[str, str] | None = None,
     collection_profile: str | None = None,
+    compatibility_profile: str | None = COMPATIBILITY_PROFILE,
     include_request: bool | None = None,
 ) -> str:
     """Build a complete evidence log for parser contract tests."""
@@ -120,12 +121,18 @@ def build_evidence_log(
         if collection_profile is not None
         else ""
     )
+    compatibility_profile_line = (
+        f"compatibility_profile: {compatibility_profile}\n"
+        if is_v3 and compatibility_profile is not None
+        else ""
+    )
     return (
         "========== MODEL DOCTOR RUN ==========\n"
         f"script_version: {script_version}\n"
         "section_encoding: base64\n"
         f"log_schema: {log_schema}\n"
         f"{profile_line}"
+        f"{compatibility_profile_line}"
         f"selected_test_count: {len(selected_ids)}\n"
         f"{request}"
         f"{manifests}"
@@ -345,7 +352,11 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
     def test_v3_tool_pass_guard_rejects_incomplete_stream(self) -> None:
         mutations = (
             ("stream_termination", "timeout", "did not complete its stream"),
-            ("transport_outcome", "timeout", "clean transport EOF"),
+            (
+                "transport_outcome",
+                "timeout",
+                "clean EOF or a valid immediate protocol terminal",
+            ),
             ("stream_end_signal", "none", "terminal signal"),
         )
         for field, value, expected_error in mutations:
@@ -578,11 +589,15 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("official protocol" in error for error in errors), errors)
 
-    def test_parser_accepts_complete_profile_free_v3_with_47_manifests(self) -> None:
+    def test_parser_accepts_exact_v3_profile_with_47_manifests(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())
 
         self.assertEqual(47, len(parsed["tests"]))
         self.assertNotIn("collection_profile", parsed["run"])
+        self.assertEqual(
+            COMPATIBILITY_PROFILE,
+            parsed["run"]["compatibilityProfile"],
+        )
         self.assertEqual(
             "llm-capability-doctor.evidence.v3",
             parsed["run"]["log_schema"],
@@ -605,6 +620,20 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                 self.parse_text_log(
                     build_evidence_log().replace(before, after, 1),
                     f"{name}-count-v3.log",
+                )
+
+    def test_parser_rejects_missing_or_unknown_v3_profile(self) -> None:
+        for name, profile in {
+            "missing": None,
+            "unknown": "opencodex-next",
+        }.items():
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError,
+                "Unsupported or missing compatibility_profile",
+            ):
+                self.parse_text_log(
+                    build_evidence_log(compatibility_profile=profile),
+                    f"{name}-profile-v3.log",
                 )
 
     def test_parser_rejects_v3_missing_046(self) -> None:
@@ -672,6 +701,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         valid_enums = {
             "transport_outcome": (
                 "completed_eof",
+                "protocol_terminated",
                 "timeout",
                 "upstream_disconnect",
                 "client_cancelled",

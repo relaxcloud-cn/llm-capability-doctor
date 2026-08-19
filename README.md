@@ -2,8 +2,9 @@
 
 用于客户现场采集大模型接口能力证据，为判断模型是否满足项目要求提供依据。
 Rust CLI 在现场一次性采集完整请求与响应，生成
-`llm-capability-doctor.evidence.v3` 日志；日志带回分析环境后，由 Model Doctor
-Report Skill 逐项判定并生成 HTML 报告。
+`llm-capability-doctor.evidence.v3` 日志；v3 日志记录
+`compatibility_profile: opencodex-2.7.42-data-format`。日志带回分析环境后，由 Model Doctor
+Report Skill 逐项判定并生成 `llm-capability-doctor.assessment.v7` 和 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
 可以不连接公网，只需能够访问待测模型接口。
@@ -92,8 +93,11 @@ export MODEL_API_KEY
 ./model-capability-doctor --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file "$MODEL_DOCTOR_OUTPUT/your-model-model-doctor.log"
 ```
 
-`--url` 必须是完整模型接口地址。CLI 保留配置的端点；仅在 Gemini 流式请求中将
-`:generateContent` 规范化为 `:streamGenerateContent`，并设置 `alt=sse`。未指定
+`--url` 必须是完整模型接口地址，CLI 通常不会自动补充或改写路径。唯一例外是已识别的
+Google 流式请求：当路径以官方方法 `:generateContent` 或
+`:streamGenerateContent` 结尾时，CLI 会派生 `:streamGenerateContent` 并设置
+`?alt=sse`，且不保留原查询参数。自定义路径（包括方法后的尾随斜杠）保持不变。模型接口 URL 不接受
+fragment，包括空的 `#`。未指定
 `--log-file` 时，日志写入当前目录下的
 `model-doctor-YYYYMMDD-HHMMSS.log`；Unix 平台会将日志权限设置为 `0600`。
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
@@ -129,18 +133,27 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 ```
 
 Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON 和自包含 HTML
-报告，并对每个已采集检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
+报告，并对全部 47 个检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
 协议响应结构，覆盖成功与错误响应以及流式与非流式响应，并逐项列出差异和固定官方
-参考。工具检测同时验证官方协议结构、调用与结果关联以及完整工具闭环。CLI 只负责
-采集证据，不在客户现场给出结论；Skill 也不会自动给出
-整个项目是否可用的总判定，实施人员应将项目必需项与逐项结果进行对照。
+参考。工具检测同时验证官方协议结构、调用与结果关联以及完整工具闭环。报告程序同时给出
+OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个硬门槛是
+002、004、005、006、040、041、043、047；045 仍是增强能力项，不影响该结论。
+
+兼容性只支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和
+Gemini GenerateContent 四类协议。Ollama Chat 仍可被协议探测识别，但会得到
+OpenCodex 数据格式不兼容。历史 v1/v2 日志缺少新合同，结果固定为
+`NOT_ASSESSED`，不会倒推兼容性。流式合同只读取首个 choice/candidate，并将
+OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败；Google
+官方流式方法的查询串固定为 `?alt=sse`。该结论的范围边界是：
+`仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。`
+因此它不是整个项目或完整 ClawOps 运行链路的可用性判定。
 
 一份结构完整的日志可以直接完成一次报告分析。如果日志版本不匹配、结构校验
 失败或采集过程被中断，需要重新执行 CLI 采集，不应让 Skill 猜测缺失证据。
 
 ## 检测范围
 
-47 个检测项覆盖以下能力：
+47 个固定检测项覆盖以下能力：
 
 | 领域 | 主要检查内容 |
 | --- | --- |
@@ -172,7 +185,7 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 
 | 参数 | 说明 |
 | --- | --- |
-| `--url URL` | 完整模型接口 URL；仅 Gemini 流式请求规范化方法后缀并设置 SSE 查询参数。 |
+| `--url URL` | 不含 fragment 的完整模型接口 URL；仅已识别的 Google 官方流式方法会派生 `:streamGenerateContent` 和 `alt=sse`，自定义路径不变。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
 | `--log-file PATH` | 指定 evidence-v3 日志路径。 |
@@ -194,6 +207,7 @@ cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets --all-features --locked
 cargo build --release --locked
+python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 'test_*.py' -v
 ```
 
 测试使用本地模型 fixture 和自签名 HTTPS fixture，不访问真实模型。

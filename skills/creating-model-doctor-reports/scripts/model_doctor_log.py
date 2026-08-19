@@ -22,6 +22,7 @@ from model_doctor_contracts import (
     contract_key,
 )
 from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
+from model_doctor_opencodex_compatibility import COMPATIBILITY_PROFILE
 
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
@@ -353,6 +354,7 @@ V3_REQUEST_FIELDS = (
 )
 TRANSPORT_OUTCOMES = frozenset({
     "completed_eof",
+    "protocol_terminated",
     "timeout",
     "upstream_disconnect",
     "client_cancelled",
@@ -594,6 +596,8 @@ def parse_log(path: Path) -> Dict[str, object]:
         raise ValueError("Missing RUN SUMMARY")
     discovered_test_ids = set(tests)
     if contract == V1_CONTRACT:
+        if "compatibility_profile" in run:
+            raise ValueError("Evidence v1 must not contain compatibility_profile")
         profile = run.get("collection_profile")
         if profile == "full" and discovered_test_ids != LEGACY_TEST_IDS:
             raise ValueError(
@@ -614,13 +618,19 @@ def parse_log(path: Path) -> Dict[str, object]:
     elif contract == V2_CONTRACT:
         if "collection_profile" in run:
             raise ValueError("Evidence v2 must not contain collection_profile")
+        if "compatibility_profile" in run:
+            raise ValueError("Evidence v2 must not contain compatibility_profile")
         if discovered_test_ids != LEGACY_TEST_IDS:
             raise ValueError("Evidence v2 must contain all 46 retained tests")
     else:
         if "collection_profile" in run:
             raise ValueError("Evidence v3 must not contain collection_profile")
+        profile = run.pop("compatibility_profile", None)
+        if profile != COMPATIBILITY_PROFILE:
+            raise ValueError("Unsupported or missing compatibility_profile")
         if discovered_test_ids != V3_TEST_IDS:
             raise ValueError("Evidence v3 must contain all 47 retained tests")
+        run["compatibilityProfile"] = profile
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))

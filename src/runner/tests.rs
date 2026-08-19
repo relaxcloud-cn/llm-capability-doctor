@@ -159,8 +159,10 @@ async fn ordinary_gemini_stream_uses_the_official_stream_endpoint() {
     assert!(
         requests[0]
             .head
-            .contains("key=fixture&&trace=one%2Ftwo&alt=sse")
+            .contains("POST /v1/models/test:streamGenerateContent?alt=sse HTTP/1.1")
     );
+    assert!(!requests[0].head.contains("key=fixture"));
+    assert!(!requests[0].head.contains("trace="));
 }
 
 #[tokio::test]

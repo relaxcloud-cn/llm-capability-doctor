@@ -16,6 +16,10 @@ use crate::evidence::{
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
+const SCRIPT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LOG_SCHEMA: &str = "llm-capability-doctor.evidence.v3";
+const COMPATIBILITY_PROFILE: &str = "opencodex-2.7.42-data-format";
+
 pub struct RunMetadata {
     pub run_id: String,
     pub started_at: DateTime<Local>,
@@ -203,10 +207,14 @@ impl AuditWriter {
     fn write_header(&mut self, metadata: &RunMetadata) -> Result<(), AuditError> {
         writeln!(self.writer, "========== MODEL DOCTOR RUN ==========")?;
         writeln!(self.writer, "run_id: {}", metadata.run_id)?;
-        writeln!(self.writer, "script_version: {}", env!("CARGO_PKG_VERSION"))?;
+        writeln!(self.writer, "script_version: {SCRIPT_VERSION}")?;
         writeln!(self.writer, "collector_runtime: rust")?;
         writeln!(self.writer, "section_encoding: base64")?;
-        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v3")?;
+        writeln!(self.writer, "log_schema: {LOG_SCHEMA}")?;
+        writeln!(
+            self.writer,
+            "compatibility_profile: {COMPATIBILITY_PROFILE}"
+        )?;
         writeln!(
             self.writer,
             "started_at: {}",
@@ -520,6 +528,8 @@ mod tests {
         let output = fs::read_to_string(path).expect("read audit");
         assert!(output.contains("script_version: 0.11.0\n"));
         assert!(output.contains("log_schema: llm-capability-doctor.evidence.v3\n"));
+        assert!(output.contains("compatibility_profile: opencodex-2.7.42-data-format\n"));
+        assert!(!output.contains("collection_profile:"));
     }
 
     #[test]
