@@ -679,6 +679,105 @@ tbody th {
   overflow-wrap: anywhere;
 }
 
+.response-format-comparison {
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.response-format-comparison-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.response-format-comparison-heading h4 {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.response-format-comparison-heading p,
+.response-format-note {
+  margin: 0.2rem 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.response-format-comparison-heading a {
+  flex: 0 0 auto;
+  color: var(--focus);
+  font-size: 12px;
+  text-underline-offset: 0.15em;
+}
+
+.response-format-comparison-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.response-format-panel {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--page);
+}
+
+.response-format-panel h5 {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--line);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.response-format-official h5 {
+  border-top: 2px solid var(--verdict-pass);
+}
+
+.response-format-model h5 {
+  border-top: 2px solid var(--fail);
+}
+
+.response-format-panel h5 span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 400;
+}
+
+.response-format-code {
+  max-height: 320px;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--code);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.format-extra-line {
+  display: block;
+  margin: 0 -0.7rem;
+  padding: 0 0.7rem;
+  color: var(--fail);
+  background: color-mix(in srgb, var(--fail) 9%, transparent);
+  font-weight: 600;
+}
+
+.response-format-note {
+  margin-top: 0.45rem;
+}
+
 .turn-evidence h4 {
   display: flex;
   flex-wrap: wrap;
@@ -774,6 +873,19 @@ pre {
   .failure-analysis-details > div {
     grid-template-columns: minmax(0, 1fr);
     gap: 0.15rem;
+  }
+
+  .response-format-comparison-heading {
+    display: block;
+  }
+
+  .response-format-comparison-heading a {
+    display: inline-block;
+    margin-top: 0.35rem;
+  }
+
+  .response-format-comparison-grid {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .protocol-conformance-counts {
@@ -915,6 +1027,23 @@ pre {
   .general-verdict,
   .logic-item {
     break-inside: avoid;
+  }
+
+  .response-format-comparison {
+    break-inside: auto;
+  }
+
+  .response-format-comparison-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .response-format-panel {
+    overflow: visible;
+  }
+
+  .response-format-code {
+    max-height: none;
+    overflow: visible;
   }
 
   .protocol-request {

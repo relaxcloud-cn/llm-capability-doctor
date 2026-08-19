@@ -35,6 +35,7 @@ from model_doctor_protocol_conformance import (  # noqa: E402
 from model_doctor_html import (  # noqa: E402
     _protocol_difference,
     _request_evidence,
+    _response_format_comparison,
     render_report,
 )
 
@@ -963,6 +964,300 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                     )
                     self.assertIn(f'href="{reference}"', report)
 
+    def test_response_format_comparison_uses_real_response_shape(self) -> None:
+        response_body = "\n\n".join(
+            (
+                "data: " + json.dumps(
+                    {
+                        "id": "chatcmpl-format",
+                        "object": "chat.completion.chunk",
+                        "created": 1,
+                        "model": "fixture-model",
+                        "prompt_text": "prompt",
+                        "<script>alert(1)</script>": True,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {
+                                    "content": "",
+                                    "reasoning": "private reasoning",
+                                },
+                                "finish_reason": None,
+                                "token_ids": [101, 102],
+                            }
+                        ],
+                    }
+                ),
+                "data: [DONE]",
+            )
+        )
+        request = {
+            "request_id": "test-046-turn-1",
+            "protocol": "openai_chat",
+            "stream": "1",
+            "responseBody": response_body,
+        }
+        differences = []
+        for path in (
+            "prompt_text",
+            "<script>alert(1)</script>",
+            "choices/0/delta/reasoning",
+            "choices/0/token_ids",
+        ):
+            differences.append(
+                {
+                    "requestId": "test-046-turn-1",
+                    "protocol": "openai_chat",
+                    "location": f"/events/0/data/{path}",
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "expected": "absent from the pinned official object",
+                    "actual": "present",
+                    "officialReference": "https://example.test/openapi.json",
+                }
+            )
+        result = {
+            "requestId": "test-046-turn-1",
+            "protocol": "openai_chat",
+            "status": "DIFFERENT",
+            "differences": differences,
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        self.assertIn('class="response-format-comparison"', html)
+        self.assertIn('data-format-side="official"', html)
+        self.assertIn('data-format-side="model"', html)
+        self.assertIn("官方 OpenAI Chat 格式", html)
+        self.assertIn("当前模型格式", html)
+        official, model = html.split('data-format-side="model"', 1)
+        self.assertIn("choices", official)
+        self.assertIn("choices", model)
+        for field in ("prompt_text", "reasoning", "token_ids"):
+            with self.subTest(field=field):
+                self.assertNotIn(field, official)
+                self.assertIn(field, model)
+        self.assertIn('data-extra-field="choices[].delta.reasoning"', model)
+        self.assertNotIn("<script>alert(1)</script>", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", model)
+        self.assertNotIn("private reasoning", html)
+
+    def test_response_format_comparison_supports_ollama_ndjson(self) -> None:
+        request = {
+            "request_id": "ollama-turn-1",
+            "protocol": "ollama",
+            "stream": "1",
+            "responseBody": "\n".join(
+                json.dumps(item)
+                for item in (
+                    {
+                        "model": "fixture-model",
+                        "message": {"role": "assistant", "content": "ok"},
+                        "done": False,
+                        "provider_extra": "value",
+                    },
+                    {
+                        "model": "fixture-model",
+                        "message": {"role": "assistant", "content": ""},
+                        "done": True,
+                    },
+                )
+            ),
+        }
+        result = {
+            "requestId": "ollama-turn-1",
+            "protocol": "ollama",
+            "status": "DIFFERENT",
+            "differences": [
+                {
+                    "location": "/records/0/provider_extra",
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "officialReference": "https://example.test/ollama",
+                }
+            ],
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        self.assertIn("官方 Ollama Chat 格式", html)
+        official, model = html.split('data-format-side="model"', 1)
+        self.assertNotIn("provider_extra", official)
+        self.assertIn('data-extra-field="provider_extra"', model)
+
+    def test_response_format_comparison_assembles_multiline_sse_strictly(self) -> None:
+        request = {
+            "request_id": "multiline-sse",
+            "protocol": "openai_chat",
+            "stream": "1",
+            "responseBody": "\n".join(
+                (
+                    "data: NaN",
+                    "",
+                    'data: {"id": "chatcmpl-multiline",',
+                    'data: "provider_extra": true}',
+                    "",
+                    "data: [DONE]",
+                    "",
+                )
+            ),
+        }
+        result = {
+            "requestId": "multiline-sse",
+            "protocol": "openai_chat",
+            "status": "DIFFERENT",
+            "differences": [
+                {
+                    "location": "/events/1/data/provider_extra",
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "officialReference": "https://example.test/openapi.json",
+                }
+            ],
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        official, model = html.split('data-format-side="model"', 1)
+        self.assertNotIn("provider_extra", official)
+        self.assertIn('data-extra-field="provider_extra"', model)
+        self.assertNotIn("&lt;mixed&gt;", html)
+
+    def test_response_format_comparison_renders_empty_string_field_name(self) -> None:
+        request = {
+            "request_id": "empty-key",
+            "protocol": "openai_chat",
+            "stream": "0",
+            "responseBody": json.dumps({"": 1}),
+        }
+        result = {
+            "requestId": "empty-key",
+            "protocol": "openai_chat",
+            "status": "DIFFERENT",
+            "differences": [
+                {
+                    "location": "/",
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "officialReference": "https://example.test/openapi.json",
+                }
+            ],
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        official, model = html.split('data-format-side="model"', 1)
+        self.assertNotIn('&quot;&quot;: &quot;&lt;number&gt;&quot;', official)
+        self.assertIn('&quot;&quot;: &quot;&lt;number&gt;&quot;', model)
+        self.assertIn('data-extra-field="[&quot;&quot;]"', model)
+
+    def test_response_format_comparison_bounds_deep_response_shape(self) -> None:
+        nested = {"leaf": "value"}
+        for _ in range(700):
+            nested = {"nested": nested}
+        request = {
+            "request_id": "deep-response",
+            "protocol": "openai_chat",
+            "stream": "0",
+            "responseBody": json.dumps(
+                {"id": "chatcmpl-deep", "provider_extra": nested}
+            ),
+        }
+        result = {
+            "requestId": "deep-response",
+            "protocol": "openai_chat",
+            "status": "DIFFERENT",
+            "differences": [
+                {
+                    "location": "/provider_extra",
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "officialReference": "https://example.test/openapi.json",
+                }
+            ],
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        self.assertIn('data-extra-field="provider_extra"', html)
+        self.assertIn("&lt;nested&gt;", html)
+
+    def test_response_format_comparison_preserves_exact_special_key_paths(self) -> None:
+        marker_key = "__MODEL_DOCTOR_EXTRA_0000__safe"
+        response = {
+            marker_key: "keep",
+            "0": {"extra": True},
+            "items": [{"extra": True}],
+            "a.b": "remove",
+            "a": {"b": "keep"},
+        }
+        request = {
+            "request_id": "special-paths",
+            "protocol": "openai_chat",
+            "stream": "0",
+            "responseBody": json.dumps(response),
+        }
+        result = {
+            "requestId": "special-paths",
+            "protocol": "openai_chat",
+            "status": "DIFFERENT",
+            "differences": [
+                {
+                    "location": location,
+                    "differenceKind": "UNEXPECTED_FIELD",
+                    "officialReference": "https://example.test/openapi.json",
+                }
+                for location in ("/0/extra", "/items/0/extra", "/a.b")
+            ],
+        }
+
+        html = _response_format_comparison([request], [result])
+
+        official, model = html.split('data-format-side="model"', 1)
+        self.assertIn(marker_key, official)
+        self.assertIn(marker_key, model)
+        self.assertNotIn("&quot;a.b&quot;", official)
+        self.assertIn('data-extra-field="items[].extra"', model)
+        self.assertIn(
+            'data-extra-field="[&quot;0&quot;].extra"',
+            model,
+        )
+        self.assertIn(
+            'data-extra-field="[&quot;a.b&quot;]"',
+            model,
+        )
+        self.assertEqual(3, model.count("data-extra-field="))
+
+    def test_report_places_format_comparison_in_contract_failure_detail(self) -> None:
+        parsed, reviews = self._fixture(second_request_is_different=False)
+        request_id = "request-referenced"
+        response = self._chat_response(request_id)
+        response["prompt_text"] = "prompt"
+        parsed["requests"][request_id]["responseBody"] = json.dumps(response)
+        review = reviews["tests"]["001"]
+        review["reviewedStatus"] = "FAIL"
+        review["conclusion"] = "The response shape differs from the contract."
+        review["failureAnalysis"] = {
+            "failureKind": "CONTRACT_FACET",
+            "evidenceSufficiency": "SUFFICIENT",
+            "supportedClaim": "The response contains an extra field.",
+            "unsupportedClaims": [],
+            "dependsOnTestIds": [],
+            "evidenceRefs": [f"request:{request_id}"],
+        }
+        reviews["capabilitySummary"]["issues"] = [
+            {
+                "title": "Response shape differs",
+                "statement": "The response contains an extra field.",
+                "testRefs": ["001"],
+                "evidenceRefs": [f"request:{request_id}"],
+                "boundary": "This does not identify the server-side cause.",
+            }
+        ]
+
+        report = render_report(assemble_assessment(parsed, reviews), ASSET_DIR)
+
+        detail_start = report.index('id="test-detail-001"')
+        request_start = report.index("请求输入", detail_start)
+        comparison_start = report.index("响应格式对比", detail_start)
+        self.assertLess(comparison_start, request_start)
+        self.assertIn('data-extra-field="prompt_text"', report)
+
     def test_report_conformance_details_are_responsive_and_print_visible(self) -> None:
         parsed, reviews = self._fixture()
         report = render_report(assemble_assessment(parsed, reviews), ASSET_DIR)
@@ -975,6 +1270,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             ".protocol-conformance-counts",
             ".protocol-request",
             ".protocol-differences",
+            ".response-format-comparison-grid",
         ):
             self.assertIn(selector, css)
         mobile = css.split("@media (max-width: 640px)", 1)[1].split(
@@ -983,8 +1279,18 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         printed = css.split("@media print", 1)[1]
         self.assertIn(".protocol-conformance-counts", mobile)
         self.assertIn(".protocol-request", mobile)
+        self.assertIn(".response-format-comparison-grid", mobile)
         self.assertIn(".protocol-request", printed)
         self.assertIn(".protocol-differences", printed)
+        self.assertIn(".response-format-comparison", printed)
+        self.assertRegex(
+            printed,
+            r"\.response-format-code\s*\{[^}]*max-height:\s*none;",
+        )
+        self.assertRegex(
+            printed,
+            r"\.response-format-panel\s*\{[^}]*overflow:\s*visible;",
+        )
 
     def test_report_rejects_legacy_assessment_without_conformance(self) -> None:
         parsed, reviews = self._fixture()

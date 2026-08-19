@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from html import escape
+import json
 from pathlib import Path
-from typing import Iterable, List
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from model_doctor_assessment import validate_assessment
+from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
+from model_doctor_tool_loop_conformance import _ndjson_payloads, _sse_payloads
 
 
 CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
@@ -37,7 +41,16 @@ PROTOCOL_FACT_LABELS = {
     "OLLAMA_CHAT": "Ollama Chat",
     "CUSTOM": "自定义格式",
 }
+PROTOCOL_RESPONSE_LABELS = {
+    "openai_chat": "OpenAI Chat",
+    "openai_responses": "OpenAI Responses",
+    "anthropic": "Anthropic Messages",
+    "gemini": "Gemini GenerateContent",
+    "ollama": "Ollama Chat",
+}
 VERDICT_LEVELS = {"PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"}
+MAX_RESPONSE_SHAPE_DEPTH = 40
+ARRAY_PATH_TOKEN = object()
 
 
 def _e(value: object) -> str:
@@ -575,11 +588,313 @@ def _request_evidence(requests: List[dict]) -> str:
     return "".join(turns)
 
 
-def _test_row_group(item: dict) -> str:
+def _json_pointer_tokens(location: object) -> Tuple[str, ...]:
+    """Return one readable response path without stream-event coordinates."""
+
+    if not isinstance(location, str) or not location.startswith("/"):
+        return ()
+    tokens = tuple(
+        part.replace("~1", "/").replace("~0", "~")
+        for part in location[1:].split("/")
+    )
+    if (
+        len(tokens) >= 3
+        and tokens[0] == "events"
+        and tokens[1].isdigit()
+        and tokens[2] == "data"
+    ):
+        tokens = tokens[3:]
+    elif (
+        len(tokens) >= 2
+        and tokens[0] == "records"
+        and tokens[1].isdigit()
+    ):
+        tokens = tokens[2:]
+    return tokens
+
+
+def _display_json_path(tokens: Sequence[object]) -> str:
+    value = ""
+    for token in tokens:
+        if token is ARRAY_PATH_TOKEN:
+            value += "[]"
+        else:
+            key = str(token)
+            if key.isidentifier():
+                value += f".{key}" if value else key
+            else:
+                value += f"[{json.dumps(key, ensure_ascii=False)}]"
+    return value
+
+
+def _response_documents(request: dict) -> List[object]:
+    body = request.get("responseBody")
+    if not isinstance(body, str) or not body.strip():
+        return []
+    try:
+        return [strict_json_loads(body)]
+    except JSON_LOAD_ERRORS:
+        pass
+
+    if any(
+        line.lstrip().startswith(("data:", "event:", ":"))
+        for line in body.splitlines()
+    ):
+        return [payload for _, payload in _sse_payloads(body)]
+    return list(_ndjson_payloads(body))
+
+
+def _value_shape(value: object, depth: int = 0) -> object:
+    if depth >= MAX_RESPONSE_SHAPE_DEPTH:
+        return "<nested>"
+    if isinstance(value, dict):
+        return {
+            str(key): _value_shape(item, depth + 1)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        if not value:
+            return []
+        merged = _value_shape(value[0], depth + 1)
+        for item in value[1:]:
+            merged = _merge_shapes(merged, _value_shape(item, depth + 1))
+        return [merged]
+    if value is None:
+        return "<null>"
+    if isinstance(value, bool):
+        return "<boolean>"
+    if isinstance(value, (int, float)):
+        return "<number>"
+    if isinstance(value, str):
+        return "<string>"
+    return f"<{type(value).__name__}>"
+
+
+def _merge_shapes(left: object, right: object) -> object:
+    if isinstance(left, dict) and isinstance(right, dict):
+        merged = deepcopy(left)
+        for key, value in right.items():
+            if key in merged:
+                merged[key] = _merge_shapes(merged[key], value)
+            else:
+                merged[key] = deepcopy(value)
+        return merged
+    if isinstance(left, list) and isinstance(right, list):
+        if not left:
+            return deepcopy(right)
+        if not right:
+            return deepcopy(left)
+        return [_merge_shapes(left[0], right[0])]
+    if left == "<null>":
+        return deepcopy(right)
+    if right == "<null>" or left == right:
+        return deepcopy(left)
+    return "<mixed>"
+
+
+def _drop_shape_path(
+    shape: object,
+    tokens: Sequence[str],
+    depth: int = 0,
+) -> None:
+    if depth >= MAX_RESPONSE_SHAPE_DEPTH:
+        return
+    if not tokens:
+        return
+    token = tokens[0]
+    if isinstance(shape, list):
+        if token.isdigit() and shape:
+            _drop_shape_path(shape[0], tokens[1:], depth + 1)
+        return
+    if not isinstance(shape, dict) or token not in shape:
+        return
+    if len(tokens) == 1:
+        del shape[token]
+        return
+    _drop_shape_path(shape[token], tokens[1:], depth + 1)
+
+
+def _canonical_shape_path(
+    shape: object,
+    tokens: Sequence[str],
+) -> Tuple[object, ...]:
+    current = shape
+    canonical: List[object] = []
+    for token in tokens:
+        if isinstance(current, list):
+            if not token.isdigit():
+                canonical.append(token)
+                current = None
+                continue
+            canonical.append(ARRAY_PATH_TOKEN)
+            current = current[0] if current else None
+        elif isinstance(current, dict):
+            canonical.append(token)
+            current = current.get(token)
+        else:
+            canonical.append(token)
+            current = None
+    return tuple(canonical)
+
+
+def _shape_code(shape: object, extra_paths: Set[Tuple[object, ...]]) -> str:
+    rendered: List[str] = []
+
+    def append_line(line: str, path: Tuple[object, ...], highlight: bool) -> None:
+        escaped_line = _e(line)
+        if not highlight:
+            rendered.append(escaped_line)
+            return
+        rendered.append(
+            '<span class="format-extra-line" '
+            f'data-extra-field="{_e(_display_json_path(path))}">'
+            f"{escaped_line}</span>"
+        )
+
+    def render_value(
+        value: object,
+        path: Tuple[object, ...],
+        indent: int,
+        key: Optional[str] = None,
+        last: bool = True,
+    ) -> None:
+        prefix = "  " * indent
+        key_text = (
+            f"{json.dumps(key, ensure_ascii=False)}: "
+            if key is not None
+            else ""
+        )
+        suffix = "" if last else ","
+        highlight = path in extra_paths
+        if isinstance(value, dict):
+            append_line(f"{prefix}{key_text}{{", path, highlight)
+            items = list(value.items())
+            for index, (child_key, child) in enumerate(items):
+                render_value(
+                    child,
+                    path + (child_key,),
+                    indent + 1,
+                    child_key,
+                    index == len(items) - 1,
+                )
+            append_line(f"{prefix}}}{suffix}", path, False)
+            return
+        if isinstance(value, list):
+            append_line(f"{prefix}{key_text}[", path, highlight)
+            if value:
+                render_value(
+                    value[0],
+                    path + (ARRAY_PATH_TOKEN,),
+                    indent + 1,
+                )
+            append_line(f"{prefix}]{suffix}", path, False)
+            return
+        literal = json.dumps(value, ensure_ascii=False)
+        append_line(f"{prefix}{key_text}{literal}{suffix}", path, highlight)
+
+    render_value(shape, (), 0)
+    return "\n".join(rendered)
+
+
+def _response_format_comparison(
+    requests: List[dict],
+    conformance_results: List[dict],
+) -> str:
+    request_by_id = {
+        str(request.get("request_id")): request
+        for request in requests
+        if request.get("request_id")
+    }
+    relevant_results = [
+        result
+        for result in conformance_results
+        if result.get("status") == "DIFFERENT"
+        and str(result.get("requestId")) in request_by_id
+        and result.get("differences")
+    ]
+    if not relevant_results:
+        return ""
+
+    model_shape: object = {}
+    parsed_request_ids = []
+    extra_tokens: Set[Tuple[str, ...]] = set()
+    protocols = []
+    references = []
+    for result in relevant_results:
+        request_id = str(result.get("requestId"))
+        documents = _response_documents(request_by_id[request_id])
+        if documents:
+            parsed_request_ids.append(request_id)
+        for document in documents:
+            model_shape = _merge_shapes(model_shape, _value_shape(document))
+        protocol = result.get("protocol")
+        if isinstance(protocol, str) and protocol not in protocols:
+            protocols.append(protocol)
+        for difference in result.get("differences", []):
+            reference = difference.get("officialReference")
+            if isinstance(reference, str) and reference not in references:
+                references.append(reference)
+            if difference.get("differenceKind") != "UNEXPECTED_FIELD":
+                continue
+            tokens = _json_pointer_tokens(difference.get("location"))
+            if tokens:
+                extra_tokens.add(tokens)
+
+    if not parsed_request_ids or not extra_tokens:
+        return ""
+
+    official_shape = deepcopy(model_shape)
+    for tokens in sorted(extra_tokens):
+        _drop_shape_path(official_shape, tokens)
+    extra_paths = {
+        _canonical_shape_path(model_shape, tokens) for tokens in extra_tokens
+    }
+    protocol_names = [
+        PROTOCOL_RESPONSE_LABELS.get(protocol, protocol) for protocol in protocols
+    ]
+    protocol_name = " / ".join(protocol_names) or "官方协议"
+    reference_link = ""
+    if references:
+        reference_link = (
+            f'<a href="{_e(references[0])}" target="_blank" rel="noreferrer">'
+            "查看官方依据</a>"
+        )
+    return (
+        '<section class="response-format-comparison">'
+        '<div class="response-format-comparison-heading">'
+        '<div><h4>响应格式对比</h4>'
+        f'<p>合并展示本项关联的 {len(parsed_request_ids)} 次真实响应结构。'
+        "红色字段为当前模型实际返回、但官方格式未定义的字段。</p></div>"
+        f"{reference_link}</div>"
+        '<div class="response-format-comparison-grid">'
+        '<article class="response-format-panel response-format-official" '
+        'data-format-side="official">'
+        f'<h5>官方 {_e(protocol_name)} 格式<span>本次涉及的结构</span></h5>'
+        f'<pre class="response-format-code"><code>{_shape_code(official_shape, set())}</code></pre>'
+        "</article>"
+        '<article class="response-format-panel response-format-model" '
+        'data-format-side="model">'
+        f'<h5>当前模型格式<span>多出 {len(extra_paths)} 个字段</span></h5>'
+        f'<pre class="response-format-code"><code>{_shape_code(model_shape, extra_paths)}</code></pre>'
+        "</article>"
+        "</div>"
+        '<p class="response-format-note">这里只比较响应字段结构；完整模型原始返回保留在下方。</p>'
+        "</section>"
+    )
+
+
+def _test_row_group(item: dict, protocol_results: List[dict]) -> str:
     logic = item.get("logic", {})
     test_id = str(item.get("testId", "unknown"))
     detail_id = f"test-detail-{test_id}"
     reviewed = item.get("reviewedStatus", "FAIL")
+    failure = item.get("failureAnalysis", {})
+    format_comparison = ""
+    if reviewed == "FAIL" and failure.get("failureKind") == "CONTRACT_FACET":
+        format_comparison = _response_format_comparison(
+            item.get("requests", []),
+            protocol_results,
+        )
     return (
         f'<tbody class="result-group" data-status="{_e(reviewed)}">'
         f'<tr class="result-row" data-detail-id="{_e(detail_id)}">'
@@ -597,6 +912,7 @@ def _test_row_group(item: dict) -> str:
         "</div></td></tr>"
         f'<tr id="{_e(detail_id)}" class="evidence-row" hidden><td colspan="4">'
         '<div class="evidence-content">'
+        f"{format_comparison}"
         '<section class="logic-item"><h4>检测目的</h4>'
         f'<p>{_e(logic.get("purpose"))}</p></section>'
         '<section class="logic-item"><h4>检测方法</h4>'
@@ -617,11 +933,23 @@ def _test_row_group(item: dict) -> str:
     )
 
 
-def _test_rows(items: List[dict]) -> str:
-    return "".join(_test_row_group(item) for item in items)
+def _test_rows(items: List[dict], conformance_by_check: Dict[str, List[dict]]) -> str:
+    return "".join(
+        _test_row_group(
+            item,
+            conformance_by_check.get(str(item.get("testId")), []),
+        )
+        for item in items
+    )
 
 
-def _result_section(model: object, title: str, section_id: str, items: List[dict]) -> str:
+def _result_section(
+    model: object,
+    title: str,
+    section_id: str,
+    items: List[dict],
+    conformance_by_check: Dict[str, List[dict]],
+) -> str:
     return (
         f'<section class="result-section" aria-labelledby="{_e(section_id)}">'
         f'<h2 id="{_e(section_id)}" class="results-heading">{_e(title)}</h2>'
@@ -629,12 +957,21 @@ def _result_section(model: object, title: str, section_id: str, items: List[dict
         f'<caption>{_e(model)} {_e(title)}</caption>'
         '<colgroup><col><col><col><col></colgroup>'
         '<thead><tr><th>编号</th><th>检测项</th><th>检测结果</th><th>检测结论</th></tr></thead>'
-        f'{_test_rows(items)}'
+        f'{_test_rows(items, conformance_by_check)}'
         '</table></section>'
     )
 
 
-def _result_sections(model: object, categories: List[dict], tests: List[dict]) -> str:
+def _result_sections(
+    model: object,
+    categories: List[dict],
+    tests: List[dict],
+    conformance: dict,
+) -> str:
+    conformance_by_check: Dict[str, List[dict]] = {}
+    for result in conformance.get("results", []):
+        for check_id in result.get("checkIds", []):
+            conformance_by_check.setdefault(str(check_id), []).append(result)
     sections = []
     for index, category in enumerate(categories, start=1):
         name = str(category.get("name") or "未分类")
@@ -645,6 +982,7 @@ def _result_sections(model: object, categories: List[dict], tests: List[dict]) -
                 name,
                 f"category-{index}-results-heading",
                 items,
+                conformance_by_check,
             )
         )
     return "".join(sections)
@@ -679,6 +1017,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     protocol = _observed_protocol(assessment)
     tests = assessment.get("tests", [])
     categories = assessment.get("categories", [])
+    conformance = assessment.get("protocolConformance", {})
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -698,7 +1037,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 
   {_capability_summary(assessment.get('capabilitySummary', {}))}
 
-  {_protocol_conformance(assessment.get('protocolConformance', {}))}
+  {_protocol_conformance(conformance)}
 
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>
@@ -707,7 +1046,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     <tbody>{_category_rows(categories)}</tbody>
   </table>
 
-  {_result_sections(model, categories, tests)}
+  {_result_sections(model, categories, tests, conformance)}
 </main>
 <script>{script}</script>
 </body>
