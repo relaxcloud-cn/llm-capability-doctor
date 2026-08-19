@@ -280,9 +280,10 @@ impl Runner {
     }
 
     fn request_input(&self, request: PlannedRequest) -> RequestInput {
+        let url = resolve_request_url(&self.config.url, request.protocol, request.stream);
         RequestInput {
             request_id: request.id,
-            url: self.config.url.clone(),
+            url,
             protocol: request.protocol,
             auth_mode: request.auth_mode,
             body: request.body.to_bytes(),
@@ -290,6 +291,26 @@ impl Runner {
             api_key: self.config.api_key.expose().to_owned(),
         }
     }
+}
+
+fn resolve_request_url(url: &url::Url, protocol: Protocol, stream: bool) -> url::Url {
+    if protocol != Protocol::GeminiGenerateContent || !stream {
+        return url.clone();
+    }
+
+    let path = url.path();
+    let resolved_path = if let Some(prefix) = path.strip_suffix(":generateContent") {
+        format!("{prefix}:streamGenerateContent")
+    } else if path.ends_with(":streamGenerateContent") {
+        path.to_owned()
+    } else {
+        return url.clone();
+    };
+
+    let mut resolved = url.clone();
+    resolved.set_path(&resolved_path);
+    resolved.set_query(Some("alt=sse"));
+    resolved
 }
 
 fn resolve_log_path(
@@ -326,4 +347,101 @@ pub enum RunnerError {
     Join(#[from] tokio::task::JoinError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use url::Url;
+
+    use super::resolve_request_url;
+    use crate::protocol::Protocol;
+
+    #[test]
+    fn google_streaming_replaces_terminal_generate_content_and_adds_sse() {
+        let url = Url::parse(
+            "https://example.test/v1beta/models/gemini:generateContent?key=value#result",
+        )
+        .unwrap();
+
+        let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+        assert_eq!(
+            resolved.as_str(),
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse#result"
+        );
+    }
+
+    #[test]
+    fn google_streaming_replaces_duplicate_alt_values_once() {
+        let url = Url::parse(
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=json&key=value&alt=other#result",
+        )
+        .unwrap();
+
+        let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+        assert_eq!(
+            resolved.as_str(),
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse#result"
+        );
+    }
+
+    #[test]
+    fn google_streaming_canonicalizes_empty_queries() {
+        for value in [
+            "https://example.test/v1beta/models/gemini:generateContent?",
+            "https://example.test/v1beta/models/gemini:generateContent?&",
+        ] {
+            let url = Url::parse(value).unwrap();
+
+            let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+            assert_eq!(
+                resolved.as_str(),
+                "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse"
+            );
+        }
+    }
+
+    #[test]
+    fn google_streaming_discards_existing_query_components() {
+        let url = Url::parse(
+            "https://example.test/v1beta/models/gemini:generateContent?&&key=%2Fvalue&&alt=json&",
+        )
+        .unwrap();
+
+        let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+        assert_eq!(
+            resolved.as_str(),
+            "https://example.test/v1beta/models/gemini:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn google_streaming_leaves_custom_and_trailing_slash_paths_unchanged() {
+        for value in [
+            "https://example.test/custom/generate?alt=json&key=value#result",
+            "https://example.test/v1beta/models/gemini:generateContent/?alt=json#result",
+        ] {
+            let url = Url::parse(value).unwrap();
+
+            let resolved = resolve_request_url(&url, Protocol::GeminiGenerateContent, true);
+
+            assert_eq!(resolved.as_str(), value);
+        }
+    }
+
+    #[test]
+    fn resolver_leaves_non_stream_and_non_google_urls_unchanged() {
+        let value =
+            "https://example.test/v1beta/models/gemini:generateContent?alt=json&key=value#result";
+        let url = Url::parse(value).unwrap();
+
+        let non_stream = resolve_request_url(&url, Protocol::GeminiGenerateContent, false);
+        let non_google = resolve_request_url(&url, Protocol::OpenAiChat, true);
+
+        assert_eq!(non_stream.as_str(), value);
+        assert_eq!(non_google.as_str(), value);
+    }
 }

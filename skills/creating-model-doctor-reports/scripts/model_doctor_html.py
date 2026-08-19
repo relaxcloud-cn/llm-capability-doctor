@@ -237,6 +237,52 @@ def _general_verdict(summary: dict) -> str:
     )
 
 
+def _opencodex_compatibility(compatibility: dict) -> str:
+    compatibility = compatibility if isinstance(compatibility, dict) else {}
+    level = compatibility.get("level")
+    class_level = (
+        level if level in {"PASS", "FAIL", "NOT_ASSESSED"} else "NOT_ASSESSED"
+    )
+    protocol_family = compatibility.get("protocolFamily")
+    protocol_label = (
+        PROTOCOL_FAMILY_LABELS.get(protocol_family, protocol_family)
+        if isinstance(protocol_family, str)
+        else "未确认"
+    )
+
+    def joined_ids(field: str) -> str:
+        values = compatibility.get(field)
+        if not isinstance(values, list) or not values:
+            return "无"
+        return "、".join(str(value) for value in values)
+
+    details = (
+        ("判定级别", level),
+        ("兼容配置", compatibility.get("profile")),
+        ("协议族", protocol_label),
+        ("必需检测项", joined_ids("requiredTestIds")),
+        ("未通过检测项", joined_ids("failedTestIds")),
+        ("范围边界", compatibility.get("scopeBoundary")),
+    )
+    rendered_details = "".join(
+        f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
+        for label, value in details
+    )
+    return (
+        f'<section class="opencodex-compatibility '
+        f'opencodex-compatibility-{class_level}" '
+        'aria-labelledby="opencodex-compatibility-heading">'
+        '<h2 id="opencodex-compatibility-heading" '
+        'class="opencodex-compatibility-heading">OpenCodex 数据格式兼容性</h2>'
+        f'<p class="opencodex-compatibility-label">'
+        f'{_e(compatibility.get("label"))}</p>'
+        f'<p class="opencodex-compatibility-statement">'
+        f'{_e(compatibility.get("statement"))}</p>'
+        f'<dl class="opencodex-compatibility-details">{rendered_details}</dl>'
+        "</section>"
+    )
+
+
 def _capability_summary(summary: dict) -> str:
     return (
         '<section class="final-conclusion" aria-labelledby="final-conclusion-heading">'
@@ -438,6 +484,8 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 <body>
 <main class="report-shell" aria-label="{_e(model)} 模型能力检测结论与逐项结果">
   {_run_metadata(run, assessment.get('summary', {}))}
+
+  {_opencodex_compatibility(assessment.get('capabilitySummary', {}).get('openCodexCompatibility', {}))}
 
   {_capability_summary(assessment.get('capabilitySummary', {}))}
 

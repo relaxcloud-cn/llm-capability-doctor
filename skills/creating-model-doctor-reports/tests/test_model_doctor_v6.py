@@ -22,7 +22,11 @@ from model_doctor_assessment import (  # noqa: E402
     validate_assessment,
     validate_reviews,
 )
-from model_doctor_html import _verified_facts, render_report  # noqa: E402
+from model_doctor_html import (  # noqa: E402
+    _opencodex_compatibility,
+    _verified_facts,
+    render_report,
+)
 from model_doctor_log import (  # noqa: E402
     RETAINED_TEST_IDS,
     _credential_is_masked,
@@ -57,6 +61,22 @@ def _full_v2_log() -> str:
 
 
 class _MainChildParser(HTMLParser):
+    VOID_ELEMENTS = {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "source",
+        "track",
+        "wbr",
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.stack = []
@@ -66,7 +86,8 @@ class _MainChildParser(HTMLParser):
         if self.stack and self.stack[-1] == "main":
             attributes = dict(attrs)
             self.children.append((tag, attributes.get("class", "")))
-        self.stack.append(tag)
+        if tag not in self.VOID_ELEMENTS:
+            self.stack.append(tag)
 
     def handle_endtag(self, tag: str) -> None:
         if self.stack and self.stack[-1] == tag:
@@ -965,7 +986,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -1447,11 +1468,11 @@ test_manifest_count: 1
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["$id"],
         )
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
@@ -1485,23 +1506,127 @@ test_manifest_count: 1
 
         expected_order = (
             '<section class="run-information"',
+            '<section class="opencodex-compatibility ',
             '<section class="final-conclusion"',
             '<table class="summary-table">',
+            '<section class="result-section"',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
         self.assertTrue(all(position >= 0 for position in positions), positions)
         self.assertEqual(tuple(sorted(positions)), positions)
+        self.assertEqual(1, html.count('<section class="opencodex-compatibility '))
         self.assertEqual(1, html.count('<section class="final-conclusion"'))
         parser = _MainChildParser()
         parser.feed(html)
         self.assertEqual(
             [
                 ("section", "run-information"),
+                (
+                    "section",
+                    "opencodex-compatibility "
+                    "opencodex-compatibility-NOT_ASSESSED",
+                ),
                 ("section", "final-conclusion"),
                 ("table", "summary-table"),
+                ("section", "result-section"),
             ],
-            parser.children[:3],
+            parser.children[:5],
         )
+
+    def test_opencodex_compatibility_renders_all_levels(self) -> None:
+        for level, label in (
+            ("PASS", "OpenCodex 数据格式兼容"),
+            ("FAIL", "OpenCodex 数据格式不兼容"),
+            ("NOT_ASSESSED", "OpenCodex 数据格式未评定"),
+        ):
+            with self.subTest(level=level):
+                html = _opencodex_compatibility(
+                    {
+                        "profile": "opencodex-2.7.42-data-format",
+                        "level": level,
+                        "label": label,
+                        "protocolFamily": "OPENAI_CHAT_COMPLETIONS",
+                        "requiredTestIds": ["002", "004"],
+                        "failedTestIds": [],
+                        "statement": "固定兼容性结论。",
+                        "scopeBoundary": "固定范围边界。",
+                    }
+                )
+
+                self.assertIn(
+                    f'class="opencodex-compatibility '
+                    f'opencodex-compatibility-{level}"',
+                    html,
+                )
+                self.assertIn(label, html)
+                self.assertIn("OpenAI Chat Completions", html)
+                self.assertIn("002、004", html)
+                self.assertIn("<dd>无</dd>", html)
+
+    def test_opencodex_compatibility_escapes_all_dynamic_fields(self) -> None:
+        payloads = {
+            "profile": '<profile data-x="1">profile</profile>',
+            "level": '<level data-x="2">level</level>',
+            "label": '<label data-x="3">label</label>',
+            "protocolFamily": '<protocol data-x="4">protocol</protocol>',
+            "requiredTestIds": ['<required data-x="5">required</required>'],
+            "failedTestIds": ['<failed data-x="6">failed</failed>'],
+            "statement": '<statement data-x="7">statement</statement>',
+            "scopeBoundary": '<scope data-x="8">scope</scope>',
+        }
+
+        html = _opencodex_compatibility(payloads)
+
+        scalar_values = (
+            payloads["profile"],
+            payloads["level"],
+            payloads["label"],
+            payloads["protocolFamily"],
+            payloads["statement"],
+            payloads["scopeBoundary"],
+            payloads["requiredTestIds"][0],
+            payloads["failedTestIds"][0],
+        )
+        for payload in scalar_values:
+            with self.subTest(payload=payload):
+                self.assertNotIn(payload, html)
+                self.assertIn(escape(payload, quote=True), html)
+        self.assertIn(
+            'class="opencodex-compatibility '
+            'opencodex-compatibility-NOT_ASSESSED"',
+            html,
+        )
+        self.assertNotIn('class="<level', html)
+
+    def test_opencodex_compatibility_css_is_responsive_and_print_safe(self) -> None:
+        css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
+        mobile_css = css.split("@media (max-width: 640px)", 1)[1].split(
+            "@media print", 1
+        )[0]
+        print_css = css.split("@media print", 1)[1]
+
+        self.assertIn(".opencodex-compatibility", css)
+        self.assertRegex(
+            css,
+            r"\.opencodex-compatibility-details\s+dd\s*\{[^}]*"
+            r"overflow-wrap:\s*anywhere;",
+        )
+        self.assertRegex(
+            mobile_css,
+            r"\.opencodex-compatibility-details\s*>\s*div\s*\{[^}]*"
+            r"grid-template-columns:\s*minmax\(0,\s*1fr\);",
+        )
+        self.assertRegex(
+            print_css,
+            r"\.opencodex-compatibility\s*\{[^}]*break-inside:\s*avoid;",
+        )
+        for variable, value in {
+            "--verdict-pass": "#18794e",
+            "--verdict-fail": "#b42318",
+            "--verdict-neutral": "#5b6168",
+        }.items():
+            with self.subTest(variable=variable):
+                self.assertIn(f"{variable}: {value};", print_css)
 
     def test_final_conclusion_renders_all_three_fact_rows(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())
@@ -1783,7 +1908,7 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             assessment["schemaVersion"],
         )
         self.assertIn('<section class="final-conclusion"', html)
@@ -1806,7 +1931,7 @@ test_manifest_count: 1
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
-            "llm-capability-doctor.assessment.v6",
+            "llm-capability-doctor.assessment.v7",
             "interfaceProtocol",
             "contextWindow",
             "highestVerifiedInputTokens",
@@ -1818,6 +1943,162 @@ test_manifest_count: 1
             workflow.index("capabilitySummary.verifiedFacts"),
             workflow.index("capabilitySummary.issues"),
         )
+
+    def test_skill_documents_opencodex_contract_and_program_ownership(self) -> None:
+        skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "collector v0.11.0",
+            "llm-capability-doctor.evidence.v3",
+            "compatibility_profile: opencodex-2.7.42-data-format",
+            "llm-capability-doctor.assessment.v7",
+            "openCodexCompatibility",
+            "002、004、005、006、040、041、043、047",
+            "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
+        ):
+            self.assertIn(marker, skill_text)
+        self.assertIn("不得填写 `generalVerdict` 或 `openCodexCompatibility`", skill_text)
+        self.assertIn("v1/v2", skill_text)
+        self.assertIn("NOT_ASSESSED", skill_text)
+
+    def test_evaluation_rules_define_opencodex_v3_format_contract(self) -> None:
+        rules = (SKILL_DIR / "references" / "evaluation-rules.md").read_text(
+            encoding="utf-8"
+        )
+
+        def section(current: str, following: str) -> str:
+            return rules.split(current, 1)[1].split(following, 1)[0]
+
+        for marker in (
+            "collector v0.11.0",
+            "llm-capability-doctor.evidence.v3",
+            "compatibility_profile: opencodex-2.7.42-data-format",
+            "assessment.v7.capabilitySummary.openCodexCompatibility",
+            "002、004、005、006、040、041、043、047",
+            "OPENAI_CHAT_COMPLETIONS",
+            "OPENAI_RESPONSES",
+            "ANTHROPIC_MESSAGES",
+            "GEMINI_GENERATE_CONTENT",
+            "OLLAMA_CHAT",
+            "CUSTOM",
+            "UNKNOWN",
+            "doctor/get_weather",
+            "doctor__get_weather",
+            "response.completed",
+            "message_stop",
+            "finishReason",
+            "usageMetadata",
+            "tool_call_id",
+            "call_id",
+            "tool_use_id",
+            "Google 本地调用 ID",
+        ):
+            self.assertIn(marker, rules)
+        self.assertIn("045 仍是增强能力项", rules)
+        self.assertIn("v1/v2", rules)
+        self.assertIn("NOT_ASSESSED", rules)
+
+        protocol_rules = section("### 002 协议识别", "### 003 鉴权与模型接受")
+        self.assertIn("non-empty root `id`", protocol_rules)
+        self.assertIn('`type:"output_text"`', protocol_rules)
+        self.assertIn("`candidates[0].content.parts[].text`", protocol_rules)
+        self.assertNotIn('`type:"response"`', protocol_rules)
+        self.assertNotIn('`status:"completed"`', protocol_rules)
+
+        sync_rules = section("### 004 同步生成", "### 005 流式生成")
+        self.assertIn("does not require root `type` or `status`", sync_rules)
+        self.assertIn("nested lookalike", sync_rules)
+        self.assertNotIn("incomplete state", sync_rules)
+
+        stream_rules = section("### 005 流式生成", "### 006 流结束完整性")
+        self.assertIn(
+            "OpenAI Responses, Anthropic, and Google accept `data:` with an "
+            "optional following space",
+            stream_rules,
+        )
+        self.assertIn(
+            "Anthropic drops every `data:` frame whose JSON cannot be parsed",
+            stream_rules,
+        )
+        self.assertIn(
+            "malformed JSON `data:` frames for OpenAI Chat, OpenAI Responses, "
+            "and Google record a stream error",
+            stream_rules,
+        )
+        self.assertIn(
+            "OpenAI Chat reads only `choices[0]` and Google reads only "
+            "`candidates[0]`",
+            stream_rules,
+        )
+        self.assertIn(
+            "uses exactly `?alt=sse` and discards any existing query",
+            stream_rules,
+        )
+        self.assertIn("Custom paths remain unchanged", stream_rules)
+
+        terminal_rules = section("### 006 流结束完整性", "### 007 Token usage")
+        self.assertIn("stops parsing at an immediate terminal", terminal_rules)
+        self.assertIn("stops reading later network chunks", terminal_rules)
+        self.assertIn(
+            "may still exist in the raw response evidence but do not participate "
+            "in the stream inspector verdict",
+            terminal_rules,
+        )
+        self.assertNotIn("outside the collected evidence", terminal_rules)
+        self.assertNotIn("content after an immediate terminal", terminal_rules)
+        for marker in (
+            "Chat `length` or `content_filter`",
+            "Anthropic `max_tokens` or `content_filter`",
+            "Google `MAX_TOKENS`, `SAFETY`, `RECITATION`, `BLOCKLIST`, "
+            "`PROHIBITED_CONTENT`, or `SPII`",
+        ):
+            self.assertIn(marker, terminal_rules)
+
+        single_tool_rules = section("### 040 单工具调用", "### 041 工具选择")
+        for marker in (
+            "non-empty `tool_calls[].id`",
+            "non-empty `call_id`",
+            "non-empty `tool_use.id`",
+            "upstream `functionCall.id` is optional",
+        ):
+            self.assertIn(marker, single_tool_rules)
+        self.assertNotIn("Call ID integrity is not judged", single_tool_rules)
+
+        serial_tool_rules = section("### 047 串行工具调用", "### 048 工具结果忠实性")
+        self.assertIn(
+            "OpenAI Responses must use `doctor/get_weather`",
+            serial_tool_rules,
+        )
+        self.assertIn(
+            "OpenAI Chat, Anthropic, and Google must use `doctor__get_weather`",
+            serial_tool_rules,
+        )
+        self.assertIn("second tool remains bare `get_time`", serial_tool_rules)
+
+        concurrency_rules = section("### 057 并发响应时间", "## 13. Security Business Language")
+        self.assertIn("in evidence v2 and v3", concurrency_rules)
+        self.assertNotIn("in evidence v2;", concurrency_rules)
+
+    def test_readme_explains_bounded_opencodex_compatibility_result(self) -> None:
+        readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
+
+        for marker in (
+            "llm-capability-doctor.assessment.v7",
+            "002、004、005、006、040、041、043、047",
+            "OpenAI Chat Completions",
+            "OpenAI Responses",
+            "Anthropic Messages",
+            "Gemini GenerateContent",
+            "首个 choice/candidate",
+            "`response.incomplete`",
+            "`?alt=sse`",
+            "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
+            "python3 -m unittest discover",
+        ):
+            self.assertIn(marker, readme)
+        self.assertIn("46 个固定检测项", readme)
+        self.assertIn("v1/v2", readme)
+        self.assertIn("NOT_ASSESSED", readme)
 
     def test_skill_reviews_example_is_valid_and_evidence_bounded(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

@@ -2,7 +2,17 @@ use std::fmt;
 
 use serde_json::{Value, json};
 
+pub mod stream;
 pub mod tools;
+
+#[cfg(test)]
+mod stream_tests;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+mod tools_tests;
 
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
 
@@ -224,54 +234,71 @@ pub fn matches_response(protocol: Protocol, body: &[u8]) -> bool {
         return false;
     };
     match protocol {
-        Protocol::OpenAiChat => {
-            has_key(&value, "choices") && (has_key(&value, "message") || has_key(&value, "delta"))
-        }
+        Protocol::OpenAiChat => value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(Value::as_object)
+            .is_some_and(|message| non_empty_string(message.get("content"))),
         Protocol::OpenAiResponses => {
-            (value.get("object").and_then(Value::as_str) == Some("response")
-                || has_key(&value, "output"))
-                && (has_key(&value, "output_text")
-                    || has_string(&value, "output_text")
-                    || has_string_prefix(&value, "response."))
+            non_empty_string(value.get("id"))
+                && value
+                    .get("output")
+                    .and_then(Value::as_array)
+                    .is_some_and(|output| {
+                        !output.is_empty()
+                            && output.iter().any(|item| {
+                                item.get("type").and_then(Value::as_str) == Some("message")
+                                    && item.get("content").and_then(Value::as_array).is_some_and(
+                                        |content| {
+                                            content.iter().any(|block| {
+                                                block.get("type").and_then(Value::as_str)
+                                                    == Some("output_text")
+                                                    && non_empty_string(block.get("text"))
+                                            })
+                                        },
+                                    )
+                            })
+                    })
         }
         Protocol::AnthropicMessages => {
             value.get("type").and_then(Value::as_str) == Some("message")
-                && (has_key(&value, "stop_reason") || has_key(&value, "content"))
+                && value
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .is_some_and(|content| {
+                        !content.is_empty()
+                            && content.iter().any(|block| {
+                                block.get("type").and_then(Value::as_str) == Some("text")
+                                    && non_empty_string(block.get("text"))
+                            })
+                    })
         }
-        Protocol::GeminiGenerateContent => {
-            has_key(&value, "candidates") && has_key(&value, "parts")
+        Protocol::GeminiGenerateContent => value
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|candidates| candidates.first())
+            .and_then(|candidate| candidate.get("content"))
+            .and_then(Value::as_object)
+            .and_then(|content| content.get("parts"))
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                !parts.is_empty() && parts.iter().any(|part| non_empty_string(part.get("text")))
+            }),
+        Protocol::OllamaChat => {
+            value
+                .get("message")
+                .and_then(Value::as_object)
+                .is_some_and(|message| non_empty_string(message.get("content")))
+                && value.get("done").and_then(Value::as_bool) == Some(true)
         }
-        Protocol::OllamaChat => has_key(&value, "message") && has_key(&value, "done"),
         Protocol::Unknown => false,
     }
 }
 
-fn has_key(value: &Value, wanted: &str) -> bool {
-    match value {
-        Value::Object(object) => {
-            object.contains_key(wanted) || object.values().any(|child| has_key(child, wanted))
-        }
-        Value::Array(array) => array.iter().any(|child| has_key(child, wanted)),
-        _ => false,
-    }
-}
-
-fn has_string(value: &Value, wanted: &str) -> bool {
-    match value {
-        Value::String(text) => text == wanted,
-        Value::Object(object) => object.values().any(|child| has_string(child, wanted)),
-        Value::Array(array) => array.iter().any(|child| has_string(child, wanted)),
-        _ => false,
-    }
-}
-
-fn has_string_prefix(value: &Value, prefix: &str) -> bool {
-    match value {
-        Value::String(text) => text.starts_with(prefix),
-        Value::Object(object) => object
-            .values()
-            .any(|child| has_string_prefix(child, prefix)),
-        Value::Array(array) => array.iter().any(|child| has_string_prefix(child, prefix)),
-        _ => false,
-    }
+fn non_empty_string(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.is_empty())
 }

@@ -13,6 +13,10 @@ use url::Url;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
+const SCRIPT_VERSION: &str = env!("CARGO_PKG_VERSION");
+const LOG_SCHEMA: &str = "llm-capability-doctor.evidence.v3";
+const COMPATIBILITY_PROFILE: &str = "opencodex-2.7.42-data-format";
+
 pub struct RunMetadata {
     pub run_id: String,
     pub started_at: DateTime<Local>,
@@ -191,10 +195,14 @@ impl AuditWriter {
     fn write_header(&mut self, metadata: &RunMetadata) -> Result<(), AuditError> {
         writeln!(self.writer, "========== MODEL DOCTOR RUN ==========")?;
         writeln!(self.writer, "run_id: {}", metadata.run_id)?;
-        writeln!(self.writer, "script_version: 0.10.0")?;
+        writeln!(self.writer, "script_version: {SCRIPT_VERSION}")?;
         writeln!(self.writer, "collector_runtime: rust")?;
         writeln!(self.writer, "section_encoding: base64")?;
-        writeln!(self.writer, "log_schema: llm-capability-doctor.evidence.v2")?;
+        writeln!(self.writer, "log_schema: {LOG_SCHEMA}")?;
+        writeln!(
+            self.writer,
+            "compatibility_profile: {COMPATIBILITY_PROFILE}"
+        )?;
         writeln!(
             self.writer,
             "started_at: {}",
@@ -416,4 +424,44 @@ fn open_private_file(path: &Path) -> std::io::Result<File> {
         .truncate(true)
         .write(true)
         .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::{Local, TimeZone};
+    use tempfile::tempdir;
+    use url::Url;
+
+    use super::{AuditWriter, RunMetadata};
+    use crate::redaction::Redactor;
+
+    #[test]
+    fn audit_header_declares_evidence_v3_compatibility_contract() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("audit.log");
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let metadata = RunMetadata {
+            run_id: "MD-test".to_owned(),
+            started_at: Local.with_ymd_and_hms(2026, 8, 18, 9, 30, 0).unwrap(),
+            url: url.clone(),
+            model: "test-model".to_owned(),
+            masked_api_key: "****".to_owned(),
+            selected_test_count: 46,
+            insecure: false,
+        };
+
+        let audit = AuditWriter::create(&path, metadata, Redactor::new("secret", &url)).unwrap();
+        drop(audit);
+        let contents = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+
+        assert!(lines.contains(&"script_version: 0.11.0"));
+        assert!(lines.contains(&"log_schema: llm-capability-doctor.evidence.v3"));
+        assert!(lines.contains(&"compatibility_profile: opencodex-2.7.42-data-format"));
+        assert!(
+            !lines
+                .iter()
+                .any(|line| line.starts_with("collection_profile:"))
+        );
+    }
 }

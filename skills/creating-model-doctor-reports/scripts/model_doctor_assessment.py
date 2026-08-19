@@ -10,11 +10,14 @@ import re
 from typing import Dict, List
 
 from model_doctor_general_verdict import derive_general_verdict
+from model_doctor_opencodex_compatibility import (
+    derive_opencodex_compatibility,
+)
 from model_doctor_verified_facts import validate_verified_facts
 
 
 REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v2"
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v6"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v7"
 STATUSES = {"PASS", "FAIL"}
 FAILURE_KINDS = {
     "DIRECT",
@@ -57,7 +60,8 @@ REVIEW_CAPABILITY_SUMMARY_FIELDS = {
     "scopeBoundary",
 }
 ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
-    "generalVerdict"
+    "generalVerdict",
+    "openCodexCompatibility",
 }
 CAPABILITY_ISSUE_FIELDS = {
     "title",
@@ -173,6 +177,9 @@ def _evidence_ref_belongs_to_test(
 def _validate_parsed_structure(parsed: object) -> List[str]:
     if not isinstance(parsed, dict):
         return ["Parsed evidence must be an object"]
+    run = parsed.get("run")
+    if not isinstance(run, dict):
+        return ["Parsed run must be an object"]
     tests = parsed.get("tests")
     if not isinstance(tests, dict):
         return ["Parsed tests must be an object keyed by test ID"]
@@ -581,8 +588,19 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         items.append(item)
 
     capability_summary = deepcopy(reviews["capabilitySummary"])
-    capability_summary["generalVerdict"] = derive_general_verdict(
-        {item["testId"]: item["reviewedStatus"] for item in items}
+    statuses = {
+        item["testId"]: item["reviewedStatus"] for item in items
+    }
+    capability_summary["generalVerdict"] = derive_general_verdict(statuses)
+    protocol_family = capability_summary["verifiedFacts"]["interfaceProtocol"][
+        "family"
+    ]
+    capability_summary["openCodexCompatibility"] = (
+        derive_opencodex_compatibility(
+            parsed.get("run", {}),
+            statuses,
+            protocol_family,
+        )
     )
 
     return {
@@ -735,7 +753,11 @@ def _validate_assessment_failure_analysis(
     return errors
 
 
-def _validate_assessment_summary(items: List[dict], summary: object) -> List[str]:
+def _validate_assessment_summary(
+    items: List[dict],
+    summary: object,
+    run: object,
+) -> List[str]:
     errors: List[str] = []
     if not isinstance(summary, dict):
         return ["capabilitySummary must be an object"]
@@ -757,6 +779,28 @@ def _validate_assessment_summary(items: List[dict], summary: object) -> List[str
             errors.append(
                 "capabilitySummary generalVerdict does not match test statuses"
             )
+    verified_facts = summary.get("verifiedFacts")
+    interface_protocol = (
+        verified_facts.get("interfaceProtocol")
+        if isinstance(verified_facts, dict)
+        else None
+    )
+    protocol_family = (
+        interface_protocol.get("family")
+        if isinstance(interface_protocol, dict)
+        and isinstance(interface_protocol.get("family"), str)
+        else "UNKNOWN"
+    )
+    expected_compatibility = derive_opencodex_compatibility(
+        run if isinstance(run, dict) else {},
+        statuses,
+        protocol_family,
+    )
+    if summary.get("openCodexCompatibility") != expected_compatibility:
+        errors.append(
+            "capabilitySummary openCodexCompatibility does not match run "
+            "metadata, protocol family, and test statuses"
+        )
     if not _non_empty_string(summary.get("headline")):
         errors.append("capabilitySummary headline is required")
     elif _contains_readiness_decision(summary.get("headline")):
@@ -946,7 +990,7 @@ def validate_assessment(assessment: object) -> List[str]:
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test assessment.v6 contract"
+                    "the per-test assessment.v7 contract"
                 )
         logic = item.get("logic")
         if not isinstance(logic, dict):
@@ -981,10 +1025,11 @@ def validate_assessment(assessment: object) -> List[str]:
         _validate_assessment_summary(
             valid_items,
             assessment.get("capabilitySummary"),
+            run,
         )
     )
     if "overall" in assessment:
-        errors.append("overall is not part of the assessment.v6 contract")
+        errors.append("overall is not part of the assessment.v7 contract")
     if isinstance(source, dict) and "path" in source:
         errors.append("source must not expose an absolute path")
     return errors

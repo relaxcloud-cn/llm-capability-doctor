@@ -23,6 +23,12 @@ from model_doctor_assessment import (  # noqa: E402
 )
 from model_doctor_log import RETAINED_TEST_IDS  # noqa: E402
 from model_doctor_html import _capability_summary  # noqa: E402
+from model_doctor_opencodex_compatibility import (  # noqa: E402
+    COMPATIBILITY_PROFILE,
+    REQUIRED_TEST_IDS,
+    SCOPE_BOUNDARY as OPENCODEX_SCOPE_BOUNDARY,
+    derive_opencodex_compatibility,
+)
 
 
 class GeneralVerdictTests(unittest.TestCase):
@@ -236,6 +242,39 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         }
         return parsed, authored_reviews
 
+    def _v3_fixture(
+        self,
+        statuses: dict[str, str] | None = None,
+        family: str = "OPENAI_CHAT_COMPLETIONS",
+    ) -> tuple[dict, dict]:
+        final_statuses = statuses or {
+            test_id: "PASS" for test_id in RETAINED_TEST_IDS
+        }
+        parsed, reviews = self._fixture(final_statuses)
+        parsed["run"].update(
+            {
+                "log_schema": "llm-capability-doctor.evidence.v3",
+                "script_version": "0.11.0",
+                "compatibilityProfile": COMPATIBILITY_PROFILE,
+            }
+        )
+        parsed["requests"]["protocol"] = {
+            "request_id": "protocol",
+            "metrics": {},
+        }
+        parsed["tests"]["002"]["requestRefs"] = ["protocol"]
+        reviews["tests"]["002"]["evidenceRefs"] = ["request:protocol"]
+        reviews["capabilitySummary"]["verifiedFacts"]["interfaceProtocol"] = {
+            "evidenceState": "VERIFIED",
+            "family": family,
+            "requestFormat": "OpenCodex 协议请求格式。",
+            "responseFormat": "OpenCodex 协议响应格式。",
+            "statement": "本轮已验证接口协议。",
+            "evidenceRefs": ["request:protocol"],
+            "boundary": "仅覆盖本轮模型端接口。",
+        }
+        return parsed, reviews
+
     def test_assembler_injects_general_verdict_without_mutating_reviews(self) -> None:
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
         for test_id in ("017", "018", "020", "024", "035", "036"):
@@ -250,6 +289,139 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             assessment["capabilitySummary"]["generalVerdict"],
         )
         self.assertEqual([], validate_assessment(assessment))
+
+    def test_assembler_injects_v3_opencodex_compatibility_without_mutating_reviews(
+        self,
+    ) -> None:
+        parsed, reviews = self._v3_fixture()
+        original_reviews = deepcopy(reviews)
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        statuses = {
+            item["testId"]: item["reviewedStatus"]
+            for item in assessment["tests"]
+        }
+        expected = derive_opencodex_compatibility(
+            assessment["run"],
+            statuses,
+            "OPENAI_CHAT_COMPLETIONS",
+        )
+        self.assertEqual(
+            expected,
+            assessment["capabilitySummary"]["openCodexCompatibility"],
+        )
+        self.assertEqual("PASS", expected["level"])
+        self.assertEqual(original_reviews, reviews)
+        self.assertEqual([], validate_assessment(assessment))
+
+    def test_old_evidence_assembles_not_assessed_compatibility(self) -> None:
+        parsed, reviews = self._fixture({"001": "PASS"})
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        compatibility = assessment["capabilitySummary"][
+            "openCodexCompatibility"
+        ]
+        self.assertEqual("NOT_ASSESSED", compatibility["level"])
+        self.assertEqual([], compatibility["failedTestIds"])
+        self.assertEqual([], validate_assessment(assessment))
+
+    def test_v3_required_failure_assembles_failed_compatibility(self) -> None:
+        statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
+        statuses["004"] = "FAIL"
+        parsed, reviews = self._v3_fixture(statuses)
+
+        assessment = assemble_assessment(parsed, reviews)
+
+        compatibility = assessment["capabilitySummary"][
+            "openCodexCompatibility"
+        ]
+        self.assertEqual("FAIL", compatibility["level"])
+        self.assertEqual(["004"], compatibility["failedTestIds"])
+        self.assertEqual([], validate_assessment(assessment))
+
+    def test_reviews_cannot_author_opencodex_compatibility(self) -> None:
+        parsed, reviews = self._fixture({"001": "PASS"})
+        reviews["capabilitySummary"]["openCodexCompatibility"] = {}
+
+        self.assertIn(
+            "capabilitySummary field openCodexCompatibility is not allowed",
+            validate_reviews(parsed, reviews),
+        )
+
+    def test_reviews_reject_non_object_parsed_run_before_assembly(self) -> None:
+        parsed, reviews = self._fixture({"001": "PASS"})
+        parsed["run"] = []
+
+        self.assertIn("Parsed run must be an object", validate_reviews(parsed, reviews))
+        with self.assertRaisesRegex(ValueError, "Parsed run must be an object"):
+            assemble_assessment(parsed, reviews)
+
+    def test_assessment_rejects_every_tampered_opencodex_field(self) -> None:
+        parsed, reviews = self._v3_fixture()
+        assessment = assemble_assessment(parsed, reviews)
+        invalid_values = {
+            "profile": "opencodex-next",
+            "level": "FAIL",
+            "label": "人工改写标签",
+            "protocolFamily": "OLLAMA_CHAT",
+            "requiredTestIds": ["002"],
+            "failedTestIds": ["002"],
+            "statement": "人工改写结论。",
+            "scopeBoundary": "人工扩大范围。",
+        }
+
+        for field, invalid_value in invalid_values.items():
+            with self.subTest(field=field):
+                tampered = deepcopy(assessment)
+                tampered["capabilitySummary"]["openCodexCompatibility"][
+                    field
+                ] = invalid_value
+                self.assertIn(
+                    "capabilitySummary openCodexCompatibility does not match "
+                    "run metadata, protocol family, and test statuses",
+                    validate_assessment(tampered),
+                )
+
+    def test_assessment_recomputes_opencodex_compatibility_from_sources(self) -> None:
+        parsed, reviews = self._v3_fixture()
+        assessment = assemble_assessment(parsed, reviews)
+        mutations = (
+            lambda value: value["run"].update(
+                {"compatibilityProfile": "opencodex-next"}
+            ),
+            lambda value: next(
+                item for item in value["tests"] if item["testId"] == "002"
+            ).update({"reviewedStatus": "FAIL"}),
+            lambda value: value["capabilitySummary"]["verifiedFacts"][
+                "interfaceProtocol"
+            ].update({"family": "OLLAMA_CHAT"}),
+        )
+
+        for mutate in mutations:
+            with self.subTest(mutate=mutate):
+                tampered = deepcopy(assessment)
+                mutate(tampered)
+                self.assertIn(
+                    "capabilitySummary openCodexCompatibility does not match "
+                    "run metadata, protocol family, and test statuses",
+                    validate_assessment(tampered),
+                )
+
+    def test_assessment_validation_handles_non_object_run(self) -> None:
+        parsed, reviews = self._v3_fixture()
+        assessment = assemble_assessment(parsed, reviews)
+        assessment["run"] = []
+
+        errors = validate_assessment(assessment)
+
+        self.assertIn("run must be an object", errors)
+        self.assertIn(
+            "capabilitySummary openCodexCompatibility does not match run metadata, "
+            "protocol family, and test statuses",
+            errors,
+        )
 
     def test_reviews_cannot_author_general_verdict(self) -> None:
         parsed, reviews = self._fixture({"001": "PASS"})
@@ -320,6 +492,74 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             ["PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"],
             verdict_schema["properties"]["level"]["enum"],
         )
+
+    def test_assessment_schema_requires_closed_opencodex_compatibility(self) -> None:
+        schema = json.loads(
+            (SKILL_DIR / "references" / "assessment-schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual("llm-capability-doctor.assessment.v7", schema["$id"])
+        summary_schema = schema["$defs"]["capabilitySummary"]
+        self.assertIn("openCodexCompatibility", summary_schema["required"])
+        self.assertEqual(
+            {"$ref": "#/$defs/openCodexCompatibility"},
+            summary_schema["properties"]["openCodexCompatibility"],
+        )
+        compatibility_schema = schema["$defs"]["openCodexCompatibility"]
+        self.assertFalse(compatibility_schema["additionalProperties"])
+        self.assertEqual(
+            {
+                "profile",
+                "level",
+                "label",
+                "protocolFamily",
+                "requiredTestIds",
+                "failedTestIds",
+                "statement",
+                "scopeBoundary",
+            },
+            set(compatibility_schema["required"]),
+        )
+        properties = compatibility_schema["properties"]
+        self.assertEqual(COMPATIBILITY_PROFILE, properties["profile"]["const"])
+        self.assertEqual(
+            list(REQUIRED_TEST_IDS),
+            properties["requiredTestIds"]["const"],
+        )
+        self.assertEqual(
+            OPENCODEX_SCOPE_BOUNDARY,
+            properties["scopeBoundary"]["const"],
+        )
+        self.assertEqual(
+            ["PASS", "FAIL", "NOT_ASSESSED"],
+            properties["level"]["enum"],
+        )
+        self.assertEqual(
+            [
+                "OpenCodex 数据格式兼容",
+                "OpenCodex 数据格式不兼容",
+                "OpenCodex 数据格式未评定",
+            ],
+            properties["label"]["enum"],
+        )
+        self.assertEqual(
+            [
+                "OPENAI_CHAT_COMPLETIONS",
+                "OPENAI_RESPONSES",
+                "ANTHROPIC_MESSAGES",
+                "GEMINI_GENERATE_CONTENT",
+                "OLLAMA_CHAT",
+                "CUSTOM",
+                "UNKNOWN",
+            ],
+            properties["protocolFamily"]["enum"],
+        )
+        failed_ids = properties["failedTestIds"]
+        self.assertEqual(list(REQUIRED_TEST_IDS), failed_ids["items"]["enum"])
+        self.assertTrue(failed_ids["uniqueItems"])
+        self.assertEqual(8, failed_ids["maxItems"])
 
 
 class GeneralVerdictHtmlTests(unittest.TestCase):
