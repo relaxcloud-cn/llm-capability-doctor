@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-use super::Protocol;
+use crate::protocol::Protocol;
 
 pub(crate) const MAX_SSE_RECORD_BYTES: usize = 1024 * 1024;
 const MAX_SSE_DELIMITER_BYTES: usize = 4;

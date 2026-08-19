@@ -9,7 +9,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = concat!("Model Capability Doctor ", env!("CARGO_PKG_VERSION"), " - Run all 46 checks"),
+    about = concat!("Model Capability Doctor ", env!("CARGO_PKG_VERSION"), " - Run all 47 checks"),
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -33,7 +33,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
-    /// Print the 46-item core catalog and exit.
+    /// Print the 47-item catalog and exit.
     #[arg(long)]
     pub list_tests: bool,
 

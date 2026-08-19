@@ -195,12 +195,12 @@ def _general_verdict(summary: dict) -> str:
     if level == "NOT_ASSESSED":
         result_value = (
             f'已采集 {verdict.get("collectedTests", 0)}/'
-            f'{verdict.get("totalTests", 46)}'
+            f'{verdict.get("totalTests", 0)}'
         )
     else:
         result_value = (
             f'{verdict.get("passedTests", 0)}/'
-            f'{verdict.get("totalTests", 46)} 通过'
+            f'{verdict.get("totalTests", 0)} 通过'
         )
 
     protocol_value = "未确认"
@@ -294,6 +294,192 @@ def _capability_summary(summary: dict) -> str:
     )
 
 
+def _protocol_metric_counts(summary: dict) -> str:
+    fields = (
+        ("totalRequests", "请求总数"),
+        ("checkedRequests", "已检查"),
+        ("consistentRequests", "完全一致"),
+        ("differentRequests", "存在差异"),
+    )
+    values = "".join(
+        f'<div data-metric="{_e(field)}"><dt>{_e(label)}</dt>'
+        f'<dd>{_e(summary.get(field, 0))}</dd></div>'
+        for field, label in fields
+    )
+    return f'<dl class="protocol-conformance-counts">{values}</dl>'
+
+
+def _protocol_baselines(baselines: List[dict]) -> str:
+    rows = []
+    for baseline in baselines:
+        source_url = baseline.get("sourceUrl")
+        supporting = baseline.get("supportingReferences", [])
+        supporting_links = "".join(
+            '<li><a href="{}" target="_blank" rel="noreferrer">{}</a></li>'.format(
+                _e(reference),
+                _e(reference),
+            )
+            for reference in supporting
+        )
+        rows.append(
+            '<div class="protocol-baseline">'
+            '<dl class="protocol-baseline-fields">'
+            f'<div><dt>协议</dt><dd>{_e(baseline.get("protocol"))}</dd></div>'
+            f'<div><dt>官方版本</dt><dd>{_e(baseline.get("officialVersion"))}</dd></div>'
+            f'<div><dt>基线日期</dt><dd>{_e(baseline.get("referenceDate"))}</dd></div>'
+            '<div><dt>官方来源</dt><dd>'
+            f'<a href="{_e(source_url)}" target="_blank" rel="noreferrer">'
+            f'{_e(source_url)}</a></dd></div>'
+            "</dl>"
+            '<details class="protocol-supporting-references" open>'
+            "<summary>补充官方引用</summary>"
+            f"<ul>{supporting_links}</ul>"
+            "</details>"
+            "</div>"
+        )
+    return (
+        '<details class="protocol-baselines" open>'
+        "<summary>固定官方基线</summary>"
+        f'<div class="protocol-baseline-list">{"".join(rows)}</div>'
+        "</details>"
+    )
+
+
+def _protocol_group(name: str, items: List[dict]) -> str:
+    specs = {
+        "byProtocol": (
+            "按协议",
+            (("protocol", "协议"), ("totalRequests", "请求"),
+             ("consistentRequests", "一致"), ("differentRequests", "差异")),
+        ),
+        "byCheck": (
+            "按检测项",
+            (("checkId", "检测项"), ("totalRequests", "请求"),
+             ("consistentRequests", "一致"), ("differentRequests", "差异")),
+        ),
+        "byDifferenceKind": (
+            "按差异类型",
+            (("differenceKind", "差异类型"), ("count", "数量")),
+        ),
+    }
+    title, fields = specs[name]
+    rows = []
+    for item in items:
+        values = "".join(
+            f"<div><dt>{_e(label)}</dt><dd>{_e(item.get(field))}</dd></div>"
+            for field, label in fields
+        )
+        rows.append(f'<dl class="protocol-group-item">{values}</dl>')
+    content = (
+        "".join(rows)
+        if rows
+        else '<p class="muted">本轮没有对应分组数据。</p>'
+    )
+    return (
+        f'<details class="protocol-group" data-group="{_e(name)}" open>'
+        f"<summary>{_e(title)}</summary>"
+        f'<div class="protocol-group-items">{content}</div>'
+        "</details>"
+    )
+
+
+def _protocol_difference(difference: dict) -> str:
+    reference = difference.get("officialReference")
+    rows = (
+        ("requestId", "请求 ID", difference.get("requestId")),
+        ("protocol", "协议", difference.get("protocol")),
+        ("location", "位置", difference.get("location")),
+        ("differenceKind", "差异类型", difference.get("differenceKind")),
+        ("expected", "官方结构", difference.get("expected")),
+        ("actual", "实际结构", difference.get("actual")),
+    )
+    fields = "".join(
+        f'<div data-field="{_e(field)}"><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>'
+        for field, label, value in rows
+    )
+    return (
+        '<div class="protocol-difference">'
+        f'<dl class="protocol-difference-fields">{fields}'
+        '<div data-field="officialReference"><dt>官方引用</dt><dd>'
+        f'<a href="{_e(reference)}" target="_blank" rel="noreferrer">'
+        f'{_e(reference)}</a></dd></div></dl>'
+        "</div>"
+    )
+
+
+def _protocol_request(result: dict) -> str:
+    request_id = result.get("requestId")
+    status = result.get("status")
+    status_class = "consistent" if status == "CONSISTENT" else "different"
+    check_ids = result.get("checkIds", [])
+    check_ids_text = "、".join(str(value) for value in check_ids) or "无"
+    stream_text = "true" if result.get("stream") is True else "false"
+    http_status = result.get("httpStatus")
+    http_status_text = http_status if http_status is not None else "未记录"
+    fields = (
+        ("requestId", "请求 ID", request_id),
+        ("protocol", "协议", result.get("protocol") or "未记录"),
+        ("checkIds", "关联检测项", check_ids_text),
+        ("stream", "流式", stream_text),
+        ("httpStatus", "HTTP 状态", http_status_text),
+        ("status", "结构结论", status),
+    )
+    metadata = "".join(
+        f'<div data-field="{_e(field)}"><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>'
+        for field, label, value in fields
+    )
+    differences = result.get("differences", [])
+    difference_content = (
+        "".join(_protocol_difference(item) for item in differences)
+        if differences
+        else '<p class="muted">未发现与固定官方结构的差异。</p>'
+    )
+    return (
+        f'<details class="protocol-request protocol-request-{status_class}" '
+        f'data-request-id="{_e(request_id)}" open>'
+        "<summary>"
+        f'<span class="protocol-request-id">{_e(request_id)}</span>'
+        f'<span class="protocol-request-status">{_e(status)}</span>'
+        "</summary>"
+        f'<dl class="protocol-request-fields">{metadata}</dl>'
+        '<div class="protocol-differences">'
+        "<h4>结构差异</h4>"
+        f"{difference_content}"
+        "</div>"
+        "</details>"
+    )
+
+
+def _protocol_conformance(conformance: dict) -> str:
+    summary = conformance.get("summary", {})
+    groupings = "".join(
+        _protocol_group(name, summary.get(name, []))
+        for name in ("byProtocol", "byCheck", "byDifferenceKind")
+    )
+    requests = "".join(
+        _protocol_request(result) for result in conformance.get("results", [])
+    )
+    if not requests:
+        requests = '<p class="muted">本轮没有原始请求记录。</p>'
+    return (
+        '<section class="protocol-conformance" '
+        'aria-labelledby="protocol-conformance-heading">'
+        '<h2 id="protocol-conformance-heading" class="protocol-conformance-heading">'
+        "官方协议结构一致性</h2>"
+        '<p class="protocol-conformance-meta">'
+        f'规则集：{_e(conformance.get("ruleSetVersion"))} · '
+        f'基线日期：{_e(conformance.get("baselineDate"))}</p>'
+        f"{_protocol_metric_counts(summary)}"
+        f'{_protocol_baselines(conformance.get("baselines", []))}'
+        '<div class="protocol-groupings" aria-label="一致性分组统计">'
+        f"{groupings}</div>"
+        '<div class="protocol-request-list">'
+        "<h3>逐请求结构检查</h3>"
+        f"{requests}</div>"
+        "</section>"
+    )
+
+
 def _failure_analysis(item: dict) -> str:
     if item.get("reviewedStatus") != "FAIL":
         return ""
@@ -334,6 +520,18 @@ def _request_evidence(requests: List[dict]) -> str:
     turns = []
     for index, request in enumerate(requests, start=1):
         metrics = request.get("metrics", {})
+        v3_metadata = tuple(
+            f"{field}={request[field]}"
+            for field in (
+                "transport_outcome",
+                "stream_termination",
+                "stream_end_signal",
+                "tool_contract_status",
+                "tool_loop_turn",
+                "tool_loop_outcome",
+            )
+            if field in request
+        )
         meta = " · ".join(
             value
             for value in (
@@ -347,6 +545,7 @@ def _request_evidence(requests: List[dict]) -> str:
                 else "",
                 f"{metrics.get('time_total')}s" if metrics.get("time_total") else "",
                 f"{metrics.get('size_download')} bytes" if metrics.get("size_download") else "",
+                *v3_metadata,
             )
             if value
         )
@@ -354,6 +553,15 @@ def _request_evidence(requests: List[dict]) -> str:
         if request.get("stderr"):
             output_parts.append("curl stderr:\n" + str(request["stderr"]))
         output = "\n\n".join(part for part in output_parts if part)
+        tool_contract_errors = request.get("tool_contract_errors_json")
+        rendered_tool_contract_errors = ""
+        if tool_contract_errors not in (None, "", "[]"):
+            rendered_tool_contract_errors = (
+                '<div class="tool-contract-errors">'
+                "<h5>tool_contract_errors_json</h5>"
+                f"<pre><code>{_e(tool_contract_errors)}</code></pre>"
+                "</div>"
+            )
         turns.append(
             '<section class="turn-evidence">'
             f'<h4>Turn {index}<span>{_e(meta)}</span></h4>'
@@ -361,6 +569,7 @@ def _request_evidence(requests: List[dict]) -> str:
             f"<pre><code>{_e(request.get('requestBody'))}</code></pre>"
             "<h5>请求输出</h5>"
             f"<pre><code>{_e(output)}</code></pre>"
+            f"{rendered_tool_contract_errors}"
             "</section>"
         )
     return "".join(turns)
@@ -488,6 +697,8 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
   {_opencodex_compatibility(assessment.get('capabilitySummary', {}).get('openCodexCompatibility', {}))}
 
   {_capability_summary(assessment.get('capabilitySummary', {}))}
+
+  {_protocol_conformance(assessment.get('protocolConformance', {}))}
 
   <table class="summary-table">
     <caption>{_e(model)} · {_e(protocol)} 能力域总结</caption>

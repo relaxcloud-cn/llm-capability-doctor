@@ -12,6 +12,7 @@ SCRIPT_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_doctor_log import RETAINED_TEST_IDS, parse_log  # noqa: E402
+from model_doctor_contracts import V3_TEST_IDS  # noqa: E402
 from model_doctor_opencodex_compatibility import (  # noqa: E402
     COMPATIBILITY_PROFILE,
     REQUIRED_TEST_IDS,
@@ -41,29 +42,38 @@ EXPECTED_FIELDS = {
 def _full_log(
     schema: str = "llm-capability-doctor.evidence.v3",
     version: str = "0.11.0",
-    profile_line: str = (
-        "compatibility_profile: opencodex-2.7.42-data-format\n"
-    ),
+    compatibility_profile: str | None = COMPATIBILITY_PROFILE,
 ) -> str:
+    test_ids = (
+        V3_TEST_IDS
+        if schema == "llm-capability-doctor.evidence.v3"
+        else RETAINED_TEST_IDS
+    )
     manifests = "".join(
         "========== TEST-{0} BEGIN ==========\n"
         "name: fixture-{0}\n"
         "category: fixture\n"
         "request_refs: \n"
         "========== TEST-{0} END ==========\n".format(test_id)
-        for test_id in sorted(RETAINED_TEST_IDS)
+        for test_id in sorted(test_ids)
     )
+    profile_line = (
+        f"compatibility_profile: {compatibility_profile}\n"
+        if compatibility_profile is not None
+        else ""
+    )
+    test_count = len(test_ids)
     return (
         "========== MODEL DOCTOR RUN ==========\n"
         f"script_version: {version}\n"
         "section_encoding: base64\n"
         f"log_schema: {schema}\n"
         f"{profile_line}"
-        "selected_test_count: 46\n"
+        f"selected_test_count: {test_count}\n"
         + manifests
         + "========== RUN SUMMARY ==========\n"
         "request_count: 0\n"
-        "test_manifest_count: 46\n"
+        f"test_manifest_count: {test_count}\n"
         "========== END ==========\n"
     )
 
@@ -84,18 +94,21 @@ class EvidenceV3ParserTests(unittest.TestCase):
             parsed["run"]["compatibilityProfile"],
         )
         self.assertNotIn("compatibility_profile", parsed["run"])
-        self.assertEqual(46, len(parsed["tests"]))
+        self.assertEqual(47, len(parsed["tests"]))
 
     def test_rejects_missing_or_unknown_v3_profile(self) -> None:
-        for name, profile_line in {
-            "missing": "",
-            "unknown": "compatibility_profile: opencodex-next\n",
+        for name, profile in {
+            "missing": None,
+            "unknown": "opencodex-next",
         }.items():
             with self.subTest(name=name), self.assertRaisesRegex(
                 ValueError,
                 "Unsupported or missing compatibility_profile",
             ):
-                self._parse(_full_log(profile_line=profile_line), f"{name}.log")
+                self._parse(
+                    _full_log(compatibility_profile=profile),
+                    f"{name}.log",
+                )
 
     def test_rejects_mixed_v3_schema_version_tuple(self) -> None:
         with self.assertRaisesRegex(ValueError, "schema/version pair"):
@@ -107,13 +120,13 @@ class EvidenceV3ParserTests(unittest.TestCase):
             r"^========== TEST-060 END ==========\n",
             "",
             _full_log()
-            .replace("selected_test_count: 46", "selected_test_count: 45")
-            .replace("test_manifest_count: 46", "test_manifest_count: 45"),
+            .replace("selected_test_count: 47", "selected_test_count: 46")
+            .replace("test_manifest_count: 47", "test_manifest_count: 46"),
             count=1,
             flags=re.MULTILINE | re.DOTALL,
         )
 
-        with self.assertRaisesRegex(ValueError, "must contain all 46 retained tests"):
+        with self.assertRaisesRegex(ValueError, "must contain all 47 retained tests"):
             self._parse(incomplete)
 
     def test_rejects_legacy_collection_profile_in_v3(self) -> None:
@@ -135,7 +148,7 @@ class EvidenceV3ParserTests(unittest.TestCase):
         v2 = _full_log(
             schema="llm-capability-doctor.evidence.v2",
             version="0.10.0",
-            profile_line="",
+            compatibility_profile=None,
         )
         v1 = """========== MODEL DOCTOR RUN ==========
 log_schema: llm-capability-doctor.evidence.v1

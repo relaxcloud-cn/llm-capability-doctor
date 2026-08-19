@@ -1,0 +1,20 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_missing_046","status":"in_progress"},"sequence_number":0}
+
+event: response.output_item.added
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_missing_046","type":"message","role":"assistant","content":[],"status":"in_progress"},"sequence_number":1}
+
+event: response.content_part.added
+data: {"type":"response.content_part.added","item_id":"msg_missing_046","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":2}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_missing_046","output_index":0,"content_index":0,"delta":"partial","logprobs":[],"sequence_number":3}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","item_id":"msg_missing_046","output_index":0,"content_index":0,"text":"partial","logprobs":[],"sequence_number":4}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","item_id":"msg_missing_046","output_index":0,"content_index":0,"part":{"type":"output_text","text":"partial","annotations":[]},"sequence_number":5}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_missing_046","type":"message","role":"assistant","content":[{"type":"output_text","text":"partial","annotations":[]}],"status":"completed"},"sequence_number":6}

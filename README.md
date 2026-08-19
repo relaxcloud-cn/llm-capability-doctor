@@ -103,7 +103,7 @@ fragment，包括空的 `#`。未指定
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
 自动使用 Bearer、`api-key`、`x-api-key` 或 `x-goog-api-key` 等对应认证头。
 
-默认执行全部 46 个检测项，不需要也不接受检测模式或检测项 ID 参数。
+默认执行全部 47 个检测项，不需要也不接受检测模式或检测项 ID 参数。
 
 检测结束后清除当前 Shell 中的密钥：
 
@@ -132,8 +132,10 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 使用 $creating-model-doctor-reports 分析 `/绝对路径/your-model-model-doctor.log`，逐项判定 PASS 或 FAIL，并生成能力报告。
 ```
 
-Skill 会在日志旁生成评估 JSON 和自包含 HTML 报告，并对每个已采集检测项给出
-PASS 或 FAIL。CLI 只负责采集证据，不在客户现场给出结论；报告程序同时给出
+Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON 和自包含 HTML
+报告，并对全部 47 个检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
+协议响应结构，覆盖成功与错误响应以及流式与非流式响应，并逐项列出差异和固定官方
+参考。工具检测同时验证官方协议结构、调用与结果关联以及完整工具闭环。报告程序同时给出
 OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个硬门槛是
 002、004、005、006、040、041、043、047；045 仍是增强能力项，不影响该结论。
 
@@ -151,7 +153,7 @@ OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败�
 
 ## 检测范围
 
-46 个固定检测项覆盖以下能力：
+47 个固定检测项覆盖以下能力：
 
 | 领域 | 主要检查内容 |
 | --- | --- |
@@ -160,7 +162,7 @@ OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败�
 | 上下文 | 用约 3.2 万至 51.2 万字符近似测试 8K 至 128K Token 档位，并检查多轮修正记忆。 |
 | 指令与文本 | 精确输出、组合格式、多字段抽取和限长摘要。 |
 | Thinking 与推理 | Thinking 档位、推理 Token、思考与答案分离、流式事件和逻辑推理。 |
-| 工具调用 | 工具选择、参数约束、并行与串行调用、结果忠实性及失败恢复。 |
+| 工具调用 | 官方协议结构、完整工具闭环、工具选择、参数约束、并行与串行调用、结果忠实性及失败恢复。 |
 | 性能与稳定性 | 首字节、完整响应、重复成功率、P50/P95 延迟和并发响应时间。 |
 | 护栏与词汇 | 告警、分诊、漏洞等中英文安全业务词汇是否可正常用于项目任务。 |
 
@@ -188,7 +190,7 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
 | `--log-file PATH` | 指定 evidence-v3 日志路径。 |
 | `--timeout SECONDS` | 单次请求超时，默认 120 秒。 |
-| `--list-tests` | 输出完整 46 项目录并退出。 |
+| `--list-tests` | 输出完整 47 项目录并退出。 |
 | `--insecure` | 跳过 HTTPS 证书和主机身份校验。 |
 
 ### `--insecure` 安全提示

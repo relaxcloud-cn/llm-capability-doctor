@@ -264,6 +264,222 @@ button {
   font-size: 12px;
 }
 
+.protocol-conformance {
+  min-width: 0;
+  margin: 0 0 24px;
+  padding: 0 0 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.protocol-conformance-heading,
+.protocol-request-list > h3 {
+  margin: 0 0 8px;
+  color: var(--foreground);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.protocol-conformance-meta {
+  margin: 0 0 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.protocol-conformance-counts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 1rem;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.protocol-conformance-counts > div {
+  min-width: 0;
+  padding: 0.65rem;
+  border-right: 1px solid var(--line);
+}
+
+.protocol-conformance-counts > div:last-child {
+  border-right: 0;
+}
+
+.protocol-conformance-counts dt,
+.protocol-baseline-fields dt,
+.protocol-group-item dt,
+.protocol-request-fields dt,
+.protocol-difference-fields dt {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.protocol-conformance-counts dd,
+.protocol-baseline-fields dd,
+.protocol-group-item dd,
+.protocol-request-fields dd,
+.protocol-difference-fields dd {
+  min-width: 0;
+  margin: 0.15rem 0 0;
+  overflow-wrap: anywhere;
+}
+
+.protocol-conformance-counts dd {
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.protocol-conformance details > summary {
+  color: var(--foreground);
+  cursor: pointer;
+  font-weight: 550;
+  overflow-wrap: anywhere;
+}
+
+.protocol-conformance a {
+  color: var(--focus);
+  overflow-wrap: anywhere;
+  text-underline-offset: 0.15em;
+}
+
+.protocol-baselines,
+.protocol-group,
+.protocol-request {
+  min-width: 0;
+  border-top: 1px solid var(--line);
+}
+
+.protocol-baselines {
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.protocol-baselines > summary,
+.protocol-group > summary,
+.protocol-request > summary {
+  padding: 0.65rem 0;
+}
+
+.protocol-baseline {
+  min-width: 0;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.protocol-baseline-fields,
+.protocol-request-fields,
+.protocol-difference-fields {
+  margin: 0;
+}
+
+.protocol-baseline-fields > div,
+.protocol-request-fields > div,
+.protocol-difference-fields > div {
+  display: grid;
+  grid-template-columns: 7.5rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.25rem 0;
+}
+
+.protocol-supporting-references {
+  margin-top: 0.4rem;
+}
+
+.protocol-supporting-references > summary {
+  font-size: 12px;
+}
+
+.protocol-supporting-references ul {
+  margin: 0.45rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.protocol-groupings {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0 1rem;
+  margin-bottom: 1rem;
+}
+
+.protocol-group {
+  border-bottom: 1px solid var(--line);
+}
+
+.protocol-group-item {
+  min-width: 0;
+  margin: 0;
+  padding: 0.55rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.protocol-group-item > div {
+  min-width: 0;
+  margin-bottom: 0.3rem;
+}
+
+.protocol-group-item > div:last-child {
+  margin-bottom: 0;
+}
+
+.protocol-request-list > h3 {
+  margin-top: 0;
+}
+
+.protocol-request {
+  border-bottom: 1px solid var(--line);
+}
+
+.protocol-request > summary {
+  min-width: 0;
+}
+
+.protocol-request-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.protocol-request-status {
+  float: right;
+  margin-left: 0.75rem;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.protocol-request-different .protocol-request-status {
+  color: var(--fail);
+}
+
+.protocol-request-fields {
+  padding-bottom: 0.65rem;
+}
+
+.protocol-differences {
+  min-width: 0;
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.protocol-differences h4 {
+  margin: 0 0 0.35rem;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 550;
+  letter-spacing: 0;
+}
+
+.protocol-difference {
+  min-width: 0;
+  padding: 0.65rem 0;
+  border-top: 1px solid var(--line);
+}
+
+.protocol-difference:first-of-type {
+  border-top: 0;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -560,6 +776,34 @@ pre {
     gap: 0.15rem;
   }
 
+  .protocol-conformance-counts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .protocol-conformance-counts > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .protocol-conformance-counts > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--line);
+  }
+
+  .protocol-groupings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .protocol-request {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .protocol-baseline-fields > div,
+  .protocol-request-fields > div,
+  .protocol-difference-fields > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.15rem;
+  }
+
   table,
   tbody,
   tr,
@@ -671,6 +915,22 @@ pre {
   .general-verdict,
   .logic-item {
     break-inside: avoid;
+  }
+
+  .protocol-request {
+    break-inside: auto;
+  }
+
+  .protocol-differences {
+    display: block;
+    break-inside: auto;
+  }
+
+  details.protocol-baselines:not([open]) > :not(summary),
+  details.protocol-group:not([open]) > :not(summary),
+  details.protocol-request:not([open]) > :not(summary),
+  details.protocol-supporting-references:not([open]) > :not(summary) {
+    display: block !important;
   }
 
   .evidence-row,

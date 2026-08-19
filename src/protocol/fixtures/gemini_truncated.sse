@@ -1,0 +1,3 @@
+data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"partial"}]}}]}
+
+data: {"candidates":[{"index":0,"finishReason":"STOP"}]

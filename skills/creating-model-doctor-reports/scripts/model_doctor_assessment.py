@@ -9,9 +9,17 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
+from model_doctor_contracts import V3_CONTRACT, contract_key
 from model_doctor_general_verdict import derive_general_verdict
-from model_doctor_opencodex_compatibility import (
-    derive_opencodex_compatibility,
+from model_doctor_opencodex_compatibility import derive_opencodex_compatibility
+from model_doctor_protocol_conformance import (
+    analyze_protocol_conformance,
+    validate_protocol_conformance,
+)
+from model_doctor_tool_loop_conformance import (
+    V3_TOOL_TEST_IDS,
+    _validate_v3_tool_pass_requests,
+    _validate_v3_tool_pass_review,
 )
 from model_doctor_verified_facts import validate_verified_facts
 
@@ -63,6 +71,15 @@ ASSESSMENT_CAPABILITY_SUMMARY_FIELDS = REVIEW_CAPABILITY_SUMMARY_FIELDS | {
     "generalVerdict",
     "openCodexCompatibility",
 }
+GENERAL_VERDICT_COUNT_FIELDS = (
+    "collectedTests",
+    "passedTests",
+    "totalTests",
+    "passedCoreTests",
+    "totalCoreTests",
+    "passedEnhancedTests",
+    "totalEnhancedTests",
+)
 CAPABILITY_ISSUE_FIELDS = {
     "title",
     "statement",
@@ -86,6 +103,7 @@ ASSESSMENT_FIELDS = {
     "warnings",
     "summary",
     "capabilitySummary",
+    "protocolConformance",
     "categories",
     "tests",
 }
@@ -239,6 +257,41 @@ def _parsed_fact_evidence_domains(parsed: dict) -> Dict[str, set[str]]:
     }
 
 
+def _conformance_results_by_id(report: object) -> Dict[str, dict]:
+    if not isinstance(report, dict) or not isinstance(report.get("results"), list):
+        return {}
+    indexed: Dict[str, dict] = {}
+    for result in report["results"]:
+        if not isinstance(result, dict) or not _non_empty_string(result.get("requestId")):
+            continue
+        indexed.setdefault(result["requestId"], result)
+    return indexed
+
+
+def _validate_v3_tool_protocol_pass(
+    test_id: str,
+    request_ids: object,
+    report: object,
+) -> List[str]:
+    if not isinstance(request_ids, list) or not all(
+        isinstance(request_id, str) for request_id in request_ids
+    ):
+        return [f"Test {test_id} PASS cannot verify its official protocol results"]
+    results = _conformance_results_by_id(report)
+    errors: List[str] = []
+    for request_id in request_ids:
+        result = results.get(request_id)
+        if result is None:
+            errors.append(
+                f"Test {test_id} PASS official protocol result is missing for {request_id}"
+            )
+        elif result.get("status") != "CONSISTENT":
+            errors.append(
+                f"Test {test_id} PASS requires official protocol CONSISTENT for {request_id}"
+            )
+    return errors
+
+
 def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
     """Return human-readable errors for Skill-authored binary reviews."""
 
@@ -286,6 +339,7 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         status = review.get("reviewedStatus")
         if status not in STATUSES:
             errors.append(f"Test {test_id} reviewedStatus is invalid")
+        errors.extend(_validate_v3_tool_pass_review(parsed, test_id, review))
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in review:
                 errors.append(
@@ -408,6 +462,29 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
                         f"Test {test_id} failureAnalysis evidence is not referenced "
                         f"by TEST-{test_id}: {reference}"
                     )
+
+    try:
+        review_contract = contract_key(parsed.get("run"))
+    except ValueError:
+        review_contract = None
+    if review_contract == V3_CONTRACT:
+        protocol_report = analyze_protocol_conformance(parsed)
+        for test_id in sorted(V3_TOOL_TEST_IDS):
+            review = test_reviews.get(test_id)
+            manifest = parsed_tests.get(test_id)
+            if (
+                not isinstance(review, dict)
+                or review.get("reviewedStatus") != "PASS"
+                or not isinstance(manifest, dict)
+            ):
+                continue
+            errors.extend(
+                _validate_v3_tool_protocol_pass(
+                    test_id,
+                    manifest.get("requestRefs"),
+                    protocol_report,
+                )
+            )
 
     summary = reviews.get("capabilitySummary")
     if not isinstance(summary, dict):
@@ -561,6 +638,10 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
     errors = validate_reviews(parsed, reviews)
     if errors:
         raise ValueError("Invalid reviews:\n" + "\n".join(errors))
+    try:
+        contract = contract_key(parsed.get("run"))
+    except ValueError as error:
+        raise ValueError(f"Invalid parsed run contract: {error}") from error
 
     test_reviews = reviews["tests"]
     items: List[dict] = []
@@ -591,16 +672,17 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
     statuses = {
         item["testId"]: item["reviewedStatus"] for item in items
     }
-    capability_summary["generalVerdict"] = derive_general_verdict(statuses)
+    capability_summary["generalVerdict"] = derive_general_verdict(
+        statuses,
+        contract,
+    )
     protocol_family = capability_summary["verifiedFacts"]["interfaceProtocol"][
         "family"
     ]
-    capability_summary["openCodexCompatibility"] = (
-        derive_opencodex_compatibility(
-            parsed.get("run", {}),
-            statuses,
-            protocol_family,
-        )
+    capability_summary["openCodexCompatibility"] = derive_opencodex_compatibility(
+        parsed.get("run", {}),
+        statuses,
+        protocol_family,
     )
 
     return {
@@ -612,6 +694,7 @@ def assemble_assessment(parsed: dict, reviews: dict) -> dict:
         "warnings": parsed.get("warnings", []),
         "summary": {"counts": _status_counts(items)},
         "capabilitySummary": capability_summary,
+        "protocolConformance": analyze_protocol_conformance(parsed),
         "categories": _categories(items),
         "tests": items,
     }
@@ -756,6 +839,7 @@ def _validate_assessment_failure_analysis(
 def _validate_assessment_summary(
     items: List[dict],
     summary: object,
+    contract: tuple[str, str],
     run: object,
 ) -> List[str]:
     errors: List[str] = []
@@ -763,13 +847,20 @@ def _validate_assessment_summary(
         return ["capabilitySummary must be an object"]
     for field in sorted(set(summary) - ASSESSMENT_CAPABILITY_SUMMARY_FIELDS):
         errors.append(f"capabilitySummary field {field} is not allowed")
+    general_verdict = summary.get("generalVerdict")
+    if isinstance(general_verdict, dict):
+        for field in GENERAL_VERDICT_COUNT_FIELDS:
+            if type(general_verdict.get(field)) is not int:
+                errors.append(
+                    f"capabilitySummary generalVerdict {field} must be an integer"
+                )
     statuses = {
         item.get("testId"): item.get("reviewedStatus")
         for item in items
         if isinstance(item, dict)
     }
     try:
-        expected_verdict = derive_general_verdict(statuses)
+        expected_verdict = derive_general_verdict(statuses, contract)
     except ValueError:
         errors.append(
             "capabilitySummary generalVerdict cannot be derived from test statuses"
@@ -933,8 +1024,13 @@ def validate_assessment(assessment: object) -> List[str]:
     errors: List[str] = []
     if assessment.get("schemaVersion") != ASSESSMENT_SCHEMA_VERSION:
         errors.append("schemaVersion is invalid")
+    for field in sorted(ASSESSMENT_FIELDS - set(assessment)):
+        errors.append(f"Assessment field {field} is required")
     for field in sorted(set(assessment) - ASSESSMENT_FIELDS):
         errors.append(f"Assessment field {field} is not allowed")
+    errors.extend(
+        validate_protocol_conformance(assessment.get("protocolConformance"))
+    )
 
     summary = assessment.get("summary")
     if not isinstance(summary, dict):
@@ -945,6 +1041,11 @@ def validate_assessment(assessment: object) -> List[str]:
     run = assessment.get("run")
     if not isinstance(run, dict):
         errors.append("run must be an object")
+    try:
+        contract = contract_key(run)
+    except ValueError:
+        errors.append("run contract is invalid")
+        contract = ("", "")
 
     items = assessment.get("tests")
     if not isinstance(items, list):
@@ -1016,6 +1117,48 @@ def validate_assessment(assessment: object) -> List[str]:
                         "an object"
                     )
         errors.extend(_validate_assessment_failure_analysis(item, statuses))
+    if contract == V3_CONTRACT:
+        supplied_report = assessment.get("protocolConformance")
+        for item in valid_items:
+            test_id = item.get("testId")
+            if (
+                test_id not in V3_TOOL_TEST_IDS
+                or item.get("reviewedStatus") != "PASS"
+            ):
+                continue
+            item_requests = item.get("requests")
+            errors.extend(
+                _validate_v3_tool_pass_requests(test_id, item_requests)
+            )
+            if not isinstance(item_requests, list) or not all(
+                isinstance(request, dict) for request in item_requests
+            ):
+                continue
+            request_ids = [request.get("request_id") for request in item_requests]
+            if not all(isinstance(request_id, str) for request_id in request_ids):
+                continue
+            errors.extend(
+                _validate_v3_tool_protocol_pass(
+                    test_id,
+                    request_ids,
+                    supplied_report,
+                )
+            )
+            reconstructed = {
+                "run": run,
+                "tests": {test_id: {"requestRefs": request_ids}},
+                "requests": {
+                    request_id: request
+                    for request_id, request in zip(request_ids, item_requests)
+                },
+            }
+            errors.extend(
+                _validate_v3_tool_protocol_pass(
+                    test_id,
+                    request_ids,
+                    analyze_protocol_conformance(reconstructed),
+                )
+            )
     expected_counts = _status_counts(object_items)
     if isinstance(summary, dict) and summary.get("counts") != expected_counts:
         errors.append("summary counts do not match test results")
@@ -1025,6 +1168,7 @@ def validate_assessment(assessment: object) -> List[str]:
         _validate_assessment_summary(
             valid_items,
             assessment.get("capabilitySummary"),
+            contract,
             run,
         )
     )

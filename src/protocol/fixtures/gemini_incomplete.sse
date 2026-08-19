@@ -1,0 +1,1 @@
+data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"partial"}]},"finishReason":"MAX_TOKENS"}]}

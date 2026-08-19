@@ -15,7 +15,7 @@ macro_rules! test_case {
     };
 }
 
-pub static CATALOG: [TestCase; 46] = [
+pub static CATALOG: [TestCase; 47] = [
     test_case!("001", "接口与协议", "URL 可达性"),
     test_case!("002", "接口与协议", "协议识别"),
     test_case!("003", "接口与协议", "鉴权与模型接受"),
@@ -50,6 +50,7 @@ pub static CATALOG: [TestCase; 46] = [
     test_case!("043", "工具调用", "必填参数与类型枚举"),
     test_case!("044", "工具调用", "嵌套参数"),
     test_case!("045", "工具调用", "并行工具调用"),
+    test_case!("046", "工具调用", "官方工具协议结构合规"),
     test_case!("047", "工具调用", "串行工具调用"),
     test_case!("048", "工具调用", "工具结果忠实性"),
     test_case!("049", "工具调用", "工具失败恢复"),
@@ -79,4 +80,31 @@ pub fn render() -> String {
 
 pub fn all() -> Vec<&'static TestCase> {
     CATALOG.iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+
+    #[test]
+    fn catalog_has_47_unique_checks_and_restores_046() {
+        assert_eq!(CATALOG.len(), 47);
+        assert_eq!(
+            CATALOG
+                .iter()
+                .find(|test| test.id == "046")
+                .map(|test| test.name),
+            Some("官方工具协议结构合规")
+        );
+        assert_eq!(
+            CATALOG
+                .iter()
+                .map(|test| test.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            47
+        );
+    }
 }

@@ -1,0 +1,5 @@
+event: response.created
+data: {"type":"response.created","response":{"id":"resp_truncated_046","status":"in_progress"},"sequence_number":0}
+
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","item_id":"msg_truncated_046","output_index":0,"content_index":0,"delta":"private partial"

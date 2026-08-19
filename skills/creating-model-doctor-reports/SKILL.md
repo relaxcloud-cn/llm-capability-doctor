@@ -17,9 +17,10 @@ Accept only these exact input contracts:
 
 - collector v0.9.0 with `llm-capability-doctor.evidence.v1`: validate the historical onsite, full, or custom profile and its manifest set;
 - collector v0.10.0 with `llm-capability-doctor.evidence.v2`: require all 46 manifests and reject `collection_profile` if present;
-- collector v0.11.0 with `llm-capability-doctor.evidence.v3`: require all 46 manifests, reject `collection_profile`, and require exactly `compatibility_profile: opencodex-2.7.42-data-format`.
+- collector v0.11.0 with `llm-capability-doctor.evidence.v3`: require all 47 manifests, reject `collection_profile` if present, and require exactly `compatibility_profile: opencodex-2.7.42-data-format`.
 
 Reject mixed schema/version pairs and every other collector contract instead of upgrading or guessing its meaning.
+Generate `llm-capability-doctor.assessment.v7` for every accepted historical and current input. The evidence.v1 and evidence.v2 retain their original assessment rules; never reinterpret them using evidence.v3-only metadata or tool-loop gates.
 
 The parser validates the schema/version pair, duplicate blocks, declared counts, explicit `request_refs`, and the contract-specific manifest set. A parser failure stops the workflow; it is not a model capability verdict. Historical v1/v2 evidence remains reportable, but its OpenCodex compatibility result is `NOT_ASSESSED`; never infer the v3 contract from old evidence.
 
@@ -48,6 +49,18 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - HTTP 2xx alone never proves semantic success.
    - Write each `conclusion` as one concise Chinese sentence with two clauses: `<关键证据概括>，因此判定<实质结果>。`
    - Keep raw fields, markers, request IDs, exact metrics, and exhaustive values in evidence rather than the conclusion.
+
+   Apply these additional gates only to evidence.v3:
+
+   - Check 006 can pass only when `stream_termination=completed` in addition to its semantic marker and normal terminal event.
+   - Check 046 requires a complete official protocol tool call, correlated result, final-answer cycle, and exact `MODEL_DOCTOR_CASE_046_OK` marker.
+   - Check 047 requires weather, then time, then `MODEL_DOCTOR_CASE_047_OK`.
+   - Check 048 requires `MODEL_DOCTOR_CASE_048_OK` plus the exact `WEATHER_SUNNY` result.
+   - Check 049 requires exactly one timeout retry, a successful correlated result, and `MODEL_DOCTOR_CASE_049_OK`.
+
+   For an evidence.v3 PASS on 046-049, inspect every ordered request: each must have `stream_termination=completed`, the protocol-native terminal signal, and `tool_contract_status=conformant`. `transport_outcome` must be `completed_eof`, except OpenAI Chat may use `protocol_terminated` only with `[DONE]`. Intermediate requests require `tool_loop_outcome=continued`; the final request requires `tool_loop_outcome=completed`. The native call/result correlation must remain intact, and every associated `protocolConformance` result must be `CONSISTENT`, including raw response -> follow-up request correlation. Evidence.v1 and evidence.v2 retain their original assessment rules.
+
+   Assessment assembly independently checks the official response structure of 全部原始请求, including requests not referenced by a manifest. It covers 成功与错误响应 and 流式与非流式响应. Unreferenced requests use `checkIds: []`. Outside the explicit evidence.v3 checks 046-049 PASS gate above, the generated `protocolConformance` result is reported independently and does not change a manifest's PASS/FAIL or the general capability verdict.
 
 6. For every FAIL, add `failureAnalysis`. PASS items must omit it.
 
@@ -79,7 +92,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - If all tests pass, use an empty `issues` array and a bounded headline.
    - Use the exact scope boundary: `本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。`
 
-   `reviews.v2` 不得填写 `generalVerdict` 或 `openCodexCompatibility`。总体等级由 `assemble_assessment` 程序生成；OpenCodex 兼容性对象也由该程序生成，两者都由 assessment validator 根据原始输入独立复算。完整 46 项按 31 项基础必过项和 15 项增强能力项判定为“通用能力通过”“通用能力有条件通过”“通用能力未通过”或“通用能力未评定”。OpenCodex 数据格式结论只使用 002、004、005、006、040、041、043、047，045 不属于兼容性硬门槛。v3 只有在协议属于四类支持协议且八项全部 PASS 时才兼容；v1/v2 显示 `NOT_ASSESSED`。OpenCodex 结论使用固定范围边界：`仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。` Skill 作者只填写证据约束下的 `headline`、`verifiedFacts`、`issues` 和 `scopeBoundary`，不得选择或改写任一程序结论。
+   `reviews.v2` 不得填写 `generalVerdict` 或 `openCodexCompatibility`。总体等级由 `assemble_assessment` 程序生成，OpenCodex 数据格式结论也由 `assemble_assessment` 生成；两者均由 assessment validator 根据原始输入独立复算。完整 evidence.v1/v2 按 46 项、31 项基础必过项和 15 项增强能力项判定；完整 evidence.v3 按 47 项、32 项基础必过项和 15 项增强能力项判定。总体等级结果为“通用能力通过”“通用能力有条件通过”“通用能力未通过”或“通用能力未评定”。OpenCodex 数据格式结论只使用 002、004、005、006、040、041、043、047，045 不属于兼容性硬门槛。v3 只有在协议属于四类支持协议且八项全部 PASS 时才兼容；v1/v2 显示 `NOT_ASSESSED`。OpenCodex 结论使用固定范围边界：`仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。` Skill 作者只填写证据约束下的 `headline`、`verifiedFacts`、`issues` 和 `scopeBoundary`，不得选择或改写任一程序结论。
 
    Write `$TMP/reviews.json` in this envelope:
 
@@ -168,7 +181,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
      --html "$LOG_DIR/<model-slug>-model-capability-report.html"
    ```
 
-   The renderer puts “OpenCodex 数据格式兼容性” immediately after “检测信息”, followed by “最终结论”, the capability-domain table, and per-test evidence. It renders the program-generated compatibility result with profile, protocol, required/failed IDs, statement, and fixed scope boundary. The general conclusion renders only the program-generated general verdict, fixed statement, four fact-strip rows（检测结果、接口协议、上下文、并发）, and three detailed verified-fact rows. It must not render the authored `headline`, `issues`, or general `scopeBoundary`; those fields remain validated assessment JSON audit data. It puts “未通过项证据复核” inside every FAIL detail row. It also renders evidence excerpts, evidence references, failure kind, and decisive request metrics; print CSS must reveal all evidence rows without clipping code blocks. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
-11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v7`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, and every referenced request appears in its report row. Verify `openCodexCompatibility` equals the validator's program-derived result.
-12. Verify the HTML contains exactly one compatibility section and one final-conclusion section in this order: 检测信息、OpenCodex 数据格式兼容性、最终结论、能力域表、逐项证据. Confirm the general conclusion's “接口协议格式”, “上下文能力”, and “并发能力” rows all render, and confirm the authored assessment `headline`, `issues`, and general `scopeBoundary` are absent from HTML. Verify one evidence-audit section per FAIL, visible evidence excerpts and references, no external resources, and no unmasked credentials. Preserve provider-returned reasoning values unless they contain an actual credential.
+   The renderer puts “OpenCodex 数据格式兼容性” immediately after “检测信息”, followed by “最终结论”, “官方协议结构一致性”, the capability-domain table, and per-test evidence. It renders the program-generated compatibility result, general verdict, fixed statements, capability facts, protocol counts, groupings, pinned baselines, every raw request exactly once, and every request-level difference. It must not render authored `headline`, `issues`, or general `scopeBoundary`; those fields remain validated assessment JSON audit data. It puts “未通过项证据复核” inside every FAIL detail row and renders evidence excerpts, references, failure kind, and decisive metrics. 不得手工修改渲染后的 HTML；重新 render 必须从结构化 assessment 稳定复现这些内容。
+11. Verify the source hash is unchanged, assessment is `llm-capability-doctor.assessment.v7`, every test has one binary status, every FAIL has one valid audit, every FAIL appears in exactly one of at most five summary issues, each dependency shares its issue, every referenced request appears in its report row, every raw request appears exactly once in `protocolConformance.results`, and `openCodexCompatibility` equals the validator's program-derived result.
+12. Verify exactly one of each section in this order: 检测信息、OpenCodex 数据格式兼容性、最终结论、官方协议结构一致性、能力域表、逐项证据. Verify every protocol difference exposes its request, location, kind, expected structure, observed category, and pinned official reference. Confirm the authored assessment `headline`, `issues`, and general `scopeBoundary` are absent from HTML; confirm evidence-audit sections, visible references, no external resources, and no unmasked credentials.
 13. Report absolute output paths, PASS/FAIL counts, the program-generated OpenCodex compatibility result, the program-generated general verdict, and the bounded summary headline. Never add another status class or a project readiness verdict.

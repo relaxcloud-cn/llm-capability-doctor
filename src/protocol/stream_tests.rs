@@ -1,4 +1,5 @@
-use super::stream::{MAX_SSE_RECORD_BYTES, StreamControl, StreamInspector, StreamState};
+use super::stream::inspector::MAX_SSE_RECORD_BYTES;
+use super::stream::{StreamControl, StreamInspector, StreamState};
 use crate::protocol::Protocol;
 
 fn fallback_record(protocol: Protocol) -> &'static [u8] {

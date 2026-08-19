@@ -136,6 +136,8 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "url": "https://example.invalid/v1/chat/completions",
                 "model": "fixture-model",
                 "api_key": "[MASKED]",
+                "log_schema": "llm-capability-doctor.evidence.v1",
+                "script_version": "0.9.0",
             },
             "tokenTotals": {},
             "warnings": [],
@@ -423,6 +425,8 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "url": "https://example.invalid/v1/chat/completions",
                 "model": "fixture-model",
                 "api_key": "[MASKED]",
+                "log_schema": "llm-capability-doctor.evidence.v1",
+                "script_version": "0.9.0",
             },
             "tokenTotals": {},
             "warnings": [],
@@ -977,7 +981,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             errors,
         )
 
-    def test_assembly_emits_assessment_v6_with_verified_facts(self) -> None:
+    def test_assembly_emits_assessment_v7_with_verified_facts(self) -> None:
         reviews = self._reviews()
         expected_facts = self._verified_facts()
         try:
@@ -1502,12 +1506,13 @@ test_manifest_count: 1
             assessment = assemble_assessment(self._parsed(), self._reviews())
             html = render_report(assessment, ASSET_DIR)
         except (KeyError, ValueError) as error:
-            self.fail(f"renderer rejected the desired v6 contract: {error}")
+            self.fail(f"renderer rejected the desired v7 contract: {error}")
 
         expected_order = (
             '<section class="run-information"',
             '<section class="opencodex-compatibility ',
             '<section class="final-conclusion"',
+            '<section class="protocol-conformance"',
             '<table class="summary-table">',
             '<section class="result-section"',
         )
@@ -1527,10 +1532,11 @@ test_manifest_count: 1
                     "opencodex-compatibility-NOT_ASSESSED",
                 ),
                 ("section", "final-conclusion"),
+                ("section", "protocol-conformance"),
                 ("table", "summary-table"),
                 ("section", "result-section"),
             ],
-            parser.children[:5],
+            parser.children[:6],
         )
 
     def test_opencodex_compatibility_renders_all_levels(self) -> None:
@@ -1872,7 +1878,7 @@ test_manifest_count: 1
             stderr.getvalue(),
         )
 
-    def test_cli_render_writes_v6_and_final_conclusion(self) -> None:
+    def test_cli_render_writes_v7_and_final_conclusion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             parsed_path = directory_path / "parsed.json"
@@ -2096,7 +2102,7 @@ test_manifest_count: 1
             "python3 -m unittest discover",
         ):
             self.assertIn(marker, readme)
-        self.assertIn("46 个固定检测项", readme)
+        self.assertIn("47 个固定检测项", readme)
         self.assertIn("v1/v2", readme)
         self.assertIn("NOT_ASSESSED", readme)
 

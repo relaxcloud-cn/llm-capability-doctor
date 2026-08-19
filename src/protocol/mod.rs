@@ -1,20 +1,43 @@
 use std::fmt;
 
 use serde_json::{Value, json};
+use url::Url;
 
-pub mod stream;
+pub(crate) mod stream;
+pub(crate) mod tool_loop;
 pub mod tools;
 
 #[cfg(test)]
 mod stream_tests;
 
 #[cfg(test)]
-mod tests;
+#[path = "tests.rs"]
+mod compatibility_tests;
 
 #[cfg(test)]
 mod tools_tests;
 
 pub const ANTHROPIC_MAX_TOKENS: u64 = 2048;
+
+pub fn normalize_request_url(protocol: Protocol, configured: &Url, stream: bool) -> Url {
+    if protocol != Protocol::GeminiGenerateContent || !stream {
+        return configured.clone();
+    }
+
+    let path = configured.path();
+    let normalized_path = if let Some(prefix) = path.strip_suffix(":generateContent") {
+        format!("{prefix}:streamGenerateContent")
+    } else if path.ends_with(":streamGenerateContent") {
+        path.to_owned()
+    } else {
+        return configured.clone();
+    };
+
+    let mut normalized = configured.clone();
+    normalized.set_path(&normalized_path);
+    normalized.set_query(Some("alt=sse"));
+    normalized
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Protocol {
@@ -301,4 +324,114 @@ fn non_empty_string(value: Option<&Value>) -> bool {
     value
         .and_then(Value::as_str)
         .is_some_and(|text| !text.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use url::Url;
+
+    use super::{Protocol, normalize_request_url};
+
+    #[test]
+    fn gemini_stream_url_is_normalized() {
+        let cases = [
+            (
+                "https://example.com/v1beta/models/gemini:generateContent?key=x&trace=1",
+                "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse",
+            ),
+            (
+                "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=json&trace=1",
+                "https://example.com/v1beta/models/gemini:streamGenerateContent?alt=sse",
+            ),
+        ];
+
+        for (configured, expected) in cases {
+            let configured = Url::parse(configured).expect("valid configured URL");
+            assert_eq!(
+                normalize_request_url(Protocol::GeminiGenerateContent, &configured, true).as_str(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn non_stream_url_is_an_exact_clone() {
+        let raw =
+            "https://example.com/v1beta/models/a%2Fb:generateContent?x=a+b&x=%2F&empty=#fragment";
+        let configured = Url::parse(raw).expect("valid configured URL");
+        let normalized = normalize_request_url(Protocol::GeminiGenerateContent, &configured, false);
+
+        assert_eq!(normalized, configured);
+        assert_eq!(normalized.as_str(), configured.as_str());
+    }
+
+    #[test]
+    fn gemini_stream_url_discards_existing_query_and_preserves_fragment() {
+        let raw = "https://example.com/v1beta/models/a%2Fb:generateContent?key=a+b&path=%2F&dup=1&dup=2&empty=&flag&alt=json&%61lt=proto&action=:generateContent#section";
+        let expected =
+            "https://example.com/v1beta/models/a%2Fb:streamGenerateContent?alt=sse#section";
+        let configured = Url::parse(raw).expect("valid configured URL");
+
+        assert_eq!(
+            configured.as_str(),
+            raw,
+            "the URL crate retained the raw forms under test"
+        );
+        assert_eq!(
+            normalize_request_url(Protocol::GeminiGenerateContent, &configured, true).as_str(),
+            expected
+        );
+    }
+
+    #[test]
+    fn stream_url_normalization_is_gemini_only_and_idempotent() {
+        let raw =
+            "https://example.com/v1/models/gemini:streamGenerateContent?trace=&alt=sse#fragment";
+        let configured = Url::parse(raw).expect("valid configured URL");
+        let once = normalize_request_url(Protocol::GeminiGenerateContent, &configured, true);
+        let twice = normalize_request_url(Protocol::GeminiGenerateContent, &once, true);
+
+        assert_eq!(
+            once.as_str(),
+            "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse#fragment"
+        );
+        assert_eq!(twice, once);
+        assert_eq!(
+            normalize_request_url(Protocol::OpenAiChat, &configured, true),
+            configured
+        );
+
+        let empty_query = Url::parse("https://example.com/v1/models/gemini:generateContent?")
+            .expect("valid URL with empty query");
+        assert_eq!(
+            normalize_request_url(Protocol::GeminiGenerateContent, &empty_query, true).as_str(),
+            "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn gemini_stream_url_discards_empty_query_segments() {
+        let configured =
+            Url::parse("https://example.com/v1/models/gemini:generateContent?x=1&&alt=json&y=2&")
+                .expect("valid URL with raw empty query segments");
+
+        assert_eq!(
+            normalize_request_url(Protocol::GeminiGenerateContent, &configured, true).as_str(),
+            "https://example.com/v1/models/gemini:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn gemini_stream_url_leaves_custom_paths_unchanged() {
+        for raw in [
+            "https://example.com/custom/generate?alt=json&key=value",
+            "https://example.com/v1/models/gemini:generateContent/?alt=json",
+        ] {
+            let configured = Url::parse(raw).expect("valid custom URL");
+            assert_eq!(
+                normalize_request_url(Protocol::GeminiGenerateContent, &configured, true),
+                configured
+            );
+        }
+    }
 }
