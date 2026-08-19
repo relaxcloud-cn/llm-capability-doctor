@@ -2166,6 +2166,26 @@ test_manifest_count: 1
         ):
             self.assertIn(custom_rule, facts_section)
 
+    def test_context_tiers_measure_capacity_without_scoring_answer_accuracy(self) -> None:
+        rules_text = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+        context_section = rules_text.split(
+            "## 10. Context, Instruction, and Reasoning", 1
+        )[1].split("### 019", 1)[0]
+
+        for marker in (
+            "context capacity only",
+            "HTTP 2xx",
+            "protocol-valid response",
+            "non-empty model-visible assistant content",
+            "Do not score response accuracy",
+            "highest tested passing tier",
+        ):
+            self.assertIn(marker, context_section)
+        self.assertNotIn("all six requested JSON fields", context_section)
+        self.assertNotIn("every requested value is exact", context_section)
+
 
 if __name__ == "__main__":
     unittest.main()

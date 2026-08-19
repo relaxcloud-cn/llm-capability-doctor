@@ -47,6 +47,7 @@ The parser validates the schema/version pair, duplicate blocks, declared counts,
    - `PASS` only when complete observable evidence satisfies that test's rule.
    - `FAIL` covers missing, malformed, unsupported, timed out, ambiguous, incomplete, contradictory, or semantically wrong evidence.
    - HTTP 2xx alone never proves semantic success.
+   - Tests 014-018 measure context capacity only: require a successful request, a protocol-valid response, and non-empty model-visible assistant content. Do not score response accuracy, exact wording, JSON shape, recalled markers, or cross-segment composition.
    - Write each `conclusion` as one concise Chinese sentence with two clauses: `<关键证据概括>，因此判定<实质结果>。`
    - Keep raw fields, markers, request IDs, exact metrics, and exhaustive values in evidence rather than the conclusion.
 

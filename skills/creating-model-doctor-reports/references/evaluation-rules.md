@@ -295,35 +295,35 @@ Generate `llm-capability-doctor.assessment.v7.protocolConformance` deterministic
 
 ### 014 8K 级上下文
 
-- Method: inspect the approximately 32,000-character probe with begin/middle/end markers, cross-segment link, and distractors.
-- `PASS`: all six requested JSON fields contain the exact 014 values and primary target `ZX-7319`.
-- `FAIL`: limit error, missing/wrong marker, broken link, distractor selected, or invalid output.
+- Method: inspect the approximately 32,000-character probe as a context capacity only check.
+- `PASS`: curl exits successfully, HTTP 2xx is returned, the selected protocol has a protocol-valid response, and it contains non-empty model-visible assistant content.
+- `FAIL`: transport failure, timeout, non-2xx error or context-limit rejection, malformed protocol response, or empty model-visible assistant content.
 
 ### 015 16K 级上下文
 
-- Method: apply the 014 rule to the approximately 64,000-character 015 probe.
-- `PASS`: every 015 field and `ZX-7319` is correct.
-- `FAIL`: request or any recall/link/distractor/format requirement fails.
+- Method: apply the 014 capacity rule to the approximately 64,000-character 015 probe.
+- `PASS`: the request and protocol response are valid and model-visible assistant content is non-empty.
+- `FAIL`: the common capacity rule is not satisfied.
 
 ### 016 32K 级上下文
 
-- Method: apply the same rule to the approximately 128,000-character 016 probe.
-- `PASS`: every requested value is exact.
-- `FAIL`: request or any required value/structure fails.
+- Method: apply the 014 capacity rule to the approximately 128,000-character 016 probe.
+- `PASS`: the request and protocol response are valid and model-visible assistant content is non-empty.
+- `FAIL`: the common capacity rule is not satisfied.
 
 ### 017 64K 级上下文
 
-- Method: apply the same rule to the approximately 256,000-character 017 probe.
-- `PASS`: every requested value is exact.
-- `FAIL`: request or any required value/structure fails.
+- Method: apply the 014 capacity rule to the approximately 256,000-character 017 probe.
+- `PASS`: the request and protocol response are valid and model-visible assistant content is non-empty.
+- `FAIL`: the common capacity rule is not satisfied.
 
 ### 018 128K 级上下文
 
-- Method: apply the same rule to the approximately 512,000-character 018 probe.
-- `PASS`: every requested value is exact.
-- `FAIL`: request or any required value/structure fails.
+- Method: apply the 014 capacity rule to the approximately 512,000-character 018 probe.
+- `PASS`: the request and protocol response are valid and model-visible assistant content is non-empty.
+- `FAIL`: the common capacity rule is not satisfied.
 
-For 014-018, each conclusion summarizes whether all requested information was returned correctly, then judges support for that context tier. For the highest tested passing tier, say “at least supports this tier; no higher limit was tested.” If a higher tier fails, report the highest pass and first failure. Call character sizes approximations; keep exact markers, target values, and native input Token counts in evidence.
+For 014-018, Do not score response accuracy, exact wording, JSON shape, recalled markers, or cross-segment composition. Each conclusion states that the request succeeded and model-visible content was non-empty, then judges support for that tier. Report the highest tested passing tier and the first tested higher failure, if any. If no higher failure was collected, say “at least supports this tier; no higher limit was tested.” Call character sizes approximations and use native input Token counts when the provider returns them; never present the highest tested tier as the model's hard limit.
 
 ### 019 精确输出
 

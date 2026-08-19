@@ -120,13 +120,9 @@ fn context_capacity(id: &str, context: &PlanContext<'_>) -> super::PlannedReques
     };
     let segment = generate_filler(target / 3);
     let prompt = format!(
-        "MODEL_DOCTOR_CONTEXT_{id}. Read the full context and return compact JSON shaped exactly \
-         as {{\"case\":\"...\",\"begin\":\"...\",\"middle\":\"...\",\"end\":\"...\",\
-         \"linked\":\"...\",\"primary\":\"...\"}} using the labeled values. \
-         Case value: CTX_{id}_OK. Begin value: CTX_{id}_BEGIN. Link prefix: ALPHA_{id}. \
-         {segment} Middle value: CTX_{id}_MIDDLE. Distractors: primacy=ZX-7318 and \
-         primary-old=ZX-7310. Primary target: primary=ZX-7319. {segment} \
-         Link suffix: GAMMA_{id}. {segment} End value: CTX_{id}_END."
+        "MODEL_DOCTOR_CONTEXT_{id}. This probe measures context acceptance only. \
+         Response accuracy and exact wording are not evaluated. {segment}{segment}{segment} \
+         The full request is complete. Return any short non-empty response."
     );
     basic(id, prompt, false, context)
 }
@@ -138,4 +134,30 @@ fn generate_filler(target: usize) -> String {
         filler.push_str(BLOCK);
     }
     filler
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::{AuthMode, Protocol};
+
+    use super::*;
+
+    #[test]
+    fn context_capacity_probe_requests_only_a_non_empty_response() {
+        let context = PlanContext {
+            protocol: Protocol::OpenAiChat,
+            auth_mode: AuthMode::None,
+            model: "fixture-model",
+        };
+        let request = context_capacity("014", &context);
+        let prompt = request.body.json()["messages"][0]["content"]
+            .as_str()
+            .expect("OpenAI Chat prompt");
+
+        assert!(prompt.contains("This probe measures context acceptance only."));
+        assert!(prompt.contains("Return any short non-empty response."));
+        assert!(!prompt.contains("compact JSON shaped exactly"));
+        assert!(!prompt.contains("Link prefix"));
+        assert!(!prompt.contains("Primary target"));
+    }
 }
