@@ -1,16 +1,16 @@
-"""Validate evidence.v3 native tool-loop structure and transitions."""
+"""Validate evidence.v4 native tool-loop structure and transitions."""
 
 from __future__ import annotations
 
 from copy import deepcopy
 from typing import Mapping, Optional
 
-from model_doctor_contracts import V3_CONTRACT, contract_key
+from model_doctor_contracts import V4_CONTRACT, contract_key
 from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
 
 
-V3_TOOL_TEST_IDS = frozenset({"046", "047", "048", "049"})
-V3_MIN_TOOL_TURNS = {"046": 2, "047": 3, "048": 2, "049": 3}
+V4_TOOL_TEST_IDS = frozenset({"046", "047", "048", "049"})
+V4_MIN_TOOL_TURNS = {"046": 2, "047": 3, "048": 2, "049": 3}
 
 _OFFICIAL_REFERENCES = {
     "openai_chat": (
@@ -1942,7 +1942,7 @@ def validate_tool_loop_transitions(
     """Return bounded official-shape differences keyed by follow-up request ID."""
 
     try:
-        if contract_key(parsed.get("run")) != V3_CONTRACT:
+        if contract_key(parsed.get("run")) != V4_CONTRACT:
             return {}
     except ValueError:
         return {}
@@ -1951,7 +1951,7 @@ def validate_tool_loop_transitions(
     if not isinstance(tests, dict) or not isinstance(requests, dict):
         return {}
     differences: dict[str, list[dict[str, object]]] = {}
-    for test_id in sorted(V3_TOOL_TEST_IDS):
+    for test_id in sorted(V4_TOOL_TEST_IDS):
         manifest = tests.get(test_id)
         if not isinstance(manifest, dict):
             continue
@@ -2002,11 +2002,11 @@ def validate_tool_loop_transitions(
     return differences
 
 
-def _validate_v3_tool_pass_requests(test_id: str, requests: object) -> list[str]:
+def _validate_v4_tool_pass_requests(test_id: str, requests: object) -> list[str]:
     errors: list[str] = []
     if not isinstance(requests, list):
         return [f"Test {test_id} PASS requests must be an array"]
-    minimum = V3_MIN_TOOL_TURNS[test_id]
+    minimum = V4_MIN_TOOL_TURNS[test_id]
     if len(requests) < minimum:
         errors.append(f"Test {test_id} PASS requires at least {minimum} tool-loop turns")
     for turn, request in enumerate(requests, start=1):
@@ -2053,20 +2053,20 @@ def _validate_v3_tool_pass_requests(test_id: str, requests: object) -> list[str]
     return errors
 
 
-def _validate_v3_tool_pass_review(
+def _validate_v4_tool_pass_review(
     parsed: dict,
     test_id: str,
     review: object,
 ) -> list[str]:
     if not isinstance(review, dict):
         return [f"Test {test_id} review must be an object"]
-    if review.get("reviewedStatus") != "PASS" or test_id not in V3_TOOL_TEST_IDS:
+    if review.get("reviewedStatus") != "PASS" or test_id not in V4_TOOL_TEST_IDS:
         return []
     try:
         contract = contract_key(parsed.get("run"))
     except ValueError as error:
         return [f"Test {test_id} PASS has an invalid run contract: {error}"]
-    if contract != V3_CONTRACT:
+    if contract != V4_CONTRACT:
         return []
     tests = parsed.get("tests", {})
     request_map = parsed.get("requests", {})
@@ -2092,5 +2092,5 @@ def _validate_v3_tool_pass_review(
             errors.append(
                 f"Test {test_id} request map key {request_id} does not match request_id"
             )
-    errors.extend(_validate_v3_tool_pass_requests(test_id, mapped))
+    errors.extend(_validate_v4_tool_pass_requests(test_id, mapped))
     return errors

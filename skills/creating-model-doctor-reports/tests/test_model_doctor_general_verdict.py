@@ -19,10 +19,8 @@ from model_doctor_general_verdict import (  # noqa: E402
 from model_doctor_contracts import (  # noqa: E402
     CONTRACT_TEST_IDS,
     CONTRACT_VERDICT_PARTITIONS,
-    V1_CONTRACT,
-    V2_CONTRACT,
-    V3_CONTRACT,
-    V3_TEST_IDS,
+    V4_CONTRACT,
+    V4_TEST_IDS,
 )
 from model_doctor_assessment import (  # noqa: E402
     assemble_assessment,
@@ -49,18 +47,18 @@ class GeneralVerdictTests(unittest.TestCase):
             CORE_TEST_IDS | ENHANCED_TEST_IDS,
             frozenset(RETAINED_TEST_IDS),
         )
-        self.assertEqual(len(CORE_TEST_IDS), 31)
-        self.assertEqual(len(ENHANCED_TEST_IDS), 15)
+        self.assertEqual(len(CORE_TEST_IDS), 32)
+        self.assertEqual(len(ENHANCED_TEST_IDS), 14)
 
     def test_all_checks_pass(self) -> None:
-        verdict = derive_general_verdict(self.all_pass, V2_CONTRACT)
+        verdict = derive_general_verdict(self.all_pass, V4_CONTRACT)
 
         self.assertEqual(verdict["level"], "PASS")
         self.assertEqual(verdict["label"], "通用能力通过")
         self.assertEqual(verdict["collectedTests"], 46)
         self.assertEqual(verdict["passedTests"], 46)
-        self.assertEqual(verdict["passedCoreTests"], 31)
-        self.assertEqual(verdict["passedEnhancedTests"], 15)
+        self.assertEqual(verdict["passedCoreTests"], 32)
+        self.assertEqual(verdict["passedEnhancedTests"], 14)
         self.assertEqual(
             verdict["statement"],
             "本轮固定 46 项检测全部通过，因此判定通用能力通过。",
@@ -70,16 +68,16 @@ class GeneralVerdictTests(unittest.TestCase):
         statuses = dict(self.all_pass)
         statuses["060"] = "FAIL"
 
-        verdict = derive_general_verdict(statuses, V2_CONTRACT)
+        verdict = derive_general_verdict(statuses, V4_CONTRACT)
 
         self.assertEqual(verdict["level"], "CONDITIONAL_PASS")
         self.assertEqual(verdict["label"], "通用能力有条件通过")
         self.assertEqual(verdict["passedTests"], 45)
-        self.assertEqual(verdict["passedCoreTests"], 31)
-        self.assertEqual(verdict["passedEnhancedTests"], 14)
+        self.assertEqual(verdict["passedCoreTests"], 32)
+        self.assertEqual(verdict["passedEnhancedTests"], 13)
         self.assertEqual(
             verdict["statement"],
-            "本轮固定 46 项检测通过 45 项，31 项基础必过项全部通过；"
+            "本轮固定 46 项检测通过 45 项，32 项基础必过项全部通过；"
             "1 项增强能力存在限制，因此判定通用能力有条件通过。",
         )
 
@@ -87,12 +85,12 @@ class GeneralVerdictTests(unittest.TestCase):
         statuses = dict(self.all_pass)
         statuses["001"] = "FAIL"
 
-        verdict = derive_general_verdict(statuses, V2_CONTRACT)
+        verdict = derive_general_verdict(statuses, V4_CONTRACT)
 
         self.assertEqual(verdict["level"], "FAIL")
         self.assertEqual(verdict["label"], "通用能力未通过")
         self.assertEqual(verdict["passedTests"], 45)
-        self.assertEqual(verdict["passedCoreTests"], 30)
+        self.assertEqual(verdict["passedCoreTests"], 31)
         self.assertEqual(
             verdict["statement"],
             "本轮固定 46 项检测通过 45 项，其中 1 项基础必过能力未满足，"
@@ -104,15 +102,15 @@ class GeneralVerdictTests(unittest.TestCase):
         statuses["001"] = "FAIL"
         statuses["060"] = "FAIL"
 
-        verdict = derive_general_verdict(statuses, V2_CONTRACT)
+        verdict = derive_general_verdict(statuses, V4_CONTRACT)
 
         self.assertEqual(verdict["level"], "FAIL")
         self.assertEqual(verdict["passedTests"], 44)
-        self.assertEqual(verdict["passedCoreTests"], 30)
-        self.assertEqual(verdict["passedEnhancedTests"], 14)
+        self.assertEqual(verdict["passedCoreTests"], 31)
+        self.assertEqual(verdict["passedEnhancedTests"], 13)
 
     def test_partial_collection_is_not_assessed(self) -> None:
-        verdict = derive_general_verdict({"001": "PASS"}, V1_CONTRACT)
+        verdict = derive_general_verdict({"001": "PASS"}, V4_CONTRACT)
 
         self.assertEqual(verdict["level"], "NOT_ASSESSED")
         self.assertEqual(verdict["label"], "通用能力未评定")
@@ -129,62 +127,62 @@ class GeneralVerdictTests(unittest.TestCase):
         statuses["001"] = "UNKNOWN"
 
         with self.assertRaisesRegex(ValueError, "Invalid status for test 001"):
-            derive_general_verdict(statuses, V2_CONTRACT)
+            derive_general_verdict(statuses, V4_CONTRACT)
 
-    def test_v3_partition_has_32_core_and_15_enhanced(self) -> None:
-        core_ids, enhanced_ids = CONTRACT_VERDICT_PARTITIONS[V3_CONTRACT]
+    def test_v4_partition_has_32_core_and_14_enhanced(self) -> None:
+        core_ids, enhanced_ids = CONTRACT_VERDICT_PARTITIONS[V4_CONTRACT]
 
         self.assertEqual(32, len(core_ids))
-        self.assertEqual(15, len(enhanced_ids))
+        self.assertEqual(14, len(enhanced_ids))
         self.assertIn("046", core_ids)
         self.assertEqual(frozenset(), core_ids & enhanced_ids)
-        self.assertEqual(CONTRACT_TEST_IDS[V3_CONTRACT], core_ids | enhanced_ids)
+        self.assertEqual(CONTRACT_TEST_IDS[V4_CONTRACT], core_ids | enhanced_ids)
 
-    def test_v3_all_checks_pass_uses_47_totals(self) -> None:
+    def test_v4_all_checks_pass_uses_46_totals(self) -> None:
         statuses = {
-            test_id: "PASS" for test_id in CONTRACT_TEST_IDS[V3_CONTRACT]
+            test_id: "PASS" for test_id in CONTRACT_TEST_IDS[V4_CONTRACT]
         }
 
-        verdict = derive_general_verdict(statuses, V3_CONTRACT)
+        verdict = derive_general_verdict(statuses, V4_CONTRACT)
 
         self.assertEqual("PASS", verdict["level"])
-        self.assertEqual(47, verdict["totalTests"])
-        self.assertEqual(47, verdict["passedTests"])
+        self.assertEqual(46, verdict["totalTests"])
+        self.assertEqual(46, verdict["passedTests"])
         self.assertEqual(32, verdict["totalCoreTests"])
         self.assertEqual(32, verdict["passedCoreTests"])
-        self.assertEqual(15, verdict["totalEnhancedTests"])
+        self.assertEqual(14, verdict["totalEnhancedTests"])
         self.assertEqual(
-            "本轮固定 47 项检测全部通过，因此判定通用能力通过。",
+            "本轮固定 46 项检测全部通过，因此判定通用能力通过。",
             verdict["statement"],
         )
 
-    def test_v3_046_failure_is_core_failure(self) -> None:
+    def test_v4_046_failure_is_core_failure(self) -> None:
         statuses = {
-            test_id: "PASS" for test_id in CONTRACT_TEST_IDS[V3_CONTRACT]
+            test_id: "PASS" for test_id in CONTRACT_TEST_IDS[V4_CONTRACT]
         }
         statuses["046"] = "FAIL"
 
-        verdict = derive_general_verdict(statuses, V3_CONTRACT)
+        verdict = derive_general_verdict(statuses, V4_CONTRACT)
 
         self.assertEqual("FAIL", verdict["level"])
         self.assertEqual(31, verdict["passedCoreTests"])
-        self.assertEqual(15, verdict["passedEnhancedTests"])
+        self.assertEqual(14, verdict["passedEnhancedTests"])
         self.assertIn("1 项基础必过能力未满足", verdict["statement"])
 
     def test_v2_all_checks_pass_keeps_46_totals(self) -> None:
-        verdict = derive_general_verdict(self.all_pass, V2_CONTRACT)
+        verdict = derive_general_verdict(self.all_pass, V4_CONTRACT)
 
         self.assertEqual("PASS", verdict["level"])
         self.assertEqual(46, verdict["totalTests"])
-        self.assertEqual(31, verdict["totalCoreTests"])
-        self.assertEqual(15, verdict["totalEnhancedTests"])
+        self.assertEqual(32, verdict["totalCoreTests"])
+        self.assertEqual(14, verdict["totalEnhancedTests"])
 
     def test_v1_partial_uses_legacy_46_denominator(self) -> None:
-        verdict = derive_general_verdict({"001": "PASS"}, V1_CONTRACT)
+        verdict = derive_general_verdict({"001": "PASS"}, V4_CONTRACT)
 
         self.assertEqual("NOT_ASSESSED", verdict["level"])
         self.assertEqual(46, verdict["totalTests"])
-        self.assertEqual(31, verdict["totalCoreTests"])
+        self.assertEqual(32, verdict["totalCoreTests"])
         self.assertIn("1/46", verdict["statement"])
 
 
@@ -315,15 +313,15 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         }
         return parsed, authored_reviews
 
-    def _v3_fixture(
+    def _v4_fixture(
         self,
         statuses: dict[str, str] | None = None,
         family: str = "OPENAI_CHAT_COMPLETIONS",
     ) -> tuple[dict, dict]:
         final_statuses = statuses or {
-            test_id: "PASS" for test_id in V3_TEST_IDS
+            test_id: "PASS" for test_id in V4_TEST_IDS
         }
-        parsed, reviews = self._fixture(final_statuses, V3_CONTRACT)
+        parsed, reviews = self._fixture(final_statuses, V4_CONTRACT)
         parsed["run"].update(
             {
                 "compatibilityProfile": COMPATIBILITY_PROFILE,
@@ -359,7 +357,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             parsed["tests"][test_id]["requestRefs"] = request_refs
             parsed["requests"].update(
                 {
-                    request_id: self._v3_tool_request(
+                    request_id: self._v4_tool_request(
                         test_id,
                         turn,
                         total_turns,
@@ -373,7 +371,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         return parsed, reviews
 
     @staticmethod
-    def _v3_tool_request(test_id: str, turn: int, total_turns: int) -> dict:
+    def _v4_tool_request(test_id: str, turn: int, total_turns: int) -> dict:
         request_id = f"test-{test_id}-turn-{turn}"
         body = {
             "model": "gpt-test",
@@ -467,21 +465,21 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
         for test_id in ("017", "018", "020", "024", "035", "036"):
             statuses[test_id] = "FAIL"
-        parsed, reviews = self._fixture(statuses, V2_CONTRACT)
+        parsed, reviews = self._v4_fixture(statuses)
 
         assessment = assemble_assessment(parsed, reviews)
 
         self.assertNotIn("generalVerdict", reviews["capabilitySummary"])
         self.assertEqual(
-            derive_general_verdict(statuses, V2_CONTRACT),
+            derive_general_verdict(statuses, V4_CONTRACT),
             assessment["capabilitySummary"]["generalVerdict"],
         )
         self.assertEqual([], validate_assessment(assessment))
 
-    def test_assembler_injects_v3_opencodex_compatibility_without_mutating_reviews(
+    def test_assembler_injects_v4_opencodex_compatibility_without_mutating_reviews(
         self,
     ) -> None:
-        parsed, reviews = self._v3_fixture()
+        parsed, reviews = self._v4_fixture()
         original_reviews = deepcopy(reviews)
 
         assessment = assemble_assessment(parsed, reviews)
@@ -504,7 +502,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         self.assertEqual([], validate_assessment(assessment))
 
     def test_old_evidence_assembles_not_assessed_compatibility(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
 
@@ -515,10 +513,10 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         self.assertEqual([], compatibility["failedTestIds"])
         self.assertEqual([], validate_assessment(assessment))
 
-    def test_v3_required_failure_assembles_failed_compatibility(self) -> None:
-        statuses = {test_id: "PASS" for test_id in V3_TEST_IDS}
+    def test_v4_required_failure_assembles_failed_compatibility(self) -> None:
+        statuses = {test_id: "PASS" for test_id in V4_TEST_IDS}
         statuses["004"] = "FAIL"
-        parsed, reviews = self._v3_fixture(statuses)
+        parsed, reviews = self._v4_fixture(statuses)
 
         assessment = assemble_assessment(parsed, reviews)
 
@@ -530,7 +528,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         self.assertEqual([], validate_assessment(assessment))
 
     def test_reviews_cannot_author_opencodex_compatibility(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
         reviews["capabilitySummary"]["openCodexCompatibility"] = {}
 
         self.assertIn(
@@ -539,7 +537,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         )
 
     def test_reviews_reject_non_object_parsed_run_before_assembly(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
         parsed["run"] = []
 
         self.assertIn("Parsed run must be an object", validate_reviews(parsed, reviews))
@@ -547,7 +545,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             assemble_assessment(parsed, reviews)
 
     def test_assessment_rejects_every_tampered_opencodex_field(self) -> None:
-        parsed, reviews = self._v3_fixture()
+        parsed, reviews = self._v4_fixture()
         assessment = assemble_assessment(parsed, reviews)
         invalid_values = {
             "profile": "opencodex-next",
@@ -573,7 +571,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
                 )
 
     def test_assessment_recomputes_opencodex_compatibility_from_sources(self) -> None:
-        parsed, reviews = self._v3_fixture()
+        parsed, reviews = self._v4_fixture()
         assessment = assemble_assessment(parsed, reviews)
         mutations = (
             lambda value: value["run"].update(
@@ -598,7 +596,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
                 )
 
     def test_assessment_validation_handles_non_object_run(self) -> None:
-        parsed, reviews = self._v3_fixture()
+        parsed, reviews = self._v4_fixture()
         assessment = assemble_assessment(parsed, reviews)
         assessment["run"] = []
 
@@ -612,9 +610,9 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         )
 
     def test_reviews_cannot_author_general_verdict(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
         reviews["capabilitySummary"]["generalVerdict"] = derive_general_verdict(
-            {"001": "PASS"}, V1_CONTRACT
+            {"001": "PASS"}, V4_CONTRACT
         )
 
         errors = validate_reviews(parsed, reviews)
@@ -625,7 +623,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         )
 
     def test_partial_assessment_is_not_assessed(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
 
@@ -636,7 +634,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
 
     def test_assessment_rejects_every_tampered_verdict_field(self) -> None:
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
-        parsed, reviews = self._fixture(statuses, V2_CONTRACT)
+        parsed, reviews = self._v4_fixture(statuses)
         assessment = assemble_assessment(parsed, reviews)
         invalid_values = {
             "level": "FAIL",
@@ -646,8 +644,8 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             "totalTests": 45,
             "passedCoreTests": 30,
             "totalCoreTests": 30,
-            "passedEnhancedTests": 14,
-            "totalEnhancedTests": 14,
+            "passedEnhancedTests": 13,
+            "totalEnhancedTests": 13,
             "statement": "人工改写的结论。",
         }
 
@@ -661,7 +659,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
                 )
 
     def test_assessment_rejects_boolean_verdict_counts(self) -> None:
-        parsed, reviews = self._fixture({"001": "PASS"}, V1_CONTRACT)
+        parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
         assessment = assemble_assessment(parsed, reviews)
         count_fields = (
             "collectedTests",
@@ -698,7 +696,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         )
         verdict_schema = schema["$defs"]["generalVerdict"]
         self.assertFalse(verdict_schema["additionalProperties"])
-        self.assertEqual(2, len(verdict_schema["oneOf"]))
+        self.assertEqual(1, len(verdict_schema["oneOf"]))
         self.assertEqual(
             ["PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"],
             verdict_schema["properties"]["level"]["enum"],
@@ -711,7 +709,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual("llm-capability-doctor.assessment.v8", schema["$id"])
+        self.assertEqual("llm-capability-doctor.assessment.v9", schema["$id"])
         summary_schema = schema["$defs"]["capabilitySummary"]
         self.assertIn("openCodexCompatibility", summary_schema["required"])
         self.assertEqual(
@@ -846,7 +844,7 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
         for test_id in ("017", "018", "020", "024", "035", "036"):
             statuses[test_id] = "FAIL"
-        summary = self._summary(derive_general_verdict(statuses, V2_CONTRACT))
+        summary = self._summary(derive_general_verdict(statuses, V4_CONTRACT))
 
         html = _capability_summary(self._assessment(summary))
 
@@ -855,7 +853,7 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
             '<p class="verdict-value">通用能力有条件通过</p>',
             summary["generalVerdict"]["statement"],
             "40 通过 · 6 未通过",
-            "31 / 31 通过",
+            "32 / 32 通过",
             "32K Token 近似档",
             "当前主要有 1 类问题：一项增强能力受限。",
             "OpenAI Chat",
@@ -886,14 +884,14 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
                 summary = self._summary(
                     derive_general_verdict(
                         statuses,
-                        V1_CONTRACT if len(statuses) < 46 else V2_CONTRACT,
+                        V4_CONTRACT if len(statuses) < 46 else V4_CONTRACT,
                     )
                 )
                 html = _capability_summary(self._assessment(summary))
                 self.assertIn(f'<p class="verdict-value">{label}</p>', html)
 
     def test_partial_report_shows_collected_count_instead_of_pass_ratio(self) -> None:
-        summary = self._summary(derive_general_verdict({"001": "PASS"}, V1_CONTRACT))
+        summary = self._summary(derive_general_verdict({"001": "PASS"}, V4_CONTRACT))
 
         html = _capability_summary(self._assessment(summary))
 
@@ -902,7 +900,7 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
 
     def test_new_conclusion_fields_are_html_escaped(self) -> None:
         summary = self._summary(
-            derive_general_verdict({"001": "PASS"}, V1_CONTRACT)
+            derive_general_verdict({"001": "PASS"}, V4_CONTRACT)
         )
         summary["generalVerdict"]["label"] = '<script data-x="1">label</script>'
         summary["generalVerdict"]["statement"] = "<b>statement</b>"
@@ -942,8 +940,8 @@ class GeneralVerdictSkillContractTests(unittest.TestCase):
         for required in (
             "`reviews.v2` 不得填写 `generalVerdict`",
             "总体等级由 `assemble_assessment` 程序生成",
-            "31 项基础必过项",
-            "15 项增强能力项",
+            "32 项基础必过项",
+            "14 项增强能力项",
             "通用能力通过",
             "通用能力有条件通过",
             "通用能力未通过",
@@ -959,21 +957,21 @@ class GeneralVerdictSkillContractTests(unittest.TestCase):
         for required in (
             "## 6. Deterministic General Capability Verdict",
             "`reviews.v2` must not contain `generalVerdict`",
-            "31 core checks",
-            "15 enhanced checks",
+            "32 core checks",
+            "14 enhanced checks",
             "`PASS`：46 项全部 PASS",
-            "`CONDITIONAL_PASS`：31 项基础必过项全部 PASS",
+            "`CONDITIONAL_PASS`：32 项基础必过项全部 PASS",
             "`FAIL`：任意基础必过项 FAIL",
-            "`NOT_ASSESSED`：历史 evidence.v1 未采集完整 46 项",
+            "`NOT_ASSESSED`：仅用于内部验证不完整状态",
             "本轮固定 46 项检测全部通过，因此判定通用能力通过。",
             "不构成项目 READY/BLOCKED 或可上线/不可上线判定",
         ):
             self.assertIn(required, rules)
 
-        core_section = rules.split("### Core checks (31)", 1)[1].split(
-            "### Enhanced checks (15)", 1
+        core_section = rules.split("### Core checks (32)", 1)[1].split(
+            "### Enhanced checks (14)", 1
         )[0]
-        enhanced_section = rules.split("### Enhanced checks (15)", 1)[1].split(
+        enhanced_section = rules.split("### Enhanced checks (14)", 1)[1].split(
             "### Fixed statements", 1
         )[0]
         for test_id in CORE_TEST_IDS:

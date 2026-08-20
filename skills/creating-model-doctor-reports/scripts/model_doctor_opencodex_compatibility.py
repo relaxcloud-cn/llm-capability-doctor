@@ -7,7 +7,7 @@ from typing import Mapping
 
 
 COMPATIBILITY_PROFILE = "opencodex-2.7.42-data-format"
-EVIDENCE_CONTRACT = ("llm-capability-doctor.evidence.v3", "0.11.0")
+EVIDENCE_CONTRACT = ("llm-capability-doctor.evidence.v4", "0.12.0")
 REQUIRED_TEST_IDS = (
     "002",
     "004",

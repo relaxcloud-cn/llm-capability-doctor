@@ -21,9 +21,7 @@ from model_doctor_assessment import (  # noqa: E402
 )
 from model_doctor_contracts import (  # noqa: E402
     CONTRACT_TEST_IDS,
-    V1_CONTRACT,
-    V2_CONTRACT,
-    V3_CONTRACT,
+    V4_CONTRACT,
 )
 from model_doctor_html import (  # noqa: E402
     _request_evidence,
@@ -31,7 +29,7 @@ from model_doctor_html import (  # noqa: E402
 )
 
 
-ASSESSMENT_V7 = "llm-capability-doctor.assessment.v8"
+ASSESSMENT_V7 = "llm-capability-doctor.assessment.v9"
 PARSED_EVIDENCE_V1 = "llm-capability-doctor.parsed-evidence.v1"
 REVIEWS_V2 = "llm-capability-doctor.reviews.v2"
 ASSET_DIR = SKILL_DIR / "assets"
@@ -115,7 +113,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             "metrics": {"http_status": "200", "curl_exit_code": "0"},
         }
 
-    def _v3_request(self, request_id: str, response: dict) -> dict:
+    def _v4_request(self, request_id: str, response: dict) -> dict:
         request = self._request(request_id, response)
         request.update(
             {
@@ -132,7 +130,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         )
         return request
 
-    def _v3_tool_loop(self, test_id: str) -> list[dict]:
+    def _v4_tool_loop(self, test_id: str) -> list[dict]:
         turn_count = {"046": 2, "047": 3, "048": 2, "049": 3}[test_id]
         fixture_dir = SKILL_DIR.parents[1] / "src" / "protocol" / "fixtures"
         tool_stream = (fixture_dir / "openai_chat_tool.sse").read_text(
@@ -246,8 +244,8 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             "run": {
                 "model": "fixture-model",
                 "api_key": "[MASKED]",
-                "log_schema": V1_CONTRACT[0],
-                "script_version": V1_CONTRACT[1],
+                "log_schema": V4_CONTRACT[0],
+                "script_version": V4_CONTRACT[1],
             },
             "tokenTotals": {},
             "warnings": [],
@@ -319,16 +317,16 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                 "limitations": [],
                 "retestInstructions": [],
             }
-        if contract == V3_CONTRACT:
+        if contract == V4_CONTRACT:
             parsed["requests"] = {
-                request_id: self._v3_request(
+                request_id: self._v4_request(
                     request_id,
                     self._chat_response(request_id),
                 )
                 for request_id in parsed["requests"]
             }
             for test_id in ("046", "047", "048", "049"):
-                requests = self._v3_tool_loop(test_id)
+                requests = self._v4_tool_loop(test_id)
                 request_ids = [request["request_id"] for request in requests]
                 parsed["requests"].update(
                     {request["request_id"]: request for request in requests}
@@ -339,8 +337,8 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                 ]
         return parsed, reviews
 
-    def _v3_tool_turn_fixture(self) -> tuple[dict, dict]:
-        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+    def _v4_tool_turn_fixture(self) -> tuple[dict, dict]:
+        parsed, reviews = self._complete_fixture(V4_CONTRACT)
         tool_request_ids = {
             request_id
             for test_id in ("046", "047", "048", "049")
@@ -416,15 +414,15 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                     properties["passedEnhancedTests"]["maximum"],
                 )
             )
-        self.assertEqual({(46, 31, 15), (47, 32, 15)}, combinations)
-        self.assertEqual({(46, 46, 31, 15), (47, 47, 32, 15)}, maxima)
+        self.assertEqual({(46, 32, 14)}, combinations)
+        self.assertEqual({(46, 46, 32, 14)}, maxima)
 
     def test_assessment_validator_rejects_contract_total_mismatch(self) -> None:
-        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+        parsed, reviews = self._complete_fixture(V4_CONTRACT)
         assessment = assemble_assessment(parsed, reviews)
         mismatched = deepcopy(assessment)
-        mismatched["run"]["log_schema"] = V2_CONTRACT[0]
-        mismatched["run"]["script_version"] = V2_CONTRACT[1]
+        mismatched["run"]["log_schema"] = "llm-capability-doctor.evidence.v3"
+        mismatched["run"]["script_version"] = "0.11.0"
 
         self.assertTrue(
             any(
@@ -437,12 +435,12 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             {},
             [],
             {
-                "log_schema": V3_CONTRACT[0],
-                "script_version": V2_CONTRACT[1],
+                "log_schema": V4_CONTRACT[0],
+                "script_version": "0.11.0",
             },
             {
-                "log_schema": [V3_CONTRACT[0]],
-                "script_version": V3_CONTRACT[1],
+                "log_schema": [V4_CONTRACT[0]],
+                "script_version": V4_CONTRACT[1],
             },
         )
         for run in malformed_runs:
@@ -455,8 +453,8 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
                     self.fail(f"invalid assessment run crashed: {error}")
                 self.assertTrue(any("run contract" in error for error in errors), errors)
 
-    def test_html_renders_v3_stream_and_tool_metadata(self) -> None:
-        request = self._v3_request(
+    def test_html_renders_v4_stream_and_tool_metadata(self) -> None:
+        request = self._v4_request(
             "test-046-turn-1",
             self._chat_response("test-046-turn-1"),
         )
@@ -487,13 +485,13 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             html.index("模型返回的完整内容"),
         )
 
-    def test_combined_v8_v3_derives_47_32_15_totals(self) -> None:
-        parsed, reviews = self._complete_fixture(V3_CONTRACT)
+    def test_combined_v8_v4_derives_47_32_15_totals(self) -> None:
+        parsed, reviews = self._complete_fixture(V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
 
         verdict = assessment["capabilitySummary"]["generalVerdict"]
-        self.assertEqual((47, 32, 15), (
+        self.assertEqual((46, 32, 14), (
             verdict["totalTests"],
             verdict["totalCoreTests"],
             verdict["totalEnhancedTests"],
@@ -502,12 +500,12 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         self.assertEqual([], validate_assessment(assessment))
 
     def test_combined_v8_v2_preserves_46_31_15_totals(self) -> None:
-        parsed, reviews = self._complete_fixture(V2_CONTRACT)
+        parsed, reviews = self._complete_fixture(V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
 
         verdict = assessment["capabilitySummary"]["generalVerdict"]
-        self.assertEqual((46, 31, 15), (
+        self.assertEqual((46, 32, 14), (
             verdict["totalTests"],
             verdict["totalCoreTests"],
             verdict["totalEnhancedTests"],
@@ -520,7 +518,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             SCRIPT_DIR / "model_doctor_assessment.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("assessment.v8 contract", source)
+        self.assertIn("assessment.v9 contract", source)
         self.assertNotIn("assessment.v6 contract", source)
 
 

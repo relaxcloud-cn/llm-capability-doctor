@@ -37,7 +37,7 @@ from model_doctor_report import main  # noqa: E402
 from model_doctor_verified_facts import validate_verified_facts  # noqa: E402
 
 
-def _full_v2_log() -> str:
+def _full_v4_log() -> str:
     manifests = "".join(
         "========== TEST-{0} BEGIN ==========\n"
         "name: fixture-{0}\n"
@@ -48,9 +48,10 @@ def _full_v2_log() -> str:
     )
     return (
         "========== MODEL DOCTOR RUN ==========\n"
-        "script_version: 0.10.0\n"
+        "script_version: 0.12.0\n"
         "section_encoding: base64\n"
-        "log_schema: llm-capability-doctor.evidence.v2\n"
+        "log_schema: llm-capability-doctor.evidence.v4\n"
+        "compatibility_profile: opencodex-2.7.42-data-format\n"
         "selected_test_count: 46\n"
         + manifests
         + "========== RUN SUMMARY ==========\n"
@@ -136,8 +137,8 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "url": "https://example.invalid/v1/chat/completions",
                 "model": "fixture-model",
                 "api_key": "[MASKED]",
-                "log_schema": "llm-capability-doctor.evidence.v1",
-                "script_version": "0.9.0",
+                "log_schema": "llm-capability-doctor.evidence.v4",
+                "script_version": "0.12.0",
             },
             "tokenTotals": {},
             "warnings": [],
@@ -425,8 +426,8 @@ class ModelDoctorV6Tests(unittest.TestCase):
                 "url": "https://example.invalid/v1/chat/completions",
                 "model": "fixture-model",
                 "api_key": "[MASKED]",
-                "log_schema": "llm-capability-doctor.evidence.v1",
-                "script_version": "0.9.0",
+                "log_schema": "llm-capability-doctor.evidence.v4",
+                "script_version": "0.12.0",
             },
             "tokenTotals": {},
             "warnings": [],
@@ -990,7 +991,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -1364,55 +1365,37 @@ class ModelDoctorV6Tests(unittest.TestCase):
         self.assertIn("tests contain a non-binary reviewedStatus", errors)
 
     def test_parser_rejects_empty_manifest_category(self) -> None:
-        log = """========== MODEL DOCTOR RUN ==========
-log_schema: llm-capability-doctor.evidence.v1
-script_version: 0.9.0
-section_encoding: base64
-collection_profile: custom
-selected_test_count: 1
-url: https://example.invalid/v1/chat/completions
-model: fixture
-api_key: [MASKED]
-========== TEST-002 BEGIN ==========
-name: 协议识别
-category:
-request_refs:
-========== TEST-002 END ==========
-========== RUN SUMMARY ==========
-request_count: 0
-test_manifest_count: 1
-========== END ==========
-"""
+        log = _full_v4_log().replace("category: fixture", "category:", 1)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "empty-category.log"
             path.write_text(log, encoding="utf-8")
 
             with self.assertRaisesRegex(
                 ValueError,
-                "TEST-002 category must be non-empty",
+                "category must be non-empty",
             ):
                 parse_log(path)
 
-    def test_parser_accepts_complete_profile_free_v2(self) -> None:
-        parsed = self._parse_text_log(_full_v2_log(), "full-v2.log")
+    def test_parser_accepts_complete_v4(self) -> None:
+        parsed = self._parse_text_log(_full_v4_log(), "full-v4.log")
 
         self.assertEqual(
-            "llm-capability-doctor.evidence.v2",
+            "llm-capability-doctor.evidence.v4",
             parsed["run"]["log_schema"],
         )
         self.assertNotIn("collection_profile", parsed["run"])
         self.assertEqual(46, len(parsed["tests"]))
 
-    def test_parser_rejects_invalid_v2_contract_variants(self) -> None:
-        complete = _full_v2_log()
+    def test_parser_rejects_invalid_v4_contract_variants(self) -> None:
+        complete = _full_v4_log()
         variants = {
             "profile": complete.replace(
                 "section_encoding: base64\n",
                 "section_encoding: base64\ncollection_profile: full\n",
             ),
             "mixed": complete.replace(
-                "script_version: 0.10.0",
-                "script_version: 0.9.0",
+                "script_version: 0.12.0",
+                "script_version: 0.11.0",
             ),
             "incomplete": re.sub(
                 r"^========== TEST-060 BEGIN ==========\n.*?"
@@ -1472,11 +1455,11 @@ test_manifest_count: 1
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             schema["$id"],
         )
         self.assertEqual(
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
@@ -1921,7 +1904,7 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             assessment["schemaVersion"],
         )
         self.assertIn('<section class="report-section" id="conclusion"', html)
@@ -1949,7 +1932,7 @@ test_manifest_count: 1
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             "interfaceProtocol",
             "contextWindow",
             "highestVerifiedInputTokens",
@@ -1966,20 +1949,19 @@ test_manifest_count: 1
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
         for marker in (
-            "collector v0.11.0",
-            "llm-capability-doctor.evidence.v3",
+            "collector v0.12.0",
+            "llm-capability-doctor.evidence.v4",
             "compatibility_profile: opencodex-2.7.42-data-format",
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             "openCodexCompatibility",
             "002、004、005、006、040、041、043、047",
             "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
         ):
             self.assertIn(marker, skill_text)
         self.assertIn("不得填写 `generalVerdict` 或 `openCodexCompatibility`", skill_text)
-        self.assertIn("v1/v2", skill_text)
-        self.assertIn("NOT_ASSESSED", skill_text)
+        self.assertIn("Only the exact v0.12.0/evidence.v4 pair is accepted", skill_text)
 
-    def test_evaluation_rules_define_opencodex_v3_format_contract(self) -> None:
+    def test_evaluation_rules_define_opencodex_v4_format_contract(self) -> None:
         rules = (SKILL_DIR / "references" / "evaluation-rules.md").read_text(
             encoding="utf-8"
         )
@@ -1988,10 +1970,10 @@ test_manifest_count: 1
             return rules.split(current, 1)[1].split(following, 1)[0]
 
         for marker in (
-            "collector v0.11.0",
-            "llm-capability-doctor.evidence.v3",
+            "collector v0.12.0",
+            "llm-capability-doctor.evidence.v4",
             "compatibility_profile: opencodex-2.7.42-data-format",
-            "assessment.v8.capabilitySummary.openCodexCompatibility",
+            "assessment.v9.capabilitySummary.openCodexCompatibility",
             "002、004、005、006、040、041、043、047",
             "OPENAI_CHAT_COMPLETIONS",
             "OPENAI_RESPONSES",
@@ -2013,7 +1995,6 @@ test_manifest_count: 1
         ):
             self.assertIn(marker, rules)
         self.assertIn("045 仍是增强能力项", rules)
-        self.assertIn("v1/v2", rules)
         self.assertIn("NOT_ASSESSED", rules)
 
         protocol_rules = section("### 002 协议识别", "### 003 鉴权与模型接受")
@@ -2094,14 +2075,13 @@ test_manifest_count: 1
         self.assertIn("second tool remains bare `get_time`", serial_tool_rules)
 
         concurrency_rules = section("### 057 并发响应时间", "## 13. Security Business Language")
-        self.assertIn("in evidence v2 and v3", concurrency_rules)
-        self.assertNotIn("in evidence v2;", concurrency_rules)
+        self.assertIn("in evidence v4", concurrency_rules)
 
     def test_readme_explains_bounded_opencodex_compatibility_result(self) -> None:
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
 
         for marker in (
-            "llm-capability-doctor.assessment.v8",
+            "llm-capability-doctor.assessment.v9",
             "002、004、005、006、040、041、043、047",
             "OpenAI Chat Completions",
             "OpenAI Responses",
@@ -2114,9 +2094,8 @@ test_manifest_count: 1
             "python3 -m unittest discover",
         ):
             self.assertIn(marker, readme)
-        self.assertIn("47 个固定检测项", readme)
-        self.assertIn("v1/v2", readme)
-        self.assertIn("NOT_ASSESSED", readme)
+        self.assertIn("46 个固定检测项", readme)
+        self.assertIn("只接受 evidence.v4", readme)
 
     def test_skill_reviews_example_is_valid_and_evidence_bounded(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

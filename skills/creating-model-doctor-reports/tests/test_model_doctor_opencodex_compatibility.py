@@ -12,7 +12,7 @@ SCRIPT_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_doctor_log import RETAINED_TEST_IDS, parse_log  # noqa: E402
-from model_doctor_contracts import V3_TEST_IDS  # noqa: E402
+from model_doctor_contracts import V4_TEST_IDS  # noqa: E402
 from model_doctor_opencodex_compatibility import (  # noqa: E402
     COMPATIBILITY_PROFILE,
     REQUIRED_TEST_IDS,
@@ -40,13 +40,13 @@ EXPECTED_FIELDS = {
 
 
 def _full_log(
-    schema: str = "llm-capability-doctor.evidence.v3",
-    version: str = "0.11.0",
+    schema: str = "llm-capability-doctor.evidence.v4",
+    version: str = "0.12.0",
     compatibility_profile: str | None = COMPATIBILITY_PROFILE,
 ) -> str:
     test_ids = (
-        V3_TEST_IDS
-        if schema == "llm-capability-doctor.evidence.v3"
+        V4_TEST_IDS
+        if schema == "llm-capability-doctor.evidence.v4"
         else RETAINED_TEST_IDS
     )
     manifests = "".join(
@@ -78,7 +78,7 @@ def _full_log(
     )
 
 
-class EvidenceV3ParserTests(unittest.TestCase):
+class EvidenceV4ParserTests(unittest.TestCase):
     def _parse(self, content: str, name: str = "evidence.log") -> dict:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -86,7 +86,7 @@ class EvidenceV3ParserTests(unittest.TestCase):
         path.write_text(content, encoding="utf-8")
         return parse_log(path)
 
-    def test_accepts_exact_v3_contract_and_exposes_camel_case_profile(self) -> None:
+    def test_accepts_exact_v4_contract_and_exposes_camel_case_profile(self) -> None:
         parsed = self._parse(_full_log())
 
         self.assertEqual(
@@ -94,9 +94,9 @@ class EvidenceV3ParserTests(unittest.TestCase):
             parsed["run"]["compatibilityProfile"],
         )
         self.assertNotIn("compatibility_profile", parsed["run"])
-        self.assertEqual(47, len(parsed["tests"]))
+        self.assertEqual(46, len(parsed["tests"]))
 
-    def test_rejects_missing_or_unknown_v3_profile(self) -> None:
+    def test_rejects_missing_or_unknown_v4_profile(self) -> None:
         for name, profile in {
             "missing": None,
             "unknown": "opencodex-next",
@@ -110,26 +110,26 @@ class EvidenceV3ParserTests(unittest.TestCase):
                     f"{name}.log",
                 )
 
-    def test_rejects_mixed_v3_schema_version_tuple(self) -> None:
+    def test_rejects_mixed_v4_schema_version_tuple(self) -> None:
         with self.assertRaisesRegex(ValueError, "schema/version pair"):
             self._parse(_full_log(version="0.10.0"))
 
-    def test_rejects_incomplete_v3_evidence(self) -> None:
+    def test_rejects_incomplete_v4_evidence(self) -> None:
         incomplete = re.sub(
             r"^========== TEST-060 BEGIN ==========\n.*?"
             r"^========== TEST-060 END ==========\n",
             "",
             _full_log()
-            .replace("selected_test_count: 47", "selected_test_count: 46")
-            .replace("test_manifest_count: 47", "test_manifest_count: 46"),
+            .replace("selected_test_count: 46", "selected_test_count: 45")
+            .replace("test_manifest_count: 46", "test_manifest_count: 45"),
             count=1,
             flags=re.MULTILINE | re.DOTALL,
         )
 
-        with self.assertRaisesRegex(ValueError, "must contain all 47 retained tests"):
+        with self.assertRaisesRegex(ValueError, "must contain all 46 retained tests"):
             self._parse(incomplete)
 
-    def test_rejects_legacy_collection_profile_in_v3(self) -> None:
+    def test_rejects_legacy_collection_profile_in_v4(self) -> None:
         value = _full_log().replace(
             "compatibility_profile: opencodex-2.7.42-data-format\n",
             "compatibility_profile: opencodex-2.7.42-data-format\n"
@@ -138,11 +138,11 @@ class EvidenceV3ParserTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "Evidence v3 must not contain collection_profile",
+            "Evidence v4 must not contain collection_profile",
         ):
             self._parse(value)
 
-    def test_continues_to_accept_v1_and_v2_without_compatibility_profile(
+    def test_rejects_v1_and_v2_even_without_compatibility_profile(
         self,
     ) -> None:
         v2 = _full_log(
@@ -168,10 +168,11 @@ test_manifest_count: 1
 """
 
         for name, value in {"v1": v1, "v2": v2}.items():
-            with self.subTest(name=name):
-                parsed = self._parse(value, f"{name}.log")
-                self.assertNotIn("compatibilityProfile", parsed["run"])
-                self.assertNotIn("compatibility_profile", parsed["run"])
+            with self.subTest(name=name), self.assertRaisesRegex(
+                ValueError,
+                "Unsupported log schema/version pair",
+            ):
+                self._parse(value, f"{name}.log")
 
     def test_rejects_compatibility_profile_claims_from_old_contracts(self) -> None:
         v2 = _full_log(
@@ -199,7 +200,7 @@ test_manifest_count: 1
         for version, value in {"v1": v1, "v2": v2}.items():
             with self.subTest(version=version), self.assertRaisesRegex(
                 ValueError,
-                f"Evidence {version} must not contain compatibility_profile",
+                "Unsupported log schema/version pair",
             ):
                 self._parse(value, f"{version}-false-profile.log")
 
@@ -218,8 +219,8 @@ class OpenCodexCompatibilityTests(unittest.TestCase):
             run
             if run is not None
             else {
-                "log_schema": "llm-capability-doctor.evidence.v3",
-                "script_version": "0.11.0",
+                "log_schema": "llm-capability-doctor.evidence.v4",
+                "script_version": "0.12.0",
                 "compatibilityProfile": COMPATIBILITY_PROFILE,
             },
             statuses if statuses is not None else self._statuses(),
@@ -312,8 +313,8 @@ class OpenCodexCompatibilityTests(unittest.TestCase):
 
     def test_output_is_closed_and_inputs_are_not_mutated(self) -> None:
         run = {
-            "log_schema": "llm-capability-doctor.evidence.v3",
-            "script_version": "0.11.0",
+            "log_schema": "llm-capability-doctor.evidence.v4",
+            "script_version": "0.12.0",
             "compatibilityProfile": COMPATIBILITY_PROFILE,
         }
         statuses = self._statuses()

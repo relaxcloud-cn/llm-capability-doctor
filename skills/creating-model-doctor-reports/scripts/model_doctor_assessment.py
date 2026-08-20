@@ -9,19 +9,19 @@ from datetime import datetime, timezone
 import re
 from typing import Dict, List
 
-from model_doctor_contracts import V3_CONTRACT, contract_key
+from model_doctor_contracts import V4_CONTRACT, contract_key
 from model_doctor_general_verdict import derive_general_verdict
 from model_doctor_opencodex_compatibility import derive_opencodex_compatibility
 from model_doctor_tool_loop_conformance import (
-    V3_TOOL_TEST_IDS,
-    _validate_v3_tool_pass_requests,
-    _validate_v3_tool_pass_review,
+    V4_TOOL_TEST_IDS,
+    _validate_v4_tool_pass_requests,
+    _validate_v4_tool_pass_review,
 )
 from model_doctor_verified_facts import validate_verified_facts
 
 
 REVIEW_SCHEMA_VERSION = "llm-capability-doctor.reviews.v2"
-ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v8"
+ASSESSMENT_SCHEMA_VERSION = "llm-capability-doctor.assessment.v9"
 STATUSES = {"PASS", "FAIL"}
 FAILURE_KINDS = {
     "DIRECT",
@@ -299,7 +299,7 @@ def validate_reviews(parsed: dict, reviews: dict) -> List[str]:
         status = review.get("reviewedStatus")
         if status not in STATUSES:
             errors.append(f"Test {test_id} reviewedStatus is invalid")
-        errors.extend(_validate_v3_tool_pass_review(parsed, test_id, review))
+        errors.extend(_validate_v4_tool_pass_review(parsed, test_id, review))
         for obsolete_field in ("confidence", "gateLevel"):
             if obsolete_field in review:
                 errors.append(
@@ -1024,7 +1024,7 @@ def validate_assessment(assessment: object) -> List[str]:
             if obsolete_field in item:
                 errors.append(
                     f"Test {test_id} {obsolete_field} is not part of "
-                    "the per-test assessment.v8 contract"
+                    "the per-test assessment.v9 contract"
                 )
         logic = item.get("logic")
         if not isinstance(logic, dict):
@@ -1050,16 +1050,16 @@ def validate_assessment(assessment: object) -> List[str]:
                         "an object"
                     )
         errors.extend(_validate_assessment_failure_analysis(item, statuses))
-    if contract == V3_CONTRACT:
+    if contract == V4_CONTRACT:
         for item in valid_items:
             test_id = item.get("testId")
             if (
-                test_id not in V3_TOOL_TEST_IDS
+                test_id not in V4_TOOL_TEST_IDS
                 or item.get("reviewedStatus") != "PASS"
             ):
                 continue
             errors.extend(
-                _validate_v3_tool_pass_requests(test_id, item.get("requests"))
+                _validate_v4_tool_pass_requests(test_id, item.get("requests"))
             )
 
     expected_counts = _status_counts(object_items)
@@ -1076,7 +1076,7 @@ def validate_assessment(assessment: object) -> List[str]:
         )
     )
     if "overall" in assessment:
-        errors.append("overall is not part of the assessment.v8 contract")
+        errors.append("overall is not part of the assessment.v9 contract")
     if isinstance(source, dict) and "path" in source:
         errors.append("source must not expose an absolute path")
     return errors

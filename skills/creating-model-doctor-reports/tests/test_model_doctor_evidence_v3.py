@@ -15,7 +15,7 @@ SCRIPT_DIR = SKILL_DIR / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from model_doctor_log import RETAINED_TEST_IDS, parse_log  # noqa: E402
-from model_doctor_contracts import V3_TEST_IDS  # noqa: E402
+from model_doctor_contracts import V4_TEST_IDS  # noqa: E402
 from model_doctor_opencodex_compatibility import (  # noqa: E402
     COMPATIBILITY_PROFILE,
 )
@@ -26,7 +26,7 @@ from model_doctor_assessment import (  # noqa: E402
     validate_reviews,
 )
 
-def valid_v3_request_metadata() -> dict[str, str]:
+def valid_v4_request_metadata() -> dict[str, str]:
     """Return a complete, conformant request-metadata fixture."""
 
     return {
@@ -44,9 +44,9 @@ def valid_v3_request_metadata() -> dict[str, str]:
 
 def build_evidence_log(
     *,
-    log_schema: str = "llm-capability-doctor.evidence.v3",
-    script_version: str = "0.11.0",
-    test_ids: Iterable[str] = V3_TEST_IDS,
+    log_schema: str = "llm-capability-doctor.evidence.v4",
+    script_version: str = "0.12.0",
+    test_ids: Iterable[str] = V4_TEST_IDS,
     request_metadata: Mapping[str, str] | None = None,
     collection_profile: str | None = None,
     compatibility_profile: str | None = COMPATIBILITY_PROFILE,
@@ -55,11 +55,11 @@ def build_evidence_log(
     """Build a complete evidence log for parser contract tests."""
 
     selected_ids = sorted(test_ids)
-    is_v3 = log_schema == "llm-capability-doctor.evidence.v3"
+    is_v4 = log_schema == "llm-capability-doctor.evidence.v4"
     if include_request is None:
-        include_request = is_v3
+        include_request = is_v4
     metadata = dict(
-        valid_v3_request_metadata() if request_metadata is None and is_v3
+        valid_v4_request_metadata() if request_metadata is None and is_v4
         else request_metadata or {}
     )
     request_test_id = "046" if "046" in selected_ids else selected_ids[0]
@@ -123,7 +123,7 @@ def build_evidence_log(
     )
     compatibility_profile_line = (
         f"compatibility_profile: {compatibility_profile}\n"
-        if is_v3 and compatibility_profile is not None
+        if is_v4 and compatibility_profile is not None
         else ""
     )
     return (
@@ -143,7 +143,7 @@ def build_evidence_log(
     )
 
 
-class ModelDoctorEvidenceV3Tests(unittest.TestCase):
+class ModelDoctorEvidenceV4Tests(unittest.TestCase):
     def parse_text_log(self, value: str, name: str = "fixture.log") -> dict:
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -286,8 +286,8 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         turns: int | None = None,
         *,
         contract: tuple[str, str] = (
-            "llm-capability-doctor.evidence.v3",
-            "0.11.0",
+            "llm-capability-doctor.evidence.v4",
+            "0.12.0",
         ),
     ) -> tuple[dict, dict]:
         turn_count = turns if turns is not None else {"046": 2, "047": 3, "048": 2, "049": 3}[test_id]
@@ -332,12 +332,12 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         }
         return parsed, reviews
 
-    def test_v3_tool_pass_guard_accepts_complete_ordered_loop(self) -> None:
+    def test_v4_tool_pass_guard_accepts_complete_ordered_loop(self) -> None:
         parsed, reviews = self._guard_fixture()
 
         self.assertEqual([], validate_reviews(parsed, reviews))
 
-    def test_v3_tool_pass_guard_rejects_non_contiguous_turn_ids(self) -> None:
+    def test_v4_tool_pass_guard_rejects_non_contiguous_turn_ids(self) -> None:
         parsed, reviews = self._guard_fixture()
         request = parsed["requests"].pop("test-046-turn-2")
         request["request_id"] = "test-046-turn-3"
@@ -349,7 +349,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("contiguous ordered turns" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_incomplete_stream(self) -> None:
+    def test_v4_tool_pass_guard_rejects_incomplete_stream(self) -> None:
         mutations = (
             ("stream_termination", "timeout", "did not complete its stream"),
             (
@@ -370,7 +370,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                     any(expected_error in error for error in errors), errors
                 )
 
-    def test_v3_tool_pass_guard_rejects_non_conformant_contract(self) -> None:
+    def test_v4_tool_pass_guard_rejects_non_conformant_contract(self) -> None:
         parsed, reviews = self._guard_fixture()
         request = parsed["requests"]["test-046-turn-1"]
         request["tool_contract_status"] = "non_conformant"
@@ -380,7 +380,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("not contract-conformant" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_incomplete_final_loop_outcome(self) -> None:
+    def test_v4_tool_pass_guard_rejects_incomplete_final_loop_outcome(self) -> None:
         parsed, reviews = self._guard_fixture()
         parsed["requests"]["test-046-turn-2"]["tool_loop_outcome"] = "continued"
 
@@ -388,7 +388,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("tool_loop_outcome=completed" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_non_continued_intermediate_outcome(self) -> None:
+    def test_v4_tool_pass_guard_rejects_non_continued_intermediate_outcome(self) -> None:
         parsed, reviews = self._guard_fixture()
         parsed["requests"]["test-046-turn-1"]["tool_loop_outcome"] = "completed"
 
@@ -396,7 +396,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("tool_loop_outcome=continued" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_non_contiguous_manifest_refs_with_matching_embedded_ids(self) -> None:
+    def test_v4_tool_pass_guard_rejects_non_contiguous_manifest_refs_with_matching_embedded_ids(self) -> None:
         parsed, reviews = self._guard_fixture()
         request = parsed["requests"].pop("test-046-turn-2")
         request["request_id"] = "test-046-turn-4"
@@ -409,7 +409,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("contiguous ordered turns" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_non_mapping_request(self) -> None:
+    def test_v4_tool_pass_guard_rejects_non_mapping_request(self) -> None:
         parsed, reviews = self._guard_fixture()
         parsed["requests"]["test-046-turn-1"] = "not-an-object"
 
@@ -417,7 +417,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("must be an object" in error for error in errors), errors)
 
-    def test_v3_tool_pass_guard_rejects_integer_turn_metadata(self) -> None:
+    def test_v4_tool_pass_guard_rejects_integer_turn_metadata(self) -> None:
         parsed, reviews = self._guard_fixture()
         parsed["requests"]["test-046-turn-1"]["tool_loop_turn"] = 1
 
@@ -434,30 +434,14 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         self.assertTrue(any("run contract is invalid" in error for error in errors), errors)
 
-    def test_v2_tool_reviews_are_not_rescored_by_v3_guard(self) -> None:
-        parsed, reviews = self._guard_fixture(
-            contract=("llm-capability-doctor.evidence.v2", "0.10.0")
-        )
-        parsed["tests"]["046"]["requestRefs"] = ["legacy-tool-call"]
-        parsed["requests"] = {
-            "legacy-tool-call": {
-                "request_id": "legacy-tool-call",
-                "metrics": {},
-            }
-        }
-        reviews["tests"]["046"]["evidenceRefs"] = ["request:legacy-tool-call"]
-
-        self.assertEqual([], validate_reviews(parsed, reviews))
-
-    def test_skill_documents_v3_contract_and_assessment_v7(self) -> None:
+    def test_skill_documents_v4_contract_and_assessment_v7(self) -> None:
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
         for required in (
-            "collector v0.11.0 with `llm-capability-doctor.evidence.v3`",
-            "require all 47 manifests",
-            "llm-capability-doctor.assessment.v8",
-            "every accepted historical and current input",
-            "evidence.v1 and evidence.v2 retain their original assessment rules",
+            "collector v0.12.0 with `llm-capability-doctor.evidence.v4`",
+            "require all 46 manifests",
+            "llm-capability-doctor.assessment.v9",
+            "Only the exact v0.12.0/evidence.v4 pair is accepted",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, skill)
@@ -468,16 +452,16 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             skill,
         )
 
-    def test_rules_define_strict_v3_tool_loop_checks(self) -> None:
+    def test_rules_define_strict_v4_tool_loop_checks(self) -> None:
         rules = (
             SKILL_DIR / "references" / "evaluation-rules.md"
         ).read_text(encoding="utf-8")
-        heading = "### Evidence v3 tool-loop rules"
+        heading = "### Evidence v4 tool-loop rules"
         next_heading = "### 050 大工具目录"
         self.assertIn(heading, rules)
-        v3_rules_with_tail = rules.partition(heading)[2]
-        self.assertIn(next_heading, v3_rules_with_tail)
-        v3_rules = v3_rules_with_tail.partition(next_heading)[0]
+        v4_rules_with_tail = rules.partition(heading)[2]
+        self.assertIn(next_heading, v4_rules_with_tail)
+        v4_rules = v4_rules_with_tail.partition(next_heading)[0]
 
         for required in (
             "`stream_termination=completed`",
@@ -491,56 +475,19 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             "final loop is completed",
         ):
             with self.subTest(required=required):
-                self.assertIn(required, v3_rules)
+                self.assertIn(required, v4_rules)
 
         self.assertNotIn("protocolConformance", rules)
 
-    def test_rules_preserve_legacy_contract_interpretation(self) -> None:
-        rules = (
-            SKILL_DIR / "references" / "evaluation-rules.md"
-        ).read_text(encoding="utf-8")
-        heading = "### Historical evidence.v1/v2 rules"
-        next_heading = "### Evidence v3 tool-loop rules"
-        self.assertIn(heading, rules)
-        legacy_rules_with_tail = rules.partition(heading)[2]
-        self.assertIn(next_heading, legacy_rules_with_tail)
-        legacy_rules = legacy_rules_with_tail.partition(next_heading)[0]
-
-        for required in (
-            "retain their original evidence and tool-check rules",
-            "46 checks: 31 core and 15 enhanced",
-            "47 checks: 32 core and 15 enhanced",
-        ):
-            with self.subTest(required=required):
-                self.assertIn(required, legacy_rules)
-
-    def test_rules_do_not_rescore_legacy_047_049_with_v3_final_answer_rules(
-        self,
-    ) -> None:
-        rules = (
-            SKILL_DIR / "references" / "evaluation-rules.md"
-        ).read_text(encoding="utf-8")
-        heading = "### Historical evidence.v1/v2 rules"
-        next_heading = "### Evidence v3 tool-loop rules"
-        self.assertIn(heading, rules)
-        legacy_rules_with_tail = rules.partition(heading)[2]
-        self.assertIn(next_heading, legacy_rules_with_tail)
-        legacy_rules = legacy_rules_with_tail.partition(next_heading)[0]
-
-        self.assertIn(
-            "Do not rescore historical 047-049 with evidence.v3 final-answer rules",
-            legacy_rules,
-        )
-
-    def test_readme_describes_011_evidence_v3_and_47_checks(self) -> None:
+    def test_readme_describes_012_evidence_v4_and_46_checks(self) -> None:
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
 
         for required in (
-            "v0.11.0",
-            "`llm-capability-doctor.evidence.v3`",
-            "默认执行全部 47 个检测项",
-            "输出完整 47 项目录",
-            "evidence-v3 日志路径",
+            "v0.12.0",
+            "`llm-capability-doctor.evidence.v4`",
+            "默认执行全部 46 个检测项",
+            "输出完整 46 项目录",
+            "evidence-v4 日志路径",
             "官方协议结构",
             "完整工具闭环",
             "`:generateContent`",
@@ -550,28 +497,28 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, readme)
 
-    def test_parser_accepts_exact_v3_profile_with_47_manifests(self) -> None:
+    def test_parser_accepts_exact_v4_profile_with_46_manifests(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())
 
-        self.assertEqual(47, len(parsed["tests"]))
+        self.assertEqual(46, len(parsed["tests"]))
         self.assertNotIn("collection_profile", parsed["run"])
         self.assertEqual(
             COMPATIBILITY_PROFILE,
             parsed["run"]["compatibilityProfile"],
         )
         self.assertEqual(
-            "llm-capability-doctor.evidence.v3",
+            "llm-capability-doctor.evidence.v4",
             parsed["run"]["log_schema"],
         )
         with self.assertRaisesRegex(ValueError, "collection_profile"):
             self.parse_text_log(
                 build_evidence_log(collection_profile="full"),
-                "profile-v3.log",
+                "profile-v4.log",
             )
         count_mutations = {
-            "selected": ("selected_test_count: 47", "selected_test_count: 46"),
+            "selected": ("selected_test_count: 46", "selected_test_count: 45"),
             "requests": ("request_count: 1", "request_count: 0"),
-            "manifests": ("test_manifest_count: 47", "test_manifest_count: 46"),
+            "manifests": ("test_manifest_count: 46", "test_manifest_count: 45"),
         }
         for name, (before, after) in count_mutations.items():
             with self.subTest(count=name), self.assertRaisesRegex(
@@ -580,10 +527,10 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             ):
                 self.parse_text_log(
                     build_evidence_log().replace(before, after, 1),
-                    f"{name}-count-v3.log",
+                    f"{name}-count-v4.log",
                 )
 
-    def test_parser_rejects_missing_or_unknown_v3_profile(self) -> None:
+    def test_parser_rejects_missing_or_unknown_v4_profile(self) -> None:
         for name, profile in {
             "missing": None,
             "unknown": "opencodex-next",
@@ -594,20 +541,20 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             ):
                 self.parse_text_log(
                     build_evidence_log(compatibility_profile=profile),
-                    f"{name}-profile-v3.log",
+                    f"{name}-profile-v4.log",
                 )
 
-    def test_parser_rejects_v3_missing_046(self) -> None:
-        with self.assertRaisesRegex(ValueError, "47"):
+    def test_parser_rejects_v4_missing_046(self) -> None:
+        with self.assertRaisesRegex(ValueError, "46"):
             self.parse_text_log(
-                build_evidence_log(test_ids=RETAINED_TEST_IDS),
+                build_evidence_log(test_ids=set(RETAINED_TEST_IDS) - {"046"}),
                 "missing-046.log",
             )
 
-    def test_parser_rejects_mixed_v3_contract_variants(self) -> None:
+    def test_parser_rejects_mixed_v4_contract_variants(self) -> None:
         variants = (
-            ("llm-capability-doctor.evidence.v3", "0.10.0"),
-            ("llm-capability-doctor.evidence.v2", "0.11.0"),
+            ("llm-capability-doctor.evidence.v4", "0.10.0"),
+            ("llm-capability-doctor.evidence.v2", "0.12.0"),
         )
         for schema, version in variants:
             with self.subTest(schema=schema, version=version):
@@ -620,16 +567,16 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                         "mixed.log",
                     )
 
-    def test_parser_validates_v3_request_metadata(self) -> None:
+    def test_parser_validates_v4_request_metadata(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())
 
         request = parsed["requests"]["test-046-turn-1"]
-        self.assertEqual(valid_v3_request_metadata(), {
-            field: request[field] for field in valid_v3_request_metadata()
+        self.assertEqual(valid_v4_request_metadata(), {
+            field: request[field] for field in valid_v4_request_metadata()
         })
 
-        for field in valid_v3_request_metadata():
-            metadata = valid_v3_request_metadata()
+        for field in valid_v4_request_metadata():
+            metadata = valid_v4_request_metadata()
             del metadata[field]
             with self.subTest(missing=field), self.assertRaisesRegex(
                 ValueError,
@@ -648,7 +595,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             "tool_loop_outcome": "stopped",
         }
         for field, value in invalid_enums.items():
-            metadata = valid_v3_request_metadata()
+            metadata = valid_v4_request_metadata()
             metadata[field] = value
             with self.subTest(invalid_enum=field), self.assertRaisesRegex(
                 ValueError,
@@ -705,7 +652,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         }
         for field, values in valid_enums.items():
             for value in values:
-                metadata = valid_v3_request_metadata()
+                metadata = valid_v4_request_metadata()
                 metadata[field] = value
                 if field == "tool_contract_status" and value == "non_conformant":
                     metadata["tool_contract_errors_json"] = '["fixture.error:/"]'
@@ -721,7 +668,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
 
         for field in ("stream_event_count", "tool_loop_turn"):
             for value in ("", "00", "+1", "-1", " 1", "1 "):
-                metadata = valid_v3_request_metadata()
+                metadata = valid_v4_request_metadata()
                 metadata[field] = value
                 with self.subTest(integer=field, value=value), self.assertRaisesRegex(
                     ValueError,
@@ -732,7 +679,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                         f"invalid-{field}.log",
                     )
 
-        metadata = valid_v3_request_metadata()
+        metadata = valid_v4_request_metadata()
         metadata["model_stop_reason"] = ""
         with self.assertRaisesRegex(ValueError, "model_stop_reason"):
             self.parse_text_log(
@@ -751,7 +698,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             "[null]",
         )
         for value in invalid_error_arrays:
-            metadata = valid_v3_request_metadata()
+            metadata = valid_v4_request_metadata()
             metadata["tool_contract_errors_json"] = value
             with self.subTest(errors_json=value), self.assertRaisesRegex(
                 ValueError,
@@ -767,7 +714,7 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             ("non_conformant", "[]"),
         )
         for status, errors_json in status_error_mismatches:
-            metadata = valid_v3_request_metadata()
+            metadata = valid_v4_request_metadata()
             metadata["tool_contract_status"] = status
             metadata["tool_contract_errors_json"] = errors_json
             with self.subTest(status=status), self.assertRaisesRegex(
@@ -779,9 +726,9 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
                     "invalid-status-errors.log",
                 )
 
-    def test_parser_redacts_discovered_secrets_from_v3_dynamic_metadata(self) -> None:
-        secret = "sk-v3-metadata-secret-123456"
-        metadata = valid_v3_request_metadata()
+    def test_parser_redacts_discovered_secrets_from_v4_dynamic_metadata(self) -> None:
+        secret = "sk-v4-metadata-secret-123456"
+        metadata = valid_v4_request_metadata()
         metadata.update({
             "stream_end_signal": f"finishReason:STOP-{secret}",
             "model_stop_reason": f"stop-{secret}",
@@ -791,12 +738,12 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             ]),
         })
         log = build_evidence_log(request_metadata=metadata).replace(
-            "script_version: 0.11.0\n",
-            f"script_version: 0.11.0\napi_key: {secret}\n",
+            "script_version: 0.12.0\n",
+            f"script_version: 0.12.0\napi_key: {secret}\n",
             1,
         )
 
-        parsed = self.parse_text_log(log, "v3-dynamic-metadata-secret.log")
+        parsed = self.parse_text_log(log, "v4-dynamic-metadata-secret.log")
         request = parsed["requests"]["test-046-turn-1"]
 
         self.assertNotIn(secret, json.dumps(parsed, ensure_ascii=False))
@@ -811,97 +758,17 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             json.loads(request["tool_contract_errors_json"]),
         )
 
-    def test_parser_accepts_complete_profile_free_v2(self) -> None:
-        parsed = self.parse_text_log(
-            build_evidence_log(
-                log_schema="llm-capability-doctor.evidence.v2",
-                script_version="0.10.0",
-                test_ids=RETAINED_TEST_IDS,
-                include_request=True,
-            ),
-            "full-v2.log",
-        )
-
-        request = next(iter(parsed["requests"].values()))
-        self.assertEqual(46, len(parsed["tests"]))
-        self.assertTrue(
-            valid_v3_request_metadata().keys().isdisjoint(request),
-            request,
-        )
-
-    def test_v2_contract_remains_46_checks_without_046(self) -> None:
-        from model_doctor_contracts import (  # noqa: PLC0415
-            CONTRACT_TEST_IDS,
-            LEGACY_TEST_IDS,
-            V2_CONTRACT,
-        )
-
-        self.assertEqual(46, len(CONTRACT_TEST_IDS[V2_CONTRACT]))
-        self.assertEqual(LEGACY_TEST_IDS, CONTRACT_TEST_IDS[V2_CONTRACT])
-        self.assertNotIn("046", CONTRACT_TEST_IDS[V2_CONTRACT])
-        ids_with_046 = (set(RETAINED_TEST_IDS) - {"060"}) | {"046"}
-        with self.assertRaisesRegex(ValueError, "046"):
-            self.parse_text_log(
-                build_evidence_log(
-                    log_schema="llm-capability-doctor.evidence.v2",
-                    script_version="0.10.0",
-                    test_ids=ids_with_046,
-                    include_request=False,
-                ),
-                "v2-with-046.log",
-            )
-
-    def test_v1_custom_rejects_046(self) -> None:
-        with self.assertRaisesRegex(ValueError, "046"):
-            self.parse_text_log(
-                build_evidence_log(
-                    log_schema="llm-capability-doctor.evidence.v1",
-                    script_version="0.9.0",
-                    test_ids={"046"},
-                    collection_profile="custom",
-                    include_request=False,
-                ),
-                "v1-custom-046.log",
-            )
-
-    def test_v1_full_still_requires_legacy_46(self) -> None:
-        parsed = self.parse_text_log(
-            build_evidence_log(
-                log_schema="llm-capability-doctor.evidence.v1",
-                script_version="0.9.0",
-                test_ids=RETAINED_TEST_IDS,
-                collection_profile="full",
-                include_request=True,
-            ),
-            "v1-full.log",
-        )
-        request = next(iter(parsed["requests"].values()))
-        self.assertEqual(46, len(parsed["tests"]))
-        self.assertTrue(valid_v3_request_metadata().keys().isdisjoint(request))
-
-        with self.assertRaisesRegex(ValueError, "all 46"):
-            self.parse_text_log(
-                build_evidence_log(
-                    log_schema="llm-capability-doctor.evidence.v1",
-                    script_version="0.9.0",
-                    test_ids=set(RETAINED_TEST_IDS) - {"060"},
-                    collection_profile="full",
-                    include_request=False,
-                ),
-                "v1-incomplete-full.log",
-            )
-
     def test_contract_key_rejects_non_mapping_run_without_crashing(self) -> None:
-        from model_doctor_contracts import V3_CONTRACT, contract_key  # noqa: PLC0415
+        from model_doctor_contracts import V4_CONTRACT, contract_key  # noqa: PLC0415
 
         class UnhashableString(str):
             __hash__ = None
 
         self.assertEqual(
-            V3_CONTRACT,
+            V4_CONTRACT,
             contract_key({
-                "log_schema": "llm-capability-doctor.evidence.v3",
-                "script_version": "0.11.0",
+                "log_schema": "llm-capability-doctor.evidence.v4",
+                "script_version": "0.12.0",
             }),
         )
         malformed_runs = (
@@ -910,25 +777,25 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             "not-a-mapping",
             1,
             {},
-            {"log_schema": "llm-capability-doctor.evidence.v3"},
+            {"log_schema": "llm-capability-doctor.evidence.v4"},
             {
                 "log_schema": None,
-                "script_version": "0.11.0",
+                "script_version": "0.12.0",
             },
             {
-                "log_schema": ["llm-capability-doctor.evidence.v3"],
-                "script_version": "0.11.0",
+                "log_schema": ["llm-capability-doctor.evidence.v4"],
+                "script_version": "0.12.0",
             },
             {
-                "log_schema": "llm-capability-doctor.evidence.v3",
-                "script_version": {"value": "0.11.0"},
+                "log_schema": "llm-capability-doctor.evidence.v4",
+                "script_version": {"value": "0.12.0"},
             },
             {
-                "log_schema": UnhashableString("llm-capability-doctor.evidence.v3"),
-                "script_version": "0.11.0",
+                "log_schema": UnhashableString("llm-capability-doctor.evidence.v4"),
+                "script_version": "0.12.0",
             },
             {
-                "log_schema": "llm-capability-doctor.evidence.v3",
+                "log_schema": "llm-capability-doctor.evidence.v4",
                 "script_version": "0.10.0",
             },
         )

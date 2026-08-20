@@ -14,11 +14,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from model_doctor_contracts import (
     CONTRACT_TEST_IDS,
-    LEGACY_TEST_IDS,
-    V1_CONTRACT,
-    V2_CONTRACT,
-    V3_CONTRACT,
-    V3_TEST_IDS,
+    V4_CONTRACT,
+    V4_TEST_IDS,
     contract_key,
 )
 from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
@@ -27,39 +24,7 @@ from model_doctor_opencodex_compatibility import COMPATIBILITY_PROFILE
 
 PARSED_SCHEMA_VERSION = "llm-capability-doctor.parsed-evidence.v1"
 SECTION_ENCODING = "base64"
-# Compatibility alias for callers that imported the historical name.
-RETAINED_TEST_IDS = LEGACY_TEST_IDS
-ONSITE_TEST_IDS = {
-    "002",
-    "003",
-    "005",
-    "007",
-    "008",
-    "009",
-    "013",
-    "014",
-    "016",
-    "018",
-    "020",
-    "022",
-    "024",
-    "031",
-    "033",
-    "035",
-    "036",
-    "038",
-    "042",
-    "043",
-    "045",
-    "047",
-    "048",
-    "049",
-    "055",
-    "056",
-    "057",
-    "059",
-    "060",
-}
+RETAINED_TEST_IDS = V4_TEST_IDS
 SECRET_QUERY_KEYS = {
     "api_key",
     "key",
@@ -341,7 +306,7 @@ def _parse_request_refs(value: str, test_id: str) -> List[str]:
     return refs
 
 
-V3_REQUEST_FIELDS = (
+V4_REQUEST_FIELDS = (
     "transport_outcome",
     "stream_termination",
     "stream_end_signal",
@@ -396,14 +361,14 @@ TOOL_LOOP_OUTCOMES = frozenset({
 CANONICAL_NON_NEGATIVE_INTEGER = re.compile(r"^(0|[1-9][0-9]*)$")
 
 
-def _validate_v3_request_metadata(
+def _validate_v4_request_metadata(
     metadata: Dict[str, str],
     request_id: str,
 ) -> None:
-    for field in V3_REQUEST_FIELDS:
+    for field in V4_REQUEST_FIELDS:
         if field not in metadata or not isinstance(metadata[field], str):
             raise ValueError(
-                f"Request {request_id} is missing v3 metadata field {field}"
+                f"Request {request_id} is missing v4 metadata field {field}"
             )
 
     enum_fields = {
@@ -466,7 +431,7 @@ def _validate_v3_request_metadata(
         )
 
 
-def _redact_v3_dynamic_metadata(
+def _redact_v4_dynamic_metadata(
     metadata: Dict[str, str],
     secrets: Set[str],
 ) -> Dict[str, str]:
@@ -530,9 +495,9 @@ def parse_log(path: Path) -> Dict[str, object]:
                 f"Request block {identifier} declares request_id="
                 f"{metadata.get('request_id')!r}"
             )
-        if contract == V3_CONTRACT:
-            _validate_v3_request_metadata(metadata, identifier)
-            metadata = _redact_v3_dynamic_metadata(metadata, secrets)
+        if contract == V4_CONTRACT:
+            _validate_v4_request_metadata(metadata, identifier)
+            metadata = _redact_v4_dynamic_metadata(metadata, secrets)
         requests[identifier] = {
             **metadata,
             "request_id": identifier,
@@ -595,42 +560,14 @@ def parse_log(path: Path) -> Dict[str, object]:
     if not summary:
         raise ValueError("Missing RUN SUMMARY")
     discovered_test_ids = set(tests)
-    if contract == V1_CONTRACT:
-        if "compatibility_profile" in run:
-            raise ValueError("Evidence v1 must not contain compatibility_profile")
-        profile = run.get("collection_profile")
-        if profile == "full" and discovered_test_ids != LEGACY_TEST_IDS:
-            raise ValueError(
-                "The full collection profile must contain all 46 retained tests"
-            )
-        if profile == "onsite" and discovered_test_ids != ONSITE_TEST_IDS:
-            raise ValueError(
-                "The onsite collection profile must contain all 29 onsite tests"
-            )
-        if profile == "custom" and not discovered_test_ids:
-            raise ValueError(
-                "The custom collection profile must contain at least one test"
-            )
-        if profile not in {"full", "onsite", "custom"}:
-            raise ValueError(
-                f"Unsupported or missing collection_profile: {profile!r}"
-            )
-    elif contract == V2_CONTRACT:
-        if "collection_profile" in run:
-            raise ValueError("Evidence v2 must not contain collection_profile")
-        if "compatibility_profile" in run:
-            raise ValueError("Evidence v2 must not contain compatibility_profile")
-        if discovered_test_ids != LEGACY_TEST_IDS:
-            raise ValueError("Evidence v2 must contain all 46 retained tests")
-    else:
-        if "collection_profile" in run:
-            raise ValueError("Evidence v3 must not contain collection_profile")
-        profile = run.pop("compatibility_profile", None)
-        if profile != COMPATIBILITY_PROFILE:
-            raise ValueError("Unsupported or missing compatibility_profile")
-        if discovered_test_ids != V3_TEST_IDS:
-            raise ValueError("Evidence v3 must contain all 47 retained tests")
-        run["compatibilityProfile"] = profile
+    if "collection_profile" in run:
+        raise ValueError("Evidence v4 must not contain collection_profile")
+    profile = run.pop("compatibility_profile", None)
+    if profile != COMPATIBILITY_PROFILE:
+        raise ValueError("Unsupported or missing compatibility_profile")
+    if discovered_test_ids != V4_TEST_IDS:
+        raise ValueError("Evidence v4 must contain all 46 retained tests")
+    run["compatibilityProfile"] = profile
     _validate_count(run, "selected_test_count", len(tests))
     _validate_count(summary, "request_count", len(requests))
     _validate_count(summary, "test_manifest_count", len(tests))

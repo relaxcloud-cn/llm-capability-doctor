@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v8",
+  "$id": "llm-capability-doctor.assessment.v9",
   "title": "LLM Capability Doctor Evidence-Bound Assessment",
   "type": "object",
   "required": [
@@ -17,7 +17,7 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v8"
+      "const": "llm-capability-doctor.assessment.v9"
     },
     "generatedAt": {
       "type": "string"
@@ -45,7 +45,19 @@
       "additionalProperties": false
     },
     "run": {
-      "type": "object"
+      "type": "object",
+      "required": [
+        "log_schema",
+        "script_version"
+      ],
+      "properties": {
+        "log_schema": {
+          "const": "llm-capability-doctor.evidence.v4"
+        },
+        "script_version": {
+          "const": "0.12.0"
+        }
+      }
     },
     "tokenTotals": {
       "type": "object"
@@ -453,41 +465,16 @@
               "const": 46
             },
             "passedCoreTests": {
-              "maximum": 31
-            },
-            "totalCoreTests": {
-              "const": 31
-            },
-            "passedEnhancedTests": {
-              "maximum": 15
-            },
-            "totalEnhancedTests": {
-              "const": 15
-            }
-          }
-        },
-        {
-          "properties": {
-            "collectedTests": {
-              "maximum": 47
-            },
-            "passedTests": {
-              "maximum": 47
-            },
-            "totalTests": {
-              "const": 47
-            },
-            "passedCoreTests": {
               "maximum": 32
             },
             "totalCoreTests": {
               "const": 32
             },
             "passedEnhancedTests": {
-              "maximum": 15
+              "maximum": 14
             },
             "totalEnhancedTests": {
-              "const": 15
+              "const": 14
             }
           }
         }

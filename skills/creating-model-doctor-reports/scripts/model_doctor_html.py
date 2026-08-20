@@ -16,7 +16,7 @@ from typing import Dict, Iterable, List
 from model_doctor_assessment import validate_assessment
 from model_doctor_contracts import (
     CONTRACT_VERDICT_PARTITIONS,
-    V3_CONTRACT,
+    V4_CONTRACT,
     contract_key,
 )
 from model_doctor_json import JSON_LOAD_ERRORS, strict_json_loads
@@ -399,7 +399,7 @@ def _run_metadata(
         ("接口格式", protocol_value),
         ("访问密钥（API Key）", run.get("api_key") or "未知"),
         ("检测工具版本", f"v{script_version} · {log_schema}"),
-        ("报告数据版本", "llm-capability-doctor.assessment.v8"),
+        ("报告数据版本", "llm-capability-doctor.assessment.v9"),
         ("OpenCodex 检查标准", profile),
         ("原始记录校验值", _sha256_display(source.get("sha256"))),
     )
@@ -564,7 +564,7 @@ def _request_evidence(requests: List[dict]) -> str:
     turns = []
     for index, request in enumerate(requests, start=1):
         metrics = request.get("metrics", {})
-        v3_metadata = tuple(
+        v4_metadata = tuple(
             f"{field}={request[field]}"
             for field in (
                 "transport_outcome",
@@ -589,7 +589,7 @@ def _request_evidence(requests: List[dict]) -> str:
                 else "",
                 f"{metrics.get('time_total')} 秒完成" if metrics.get("time_total") else "",
                 f"{metrics.get('size_download')} bytes" if metrics.get("size_download") else "",
-                *v3_metadata,
+                *v4_metadata,
             )
             if value
         )
@@ -732,7 +732,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
     try:
         contract = contract_key(run)
     except ValueError:
-        contract = V3_CONTRACT
+        contract = V4_CONTRACT
     core_ids, _enhanced_ids = CONTRACT_VERDICT_PARTITIONS[contract]
 
     started_at = run.get("started_at") or "未记录"
