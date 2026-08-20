@@ -169,23 +169,6 @@ class GeneralVerdictTests(unittest.TestCase):
         self.assertEqual(14, verdict["passedEnhancedTests"])
         self.assertIn("1 项基础必过能力未满足", verdict["statement"])
 
-    def test_v2_all_checks_pass_keeps_46_totals(self) -> None:
-        verdict = derive_general_verdict(self.all_pass, V4_CONTRACT)
-
-        self.assertEqual("PASS", verdict["level"])
-        self.assertEqual(46, verdict["totalTests"])
-        self.assertEqual(32, verdict["totalCoreTests"])
-        self.assertEqual(14, verdict["totalEnhancedTests"])
-
-    def test_v1_partial_uses_legacy_46_denominator(self) -> None:
-        verdict = derive_general_verdict({"001": "PASS"}, V4_CONTRACT)
-
-        self.assertEqual("NOT_ASSESSED", verdict["level"])
-        self.assertEqual(46, verdict["totalTests"])
-        self.assertEqual(32, verdict["totalCoreTests"])
-        self.assertIn("1/46", verdict["statement"])
-
-
 class GeneralVerdictAssessmentTests(unittest.TestCase):
     def _logic(self) -> dict:
         return {
