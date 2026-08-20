@@ -1936,6 +1936,10 @@ test_manifest_count: 1
         self.assertIn("检测信息", skill_text)
         self.assertIn("不得手工修改渲染后的 HTML", skill_text)
         self.assertNotIn("assessment.v4", skill_text)
+        self.assertNotIn("结果适用范围", skill_text)
+        self.assertNotIn("展开全部", skill_text)
+        self.assertNotIn("收起全部", skill_text)
+        self.assertNotIn("打印报告", skill_text)
 
     def test_skill_requires_verified_protocol_context_and_concurrency_facts(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
