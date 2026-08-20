@@ -28,11 +28,26 @@ chmod +x ./model-capability-doctor
 
 ## 2. 执行检测
 
+Linux：
+
+```bash
+read -r -s -p 'API Key: ' MODEL_API_KEY
+printf '\n'
+export MODEL_API_KEY
+```
+
+macOS：
+
+```zsh
+read -s 'MODEL_API_KEY?API Key: '
+export MODEL_API_KEY
+```
+
+执行：
+
 ```bash
 mkdir -p ./model-doctor-output
 chmod 700 ./model-doctor-output
-read -rsp 'API Key: ' MODEL_API_KEY && printf '\n'
-export MODEL_API_KEY
 ./model-capability-doctor \
   --url 'https://model.example/v1/chat/completions' \
   --model 'your-model-name' \
