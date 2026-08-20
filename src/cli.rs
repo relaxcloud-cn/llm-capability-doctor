@@ -9,7 +9,7 @@ use url::Url;
 #[command(
     name = "model-capability-doctor",
     version,
-    about = concat!("Model Capability Doctor ", env!("CARGO_PKG_VERSION"), " - Run all 47 checks"),
+    about = concat!("Model Capability Doctor ", env!("CARGO_PKG_VERSION"), " - Run all 46 checks"),
     disable_help_subcommand = true
 )]
 pub struct Cli {
@@ -33,7 +33,7 @@ pub struct Cli {
     #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
-    /// Print the 47-item catalog and exit.
+    /// Print the 46-item catalog and exit.
     #[arg(long)]
     pub list_tests: bool,
 
@@ -113,6 +113,7 @@ fn parse_positive_integer(value: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
     use url::Url;
 
     use super::{Cli, CliError};
@@ -162,5 +163,15 @@ mod tests {
             config.url.as_str(),
             "https://example.test/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn help_describes_the_46_item_catalog() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("Run all 46 checks"));
+        assert!(help.contains("Print the 46-item catalog and exit"));
+        assert!(!help.contains("47 checks"));
+        assert!(!help.contains("47-item"));
     }
 }
