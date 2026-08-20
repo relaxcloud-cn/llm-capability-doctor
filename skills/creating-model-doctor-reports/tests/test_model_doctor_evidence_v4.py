@@ -434,7 +434,7 @@ class ModelDoctorEvidenceV4Tests(unittest.TestCase):
 
         self.assertTrue(any("run contract is invalid" in error for error in errors), errors)
 
-    def test_skill_documents_v4_contract_and_assessment_v7(self) -> None:
+    def test_skill_documents_v4_contract_and_assessment_v9(self) -> None:
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
 
         for required in (

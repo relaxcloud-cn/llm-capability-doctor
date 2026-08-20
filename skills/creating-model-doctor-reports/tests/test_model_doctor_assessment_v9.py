@@ -29,13 +29,13 @@ from model_doctor_html import (  # noqa: E402
 )
 
 
-ASSESSMENT_V7 = "llm-capability-doctor.assessment.v9"
+ASSESSMENT_V9 = "llm-capability-doctor.assessment.v9"
 PARSED_EVIDENCE_V1 = "llm-capability-doctor.parsed-evidence.v1"
 REVIEWS_V2 = "llm-capability-doctor.reviews.v2"
 ASSET_DIR = SKILL_DIR / "assets"
 
 
-class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
+class AssessmentV9ProtocolConformanceTests(unittest.TestCase):
     def _logic(self) -> dict:
         return {
             "purpose": "Check one collected capability.",
@@ -377,7 +377,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         self.assertEqual(fields, set(node.get("required", [])))
         self.assertEqual(fields, set(node.get("properties", {})))
 
-    def test_assembly_emits_v7_without_changing_input_contract_versions(self) -> None:
+    def test_assembly_emits_v9_without_changing_input_contract_versions(self) -> None:
         parsed, reviews = self._fixture()
         parsed_before = deepcopy(parsed)
         reviews_before = deepcopy(reviews)
@@ -389,10 +389,10 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         self.assertEqual(PARSED_EVIDENCE_V1, parsed["schemaVersion"])
         self.assertEqual(REVIEWS_V2, reviews["schemaVersion"])
         self.assertEqual(REVIEWS_V2, REVIEW_SCHEMA_VERSION)
-        self.assertEqual(ASSESSMENT_V7, ASSESSMENT_SCHEMA_VERSION)
-        self.assertEqual(ASSESSMENT_V7, assessment["schemaVersion"])
+        self.assertEqual(ASSESSMENT_V9, ASSESSMENT_SCHEMA_VERSION)
+        self.assertEqual(ASSESSMENT_V9, assessment["schemaVersion"])
 
-    def test_assessment_v8_schema_allows_only_contract_total_combinations(self) -> None:
+    def test_assessment_v9_schema_allows_only_contract_total_combinations(self) -> None:
         verdict_schema = self._schema()["$defs"]["generalVerdict"]
 
         combinations = set()
@@ -485,7 +485,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
             html.index("模型返回的完整内容"),
         )
 
-    def test_combined_v8_v4_derives_47_32_15_totals(self) -> None:
+    def test_combined_v9_v4_derives_46_32_14_totals(self) -> None:
         parsed, reviews = self._complete_fixture(V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
@@ -499,21 +499,7 @@ class AssessmentV7ProtocolConformanceTests(unittest.TestCase):
         self.assertNotIn("protocolConformance", assessment)
         self.assertEqual([], validate_assessment(assessment))
 
-    def test_combined_v8_v2_preserves_46_31_15_totals(self) -> None:
-        parsed, reviews = self._complete_fixture(V4_CONTRACT)
-
-        assessment = assemble_assessment(parsed, reviews)
-
-        verdict = assessment["capabilitySummary"]["generalVerdict"]
-        self.assertEqual((46, 32, 14), (
-            verdict["totalTests"],
-            verdict["totalCoreTests"],
-            verdict["totalEnhancedTests"],
-        ))
-        self.assertNotIn("protocolConformance", assessment)
-        self.assertEqual([], validate_assessment(assessment))
-
-    def test_runtime_contract_messages_use_assessment_v8(self) -> None:
+    def test_runtime_contract_messages_use_assessment_v9(self) -> None:
         source = (
             SCRIPT_DIR / "model_doctor_assessment.py"
         ).read_text(encoding="utf-8")

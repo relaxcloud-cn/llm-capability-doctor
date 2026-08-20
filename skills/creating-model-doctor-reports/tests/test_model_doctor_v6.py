@@ -982,7 +982,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             errors,
         )
 
-    def test_assembly_emits_assessment_v7_with_verified_facts(self) -> None:
+    def test_assembly_emits_assessment_v9_with_verified_facts(self) -> None:
         reviews = self._reviews()
         expected_facts = self._verified_facts()
         try:
@@ -1489,7 +1489,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             assessment = assemble_assessment(self._parsed(), self._reviews())
             html = render_report(assessment, ASSET_DIR)
         except (KeyError, ValueError) as error:
-            self.fail(f"renderer rejected the desired v7 contract: {error}")
+            self.fail(f"renderer rejected the desired v9 contract: {error}")
 
         expected_order = (
             '<section class="report-section" id="conclusion"',
@@ -1868,7 +1868,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             stderr.getvalue(),
         )
 
-    def test_cli_render_writes_v7_and_final_conclusion(self) -> None:
+    def test_cli_render_writes_v9_and_final_conclusion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             directory_path = Path(directory)
             parsed_path = directory_path / "parsed.json"

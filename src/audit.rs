@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn request_block_emits_v3_metadata_before_encoded_sections() {
+    fn request_block_emits_v4_metadata_before_encoded_sections() {
         let (audit, _) = test_audit("");
         let request = sample_request();
 

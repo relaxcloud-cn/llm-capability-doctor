@@ -501,7 +501,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
         self.assertEqual(original_reviews, reviews)
         self.assertEqual([], validate_assessment(assessment))
 
-    def test_old_evidence_assembles_not_assessed_compatibility(self) -> None:
+    def test_partial_v4_evidence_assembles_not_assessed_compatibility(self) -> None:
         parsed, reviews = self._fixture({"001": "PASS"}, V4_CONTRACT)
 
         assessment = assemble_assessment(parsed, reviews)
