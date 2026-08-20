@@ -149,7 +149,6 @@ input:focus-visible, select:focus-visible, summary:focus-visible {
 .metadata > div { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); }
 .metadata dt { color: var(--muted); }
 .metadata dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.identity-boundary { margin: 14px 0 0; padding-left: 12px; border-left: 3px solid var(--line); color: var(--muted); font-size: 11px; }
 
 .capability-toolbar { display: grid; grid-template-columns: minmax(220px, 1fr) auto; gap: 12px; margin-bottom: 14px; }
 .search-input { width: 100%; min-height: 38px; padding: 8px 11px; border: 1px solid #c9d0d8; border-radius: 4px; color: var(--ink); background: var(--paper); }

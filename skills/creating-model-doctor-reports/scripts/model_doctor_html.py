@@ -47,10 +47,6 @@ COMPAT_VALUE = {
     "NOT_ASSESSED": "未评定",
 }
 GENERAL_BOUNDARY = "这个结果只说明本次检查的情况，是否上线还需要结合项目要求判断。"
-IDENTITY_BOUNDARY = (
-    "发送内容和返回内容里的模型名称可能不同；这些名称不能单独证明背后实际"
-    "使用的是哪个商业模型。"
-)
 CAPABILITY_SECTION_DESCRIPTION = (
     "分别检查接口能否正常使用、能否按格式输出、能否处理长文本、能否按要求"
     "回答、逻辑任务、工具调用、响应速度和安全业务场景。每一项都可以展开查看"
@@ -312,13 +308,6 @@ def _response_model_name(tests: List[dict]) -> str:
     return ""
 
 
-def _sha256_display(value: object) -> str:
-    text = value if isinstance(value, str) else ""
-    if len(text) >= 24:
-        return f"{text[:16]}…{text[-4:]}（用于确认记录没有被改动）"
-    return text or "未记录"
-
-
 def _capability_summary(assessment: dict) -> str:
     """Render section 01 本次检测结果: verdict pillars, facts, headline."""
 
@@ -367,14 +356,12 @@ def _capability_summary(assessment: dict) -> str:
 def _run_metadata(
     run: dict,
     facts: dict,
-    source: dict,
     tests: List[dict],
 ) -> str:
     facts = facts if isinstance(facts, dict) else {}
     interface = facts.get("interfaceProtocol")
     interface = interface if isinstance(interface, dict) else {}
     run = run if isinstance(run, dict) else {}
-    source = source if isinstance(source, dict) else {}
 
     family = interface.get("family")
     protocol_value = protocol_family_label(family)
@@ -388,9 +375,6 @@ def _run_metadata(
         protocol_value = f"{protocol_value}（接口消息格式）"
 
     response_model = _response_model_name(tests) or "未观察到"
-    script_version = run.get("script_version") or "未知"
-    log_schema = run.get("log_schema") or "未记录"
-    profile = run.get("compatibilityProfile") or "本次未使用 OpenCodex 检查配置"
 
     rows = (
         ("检测地址（URL）", run.get("url") or "未知"),
@@ -398,10 +382,6 @@ def _run_metadata(
         ("接口返回的模型名称", response_model),
         ("接口格式", protocol_value),
         ("访问密钥（API Key）", run.get("api_key") or "未知"),
-        ("检测工具版本", f"v{script_version} · {log_schema}"),
-        ("报告数据版本", "llm-capability-doctor.assessment.v9"),
-        ("OpenCodex 检查标准", profile),
-        ("原始记录校验值", _sha256_display(source.get("sha256"))),
     )
     rendered = "".join(
         f"<div><dt>{_e(label)}</dt><dd>{_e(value)}</dd></div>"
@@ -409,9 +389,8 @@ def _run_metadata(
     )
     return (
         '<section class="report-section" id="run-info" data-nav-section>'
-        f"{_section_head('03 · 本次检测', '本次检测信息', '用于确认检测的是哪个接口、哪个模型，以及使用了哪个版本的检测工具。')}"
+        f"{_section_head('03 · 本次检测', '本次检测信息', '用于确认检测的是哪个接口、哪个模型，以及接口返回的消息格式。')}"
         f'<dl class="metadata">{rendered}</dl>'
-        f'<p class="identity-boundary">{IDENTITY_BOUNDARY}</p>'
         "</section>"
     )
 
@@ -761,7 +740,7 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
 
   {_issues_section(capability_summary, tests)}
 
-  {_run_metadata(run, capability_summary.get('verifiedFacts', {}), assessment.get('source', {}), tests)}
+  {_run_metadata(run, capability_summary.get('verifiedFacts', {}), tests)}
 
   {_capabilities_section(tests, core_ids)}
 </main>

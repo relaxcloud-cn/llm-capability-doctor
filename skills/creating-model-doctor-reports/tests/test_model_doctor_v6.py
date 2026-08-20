@@ -1514,6 +1514,30 @@ class ModelDoctorV6Tests(unittest.TestCase):
             parser.children[:5],
         )
 
+    def test_run_info_omits_internal_report_metadata(self) -> None:
+        assessment = assemble_assessment(self._parsed(), self._reviews())
+        html = render_report(assessment, ASSET_DIR)
+
+        for retained in (
+            "检测地址（URL）",
+            "发送时使用的模型名称",
+            "接口返回的模型名称",
+            "接口格式",
+            "访问密钥（API Key）",
+        ):
+            with self.subTest(retained=retained):
+                self.assertIn(retained, html)
+        for deleted in (
+            "检测工具版本",
+            "报告数据版本",
+            "OpenCodex 检查标准",
+            "原始记录校验值",
+            "identity-boundary",
+            "使用了哪个版本的检测工具",
+        ):
+            with self.subTest(deleted=deleted):
+                self.assertNotIn(deleted, html)
+
     def test_renderer_omits_sidebar_actions_and_result_scope(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())
         html = render_report(assessment, ASSET_DIR)
