@@ -17,7 +17,7 @@ use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
 const SCRIPT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const LOG_SCHEMA: &str = "llm-capability-doctor.evidence.v3";
+const LOG_SCHEMA: &str = "llm-capability-doctor.evidence.v4";
 const COMPATIBILITY_PROFILE: &str = "opencodex-2.7.42-data-format";
 
 pub struct RunMetadata {
@@ -506,7 +506,7 @@ mod tests {
     use crate::redaction::Redactor;
 
     #[test]
-    fn run_header_declares_011_and_evidence_v3() {
+    fn run_header_declares_012_and_evidence_v4() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("audit.log");
         let url: url::Url = "https://example.com/v1/chat/completions"
@@ -526,8 +526,8 @@ mod tests {
         drop(audit);
 
         let output = fs::read_to_string(path).expect("read audit");
-        assert!(output.contains("script_version: 0.11.0\n"));
-        assert!(output.contains("log_schema: llm-capability-doctor.evidence.v3\n"));
+        assert!(output.contains("script_version: 0.12.0\n"));
+        assert!(output.contains("log_schema: llm-capability-doctor.evidence.v4\n"));
         assert!(output.contains("compatibility_profile: opencodex-2.7.42-data-format\n"));
         assert!(!output.contains("collection_profile:"));
     }

@@ -107,7 +107,7 @@ pub fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, CheckError
             interface::plan(id, context)
         }
         "009" | "010" | "011" | "012" | "013" | "014" | "015" | "016" | "017" | "018" | "019"
-        | "020" | "022" | "024" | "031" | "033" | "034" | "035" | "036" | "038" => {
+        | "020" | "022" | "024" | "031" | "033" | "035" | "036" | "038" => {
             content::plan(id, context)
         }
         "040" | "041" | "042" | "043" | "044" | "045" | "046" | "047" | "048" | "049" | "050" => {
@@ -130,5 +130,24 @@ fn from_spec(
         auth_mode: context.auth_mode,
         body: Body::Json(spec.body),
         stream: spec.stream,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_034_is_not_plannable() {
+        let context = PlanContext {
+            protocol: Protocol::OpenAiChat,
+            auth_mode: AuthMode::None,
+            model: "fixture-model",
+        };
+
+        assert_eq!(
+            plan("034", &context),
+            Err(CheckError::UnsupportedId("034".to_owned()))
+        );
     }
 }

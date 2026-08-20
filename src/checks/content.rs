@@ -16,13 +16,6 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
             multi_turn_request(context.protocol, context.model),
             context,
         )],
-        "034" => vec![thinking(
-            &format!("test-{id}"),
-            "MODEL_DOCTOR_THINKING_OK",
-            "low",
-            false,
-            context,
-        )],
         "033" => vec![
             thinking(
                 "test-033-low",
@@ -100,8 +93,8 @@ fn structured_prompt(id: &str) -> String {
 fn text_prompt(id: &str) -> String {
     match id {
         "019" => "MODEL_DOCTOR_CASE_019. Reply only MODEL_DOCTOR_CASE_019_OK.",
-        "020" => "MODEL_DOCTOR_CASE_020. Return exactly three lines: [BEGIN] then ALPHA|BETA|GAMMA then [END]. Do not use FORBIDDEN.",
-        "022" => r#"MODEL_DOCTOR_CASE_022. From time=10:32 source=203.0.113.7 action=allow severity=urgent component=database symptom=timeout, return compact JSON shaped exactly as {"time":"...","source":"...","action":"...","labels":["..."]}. labels must contain all applicable values from URGENT, DATABASE, NETWORK."#,
+        "020" => "MODEL_DOCTOR_CASE_020. Return exactly these three lines and nothing else:\n[BEGIN]\nALPHA|BETA|GAMMA\n[END]\nThe two ASCII vertical bar characters \"|\" are literal output characters and must both be present. Do not output the word FORBIDDEN.",
+        "022" => r#"MODEL_DOCTOR_CASE_022. From time=10:32 source=203.0.113.7 action=allow labels=URGENT,DATABASE excluded_label=NETWORK, return exactly this compact JSON shape: {"time":"10:32","source":"203.0.113.7","action":"allow","labels":["URGENT","DATABASE"]}. Copy labels only from the comma-separated labels field, preserve their order, never copy excluded_label, and never infer labels from any other field."#,
         "024" => "MODEL_DOCTOR_CASE_024. In at most 12 English words preserve: deployment failed at 14:20, rollback succeeded, no data loss.",
         "038" => r#"MODEL_DOCTOR_CASE_038. A is before B. B is 12 minutes after 09:10. C is 5 minutes after B. Reply only compact JSON with exactly these keys: {"order":["A","B","C"],"bTime":"HH:MM","cTime":"HH:MM"}."#,
         _ => unreachable!("text prompt ID is validated by caller"),
@@ -159,5 +152,24 @@ mod tests {
         assert!(!prompt.contains("compact JSON shaped exactly"));
         assert!(!prompt.contains("Link prefix"));
         assert!(!prompt.contains("Primary target"));
+    }
+
+    #[test]
+    fn check_020_requires_literal_ascii_vertical_bars() {
+        let prompt = text_prompt("020");
+
+        assert!(prompt.contains("ASCII vertical bar characters"));
+        assert!(prompt.contains("literal output characters"));
+        assert!(prompt.contains("ALPHA|BETA|GAMMA"));
+    }
+
+    #[test]
+    fn check_022_copies_only_the_explicit_labels_field() {
+        let prompt = text_prompt("022");
+
+        assert!(prompt.contains("labels=URGENT,DATABASE"));
+        assert!(prompt.contains("excluded_label=NETWORK"));
+        assert!(prompt.contains("Copy labels only"));
+        assert!(prompt.contains("never infer labels"));
     }
 }

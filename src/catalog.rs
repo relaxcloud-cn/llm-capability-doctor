@@ -15,7 +15,7 @@ macro_rules! test_case {
     };
 }
 
-pub static CATALOG: [TestCase; 47] = [
+pub static CATALOG: [TestCase; 46] = [
     test_case!("001", "接口与协议", "URL 可达性"),
     test_case!("002", "接口与协议", "协议识别"),
     test_case!("003", "接口与协议", "鉴权与模型接受"),
@@ -40,7 +40,6 @@ pub static CATALOG: [TestCase; 47] = [
     test_case!("024", "指令与文本", "限长摘要关键点"),
     test_case!("031", "上下文", "多轮修正记忆"),
     test_case!("033", "Thinking 与推理", "Thinking 档位接受"),
-    test_case!("034", "Thinking 与推理", "Reasoning token"),
     test_case!("035", "Thinking 与推理", "思考与答案分离"),
     test_case!("036", "Thinking 与推理", "Thinking 流式事件"),
     test_case!("038", "Thinking 与推理", "逻辑与时序推理"),
@@ -89,8 +88,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_47_unique_checks_and_restores_046() {
-        assert_eq!(CATALOG.len(), 47);
+    fn catalog_has_46_unique_checks_without_034() {
+        assert_eq!(CATALOG.len(), 46);
+        assert!(!CATALOG.iter().any(|test| test.id == "034"));
         assert_eq!(
             CATALOG
                 .iter()
@@ -104,7 +104,7 @@ mod tests {
                 .map(|test| test.id)
                 .collect::<HashSet<_>>()
                 .len(),
-            47
+            46
         );
     }
 }
