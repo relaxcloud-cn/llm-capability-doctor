@@ -487,13 +487,13 @@ class ModelDoctorEvidenceV4Tests(unittest.TestCase):
             "model-capability-doctor-v0.12.0-linux-arm64",
             "model-capability-doctor-v0.12.0-macos-arm64",
             "chmod +x ./model-capability-doctor",
-            "./model-capability-doctor --version",
-            "read -r -s -p 'API Key: ' MODEL_API_KEY",
-            "read -s 'MODEL_API_KEY?API Key: '",
             "--url",
             "--model",
+            "--api-key",
             "--log-file",
-            "unset MODEL_API_KEY",
+            "model-capability-doctor-v0.12.0-windows-x86_64.exe",
+            "New-Item -ItemType Directory",
+            "Get-Item .\\model-doctor-output\\model-doctor.log",
             "ls -lh ./model-doctor-output/model-doctor.log",
         ):
             with self.subTest(required=required):
