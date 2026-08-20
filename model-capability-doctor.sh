@@ -20,7 +20,7 @@ Options:
   --api-key KEY       API key. Prefer MODEL_API_KEY to avoid shell history.
   --log-file PATH     Audit log path. Defaults to a timestamped file in the current directory.
   --timeout SECONDS   Per-request timeout. Defaults to 120.
-  --list-tests        Print the 62-item core catalog and exit.
+  --list-tests        Print the 61-item core catalog and exit.
   -h, --help          Show this help.
 EOF
 }
@@ -60,7 +60,6 @@ print_core_catalog() {
 031	上下文	多轮修正记忆
 032	Thinking 与推理	Thinking 参数接受
 033	Thinking 与推理	Thinking 档位接受
-034	Thinking 与推理	Reasoning token
 035	Thinking 与推理	思考与答案分离
 036	Thinking 与推理	Thinking 流式事件
 037	Thinking 与推理	多步计算
@@ -899,9 +898,13 @@ run_core_context_capacity_test() {
 core_text_prompt() {
   case "$1" in
     019) echo 'MODEL_DOCTOR_CASE_019. Reply only MODEL_DOCTOR_CASE_019_OK.' ;;
-    020) printf '%s' 'MODEL_DOCTOR_CASE_020. Return exactly three lines: [BEGIN] then ALPHA|BETA|GAMMA then [END]. Do not use FORBIDDEN.' ;;
+    020) printf '%s' 'MODEL_DOCTOR_CASE_020. Return exactly these three lines and nothing else:
+[BEGIN]
+ALPHA|BETA|GAMMA
+[END]
+The two ASCII vertical bar characters "|" are literal output characters and must both be present. Do not output the word FORBIDDEN.' ;;
     021) echo 'MODEL_DOCTOR_CASE_021. The latest instruction wins: replace OLD_VALUE with NEW_VALUE and reply only NEW_VALUE.' ;;
-    022) echo 'MODEL_DOCTOR_CASE_022. From time=10:32 source=203.0.113.7 action=allow, return time and source only.' ;;
+    022) echo 'MODEL_DOCTOR_CASE_022. From time=10:32 source=203.0.113.7 action=allow labels=URGENT,DATABASE excluded_label=NETWORK, return exactly this compact JSON shape: {"time":"10:32","source":"203.0.113.7","action":"allow","labels":["URGENT","DATABASE"]}. Copy labels only from the comma-separated labels field, preserve their order, never copy excluded_label, and never infer labels from any other field.' ;;
     023) echo 'MODEL_DOCTOR_CASE_023. For urgent database timeout, return all applicable labels from URGENT, DATABASE, NETWORK.' ;;
     024) echo 'MODEL_DOCTOR_CASE_024. In at most 12 English words preserve: deployment failed at 14:20, rollback succeeded, no data loss.' ;;
     025) echo 'MODEL_DOCTOR_CASE_025. Merge and deduplicate alpha beta; beta gamma. Reply only alpha,beta,gamma.' ;;
@@ -1267,7 +1270,7 @@ run_all_tests() {
       014|015|016|017|018) run_core_context_capacity_test "$id" "$category" "$name" ;;
       019|020|021|022|023|024|025|037|038|039) run_core_text_test "$id" "$category" "$name" ;;
       026|027|028|029|030|031) run_core_context_test "$id" "$category" "$name" ;;
-      032|033|034|035|036) run_core_thinking_test "$id" "$category" "$name" ;;
+      032|033|035|036) run_core_thinking_test "$id" "$category" "$name" ;;
       040|041|042|043|044|045|046|047|048|049|050) run_core_tool_test "$id" "$category" "$name" ;;
       051|052|053|054|055|056|057|058) run_core_performance_test "$id" "$category" "$name" ;;
       059|060|061|062) run_core_guardrail_test "$id" "$category" "$name" ;;

@@ -2,9 +2,9 @@
 
 用于客户现场采集大模型接口能力证据，为判断模型是否满足项目要求提供依据。
 Rust CLI 在现场一次性采集完整请求与响应，生成
-`llm-capability-doctor.evidence.v3` 日志；v3 日志记录
+`llm-capability-doctor.evidence.v4` 日志；v4 日志记录
 `compatibility_profile: opencodex-2.7.42-data-format`。日志带回分析环境后，由 Model Doctor
-Report Skill 逐项判定并生成 `llm-capability-doctor.assessment.v8` 和 HTML 报告。
+Report Skill 逐项判定并生成 `llm-capability-doctor.assessment.v9` 和 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
 可以不连接公网，只需能够访问待测模型接口。
@@ -18,8 +18,8 @@ CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态
 
 | 客户机器 | Release 文件 |
 | --- | --- |
-| Linux x86_64 | `model-capability-doctor-v0.11.0-linux-x86_64` |
-| Linux ARM64 | `model-capability-doctor-v0.11.0-linux-arm64` |
+| Linux x86_64 | `model-capability-doctor-v0.12.0-linux-x86_64` |
+| Linux ARM64 | `model-capability-doctor-v0.12.0-linux-arm64` |
 
 Release 文件不是压缩包。下载后将对应文件重命名为 `model-capability-doctor` 并赋予
 执行权限，不需要创建软链接。
@@ -27,7 +27,7 @@ Release 文件不是压缩包。下载后将对应文件重命名为 `model-capa
 Linux x86_64：
 
 ```bash
-mv ./model-capability-doctor-v0.11.0-linux-x86_64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.12.0-linux-x86_64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -36,7 +36,7 @@ sha256sum ./model-capability-doctor
 Linux ARM64：
 
 ```bash
-mv ./model-capability-doctor-v0.11.0-linux-arm64 ./model-capability-doctor
+mv ./model-capability-doctor-v0.12.0-linux-arm64 ./model-capability-doctor
 chmod +x ./model-capability-doctor
 ./model-capability-doctor --version
 sha256sum ./model-capability-doctor
@@ -103,7 +103,7 @@ fragment，包括空的 `#`。未指定
 除 `--list-tests` 外，URL、模型名和 API Key 都是必填项。CLI 会在协议探测时
 自动使用 Bearer、`api-key`、`x-api-key` 或 `x-goog-api-key` 等对应认证头。
 
-默认执行全部 47 个检测项，不需要也不接受检测模式或检测项 ID 参数。
+默认执行全部 46 个检测项，不需要也不接受检测模式或检测项 ID 参数。
 
 检测结束后清除当前 Shell 中的密钥：
 
@@ -132,15 +132,14 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 使用 $creating-model-doctor-reports 分析 `/绝对路径/your-model-model-doctor.log`，逐项判定 PASS 或 FAIL，并生成能力报告。
 ```
 
-Skill 会在日志旁生成 `llm-capability-doctor.assessment.v8` 评估 JSON 和自包含 HTML
-报告，并对全部 47 个检测项给出 PASS 或 FAIL。工具检测验证官方协议的调用与结果
+Skill 会在日志旁生成 `llm-capability-doctor.assessment.v9` 评估 JSON 和自包含 HTML
+报告，并对全部 46 个检测项给出 PASS 或 FAIL。工具检测验证官方协议的调用与结果
 关联以及完整工具闭环。报告程序同时给出 OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个硬门槛是
 002、004、005、006、040、041、043、047；045 仍是增强能力项，不影响该结论。
 
 兼容性只支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和
 Gemini GenerateContent 四类协议。Ollama Chat 仍可被协议探测识别，但会得到
-OpenCodex 数据格式不兼容。历史 v1/v2 日志缺少新合同，结果固定为
-`NOT_ASSESSED`，不会倒推兼容性。流式合同只读取首个 choice/candidate，并将
+OpenCodex 数据格式不兼容。报告只接受 evidence.v4，旧日志必须重新采集。流式合同只读取首个 choice/candidate，并将
 OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败；Google
 官方流式方法的查询串固定为 `?alt=sse`。该结论的范围边界是：
 `仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。`
@@ -151,7 +150,7 @@ OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败�
 
 ## 检测范围
 
-47 个固定检测项覆盖以下能力：
+46 个固定检测项覆盖以下能力：
 
 | 领域 | 主要检查内容 |
 | --- | --- |
@@ -159,7 +158,7 @@ OpenCodex 会转成 `response.incomplete` 的截断或过滤终止判为失败�
 | 结构化结果 | 裸 JSON、字段类型、嵌套结构、项目核心结果和证据引用。 |
 | 上下文 | 用约 3.2 万至 51.2 万字符近似测试 8K 至 128K Token 档位，并检查多轮修正记忆。 |
 | 指令与文本 | 精确输出、组合格式、多字段抽取和限长摘要。 |
-| Thinking 与推理 | Thinking 档位、推理 Token、思考与答案分离、流式事件和逻辑推理。 |
+| Thinking 与推理 | Thinking 档位、思考与答案分离、流式事件和逻辑推理。 |
 | 工具调用 | 官方协议结构、完整工具闭环、工具选择、参数约束、并行与串行调用、结果忠实性及失败恢复。 |
 | 性能与稳定性 | 首字节、完整响应、重复成功率、P50/P95 延迟和并发响应时间。 |
 | 护栏与词汇 | 告警、分诊、漏洞等中英文安全业务词汇是否可正常用于项目任务。 |
@@ -186,9 +185,9 @@ Gemini GenerateContent 和 Ollama Chat 协议。
 | `--url URL` | 不含 fragment 的完整模型接口 URL；仅已识别的 Google 官方流式方法会派生 `:streamGenerateContent` 和 `alt=sse`，自定义路径不变。 |
 | `--model MODEL` | 发送给模型接口的模型名。 |
 | `--api-key KEY` | API Key；显式值优先于 `MODEL_API_KEY`。 |
-| `--log-file PATH` | 指定 evidence-v3 日志路径。 |
+| `--log-file PATH` | 指定 evidence-v4 日志路径。 |
 | `--timeout SECONDS` | 单次请求超时，默认 120 秒。 |
-| `--list-tests` | 输出完整 47 项目录并退出。 |
+| `--list-tests` | 输出完整 46 项目录并退出。 |
 | `--insecure` | 跳过 HTTPS 证书和主机身份校验。 |
 
 ### `--insecure` 安全提示
@@ -212,5 +211,5 @@ python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 't
 
 ## Shell 参考实现
 
-`model-capability-doctor.sh` 仅保留为 Shell 参考实现，固定执行其 62 项历史目录，
+`model-capability-doctor.sh` 仅保留为 Shell 参考实现，固定执行其 61 项历史目录，
 不接受检测项选择参数。Rust CLI 不调用该脚本，也不调用 curl；后续能力以 Rust CLI 为准。
