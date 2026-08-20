@@ -2101,7 +2101,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
         concurrency_rules = section("### 057 并发响应时间", "## 13. Security Business Language")
         self.assertIn("in evidence v4", concurrency_rules)
 
-    def test_readme_explains_bounded_opencodex_compatibility_result(self) -> None:
+    def test_readme_omits_internal_report_details(self) -> None:
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
 
         for marker in (
@@ -2116,10 +2116,11 @@ class ModelDoctorV6Tests(unittest.TestCase):
             "`?alt=sse`",
             "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
             "python3 -m unittest discover",
+            "46 个固定检测项",
+            "只接受 evidence.v4",
         ):
-            self.assertIn(marker, readme)
-        self.assertIn("46 个固定检测项", readme)
-        self.assertIn("只接受 evidence.v4", readme)
+            with self.subTest(marker=marker):
+                self.assertNotIn(marker, readme)
 
     def test_skill_reviews_example_is_valid_and_evidence_bounded(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

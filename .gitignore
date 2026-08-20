@@ -1,5 +1,6 @@
 /docs/
 /tests/
+/dist/
 .worktrees/
 target/
 .DS_Store

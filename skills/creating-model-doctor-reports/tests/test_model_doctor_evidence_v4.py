@@ -479,23 +479,37 @@ class ModelDoctorEvidenceV4Tests(unittest.TestCase):
 
         self.assertNotIn("protocolConformance", rules)
 
-    def test_readme_describes_012_evidence_v4_and_46_checks(self) -> None:
+    def test_readme_has_customer_facing_cli_commands(self) -> None:
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
 
         for required in (
-            "v0.12.0",
-            "`llm-capability-doctor.evidence.v4`",
-            "默认执行全部 46 个检测项",
-            "输出完整 46 项目录",
-            "evidence-v4 日志路径",
-            "官方协议结构",
-            "完整工具闭环",
-            "`:generateContent`",
-            "`:streamGenerateContent`",
-            "`alt=sse`",
+            "model-capability-doctor-v0.12.0-linux-x86_64",
+            "model-capability-doctor-v0.12.0-linux-arm64",
+            "model-capability-doctor-v0.12.0-macos-arm64",
+            "chmod +x ./model-capability-doctor",
+            "./model-capability-doctor --version",
+            "read -rsp 'API Key: ' MODEL_API_KEY",
+            "--url",
+            "--model",
+            "--log-file",
+            "unset MODEL_API_KEY",
+            "ls -lh ./model-doctor-output/model-doctor.log",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, readme)
+
+        for internal_detail in (
+            "cargo",
+            "Rust",
+            "evidence",
+            "assessment",
+            "OpenCodex",
+            "协议",
+            "开发验证",
+            "Shell 参考",
+        ):
+            with self.subTest(internal_detail=internal_detail):
+                self.assertNotIn(internal_detail, readme)
 
     def test_parser_accepts_exact_v4_profile_with_46_manifests(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())
