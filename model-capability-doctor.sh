@@ -555,7 +555,6 @@ run_parallel_batch() {
   local id="$1"
   local concurrency="$2"
   local label="$3"
-  local marker=""
   local body=""
   local index=0
   local prefix=""
@@ -569,12 +568,9 @@ run_parallel_batch() {
   local started_at=""
   local completed_at=""
   local audit_file=""
-  local upper_label=""
   local request_id=""
   local gate_file="$RUN_TMP_DIR/test-${id}-${label}.gate"
-  upper_label="$(printf '%s' "$label" | tr '[:lower:]' '[:upper:]')"
-  marker="MODEL_DOCTOR_${id}_${upper_label}_OK"
-  body="$(protocol_body "$DETECTED_PROTOCOL" "Reply only ${marker}" false)"
+  body="$(protocol_body "$DETECTED_PROTOCOL" "Reply with any short non-empty response." false)"
   rm -f "$gate_file"
   while (( index < concurrency )); do
     index=$((index + 1))

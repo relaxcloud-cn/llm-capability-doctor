@@ -42,7 +42,7 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
                         .map(|index| {
                             basic(
                                 &format!("test-057-c{concurrency}-{index}"),
-                                &format!("Reply only MODEL_DOCTOR_057_C{concurrency}_OK"),
+                                "Reply with any short non-empty response.",
                                 false,
                                 context,
                             )
@@ -72,4 +72,36 @@ fn basic(
         basic_request(context.protocol, context.model, prompt, stream),
         context,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::protocol::{AuthMode, Protocol};
+
+    use super::*;
+
+    #[test]
+    fn check_057_requests_any_short_non_empty_response() {
+        let context = PlanContext {
+            protocol: Protocol::OpenAiChat,
+            auth_mode: AuthMode::None,
+            model: "fixture-model",
+        };
+
+        let plan = plan("057", &context).expect("057 plan");
+        let requests = plan
+            .groups
+            .iter()
+            .flat_map(RequestGroup::requests)
+            .collect::<Vec<_>>();
+
+        assert_eq!(requests.len(), 60);
+        for request in requests {
+            let prompt = request.body.json()["messages"][0]["content"]
+                .as_str()
+                .expect("OpenAI Chat prompt");
+            assert_eq!(prompt, "Reply with any short non-empty response.");
+            assert!(!prompt.contains("MODEL_DOCTOR_057"));
+        }
+    }
 }

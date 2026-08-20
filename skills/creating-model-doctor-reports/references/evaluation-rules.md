@@ -75,7 +75,7 @@ The highest pass and first higher failure define an observed interval, not an ex
 
 ### Concurrency
 
-Derive `concurrency` only after inspecting every request in every collected test 057 wave. A wave counts as verified only when its complete sample set is present, every response is semantically correct, every required metric is valid, and no sample is rate-limited. Missing, invalid, or rate-limited samples disqualify that wave but do not erase a lower fully verified wave.
+Derive `concurrency` only after inspecting every request in every collected test 057 wave. A wave counts as verified only when its complete sample set is present, every request returns HTTP 2xx and a protocol-valid response with non-empty model-visible content, every required metric is valid, and no sample is rate-limited. Exact wording and markers are not evaluated for 057. Missing, invalid, empty, or rate-limited samples disqualify that wave but do not erase a lower fully verified wave.
 
 “32 concurrent requests passed” means the service at least supported, or 最高已验证, 32-way short-run concurrency in this collection. It does not establish the real maximum, a hard limit, sustained load behavior, or an SLA.
 
@@ -436,7 +436,7 @@ For checks 046-049, every ordered request must be completed and runtime-conforma
 
 ## 12. Performance and Stability
 
-Semantic correctness is required for every sample. `time_total` means 完整响应延迟, not TTFB, TTFT, throughput, or Token generation speed.
+Semantic correctness is required for every sample except 057, which measures successful concurrent responses and accepts any non-empty model-visible content. `time_total` means 完整响应延迟, not TTFB, TTFT, throughput, or Token generation speed.
 
 ### 052 首字节时间
 
@@ -473,8 +473,8 @@ Semantic correctness is required for every sample. `time_total` means 完整响�
 ### 057 并发响应时间
 
 - Method: inspect the fixed 4、8、16、32 concurrent waves in evidence v4.
-- `PASS`: every request in every executed wave has the exact wave marker, valid metric, and no rate limit.
-- `FAIL`: any timeout, HTTP/protocol/content error, missing sample, rate limit, or invalid metric.
+- `PASS`: every request in every executed wave returns HTTP 2xx, a protocol-valid response with non-empty model-visible content, a valid metric, and no rate limit. Do not require an exact wave marker or otherwise score response wording.
+- `FAIL`: any timeout, non-2xx response, malformed protocol response, empty model-visible content, missing sample, rate limit, or invalid metric.
 - Conclusion: summarize whether every executed concurrency wave succeeded without rate limiting, then judge the highest verified short-run concurrency tier. Keep each wave's success count, rate-limit count, P50, nearest-rank P95, and maximum complete-response latency in evidence. This short run 不构成 SLA or sustained-load proof.
 
 ## 13. Security Business Language

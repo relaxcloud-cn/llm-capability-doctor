@@ -75,6 +75,20 @@ class EvidenceV4ContractTests(unittest.TestCase):
         self.assertIn("no extra labels", section)
         self.assertNotIn("any order", section)
 
+    def test_check_057_accepts_any_non_empty_protocol_response(self) -> None:
+        rules = (
+            SKILL_DIR / "references" / "evaluation-rules.md"
+        ).read_text(encoding="utf-8")
+        section = rules.split("### 057 并发响应时间", 1)[1].split(
+            "## 13. Security Business Language", 1
+        )[0]
+
+        self.assertIn("non-empty model-visible content", section)
+        self.assertIn("HTTP 2xx", section)
+        self.assertIn("Do not require an exact wave marker", section)
+        self.assertNotIn("has the exact wave marker", section)
+        self.assertNotIn("wrong content", section)
+
 
 if __name__ == "__main__":
     unittest.main()
