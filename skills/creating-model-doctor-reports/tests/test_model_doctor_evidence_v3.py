@@ -455,10 +455,9 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         for required in (
             "collector v0.11.0 with `llm-capability-doctor.evidence.v3`",
             "require all 47 manifests",
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             "every accepted historical and current input",
             "evidence.v1 and evidence.v2 retain their original assessment rules",
-            "Outside the explicit evidence.v3 checks 046-049 PASS gate",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, skill)
@@ -490,22 +489,11 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
             "every ordered request",
             "runtime-conformant",
             "final loop is completed",
-            "associated `protocolConformance` result is `CONSISTENT`",
-            "raw response -> follow-up request correlation",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, v3_rules)
 
-        self.assertIn(
-            "Except for the explicit evidence.v3 checks 046-049 PASS gate",
-            rules,
-        )
-        self.assertNotIn(
-            "Generate `llm-capability-doctor.assessment.v7.protocolConformance` "
-            "deterministically and keep it independent from manifest PASS/FAIL and "
-            "the general capability verdict.",
-            rules,
-        )
+        self.assertNotIn("protocolConformance", rules)
 
     def test_rules_preserve_legacy_contract_interpretation(self) -> None:
         rules = (
@@ -561,33 +549,6 @@ class ModelDoctorEvidenceV3Tests(unittest.TestCase):
         ):
             with self.subTest(required=required):
                 self.assertIn(required, readme)
-
-    def test_assessment_validator_independently_rejects_tampered_v3_tool_pass(self) -> None:
-        parsed, reviews = self._guard_fixture()
-        assessment = assemble_assessment(parsed, reviews)
-        tool_test = next(item for item in assessment["tests"] if item["testId"] == "046")
-        body = json.loads(tool_test["requests"][1]["requestBody"])
-        body["messages"][-1]["tool_call_id"] = "attacker-replaced-call"
-        tool_test["requests"][1]["requestBody"] = json.dumps(body)
-        supplied = {
-            result["requestId"]: result
-            for result in assessment["protocolConformance"]["results"]
-        }
-        self.assertEqual("CONSISTENT", supplied["test-046-turn-2"]["status"])
-
-        errors = validate_assessment(assessment)
-
-        self.assertTrue(any("official protocol" in error for error in errors), errors)
-
-    def test_v3_tool_pass_guard_rejects_protocol_difference(self) -> None:
-        parsed, reviews = self._guard_fixture()
-        body = json.loads(parsed["requests"]["test-046-turn-2"]["requestBody"])
-        body["messages"][-1]["tool_call_id"] = "wrong-call"
-        parsed["requests"]["test-046-turn-2"]["requestBody"] = json.dumps(body)
-
-        errors = validate_reviews(parsed, reviews)
-
-        self.assertTrue(any("official protocol" in error for error in errors), errors)
 
     def test_parser_accepts_exact_v3_profile_with_47_manifests(self) -> None:
         parsed = self.parse_text_log(build_evidence_log())

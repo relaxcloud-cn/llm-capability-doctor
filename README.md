@@ -4,7 +4,7 @@
 Rust CLI 在现场一次性采集完整请求与响应，生成
 `llm-capability-doctor.evidence.v3` 日志；v3 日志记录
 `compatibility_profile: opencodex-2.7.42-data-format`。日志带回分析环境后，由 Model Doctor
-Report Skill 逐项判定并生成 `llm-capability-doctor.assessment.v7` 和 HTML 报告。
+Report Skill 逐项判定并生成 `llm-capability-doctor.assessment.v8` 和 HTML 报告。
 
 CLI 原生发送网络请求，不调用 Bash、curl、Python 或 OpenSSL 动态库。客户服务器
 可以不连接公网，只需能够访问待测模型接口。
@@ -132,11 +132,9 @@ cp -R ./skills/creating-model-doctor-reports/. "$HOME/.codex/skills/creating-mod
 使用 $creating-model-doctor-reports 分析 `/绝对路径/your-model-model-doctor.log`，逐项判定 PASS 或 FAIL，并生成能力报告。
 ```
 
-Skill 会在日志旁生成 `llm-capability-doctor.assessment.v7` 评估 JSON 和自包含 HTML
-报告，并对全部 47 个检测项给出 PASS 或 FAIL。报告还会检查全部原始请求的官方
-协议响应结构，覆盖成功与错误响应以及流式与非流式响应，并逐项列出差异和固定官方
-参考。工具检测同时验证官方协议结构、调用与结果关联以及完整工具闭环。报告程序同时给出
-OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个硬门槛是
+Skill 会在日志旁生成 `llm-capability-doctor.assessment.v8` 评估 JSON 和自包含 HTML
+报告，并对全部 47 个检测项给出 PASS 或 FAIL。工具检测验证官方协议的调用与结果
+关联以及完整工具闭环。报告程序同时给出 OpenCodex 数据格式兼容性和通用能力结论。OpenCodex 结论的八个硬门槛是
 002、004、005、006、040、041、043、047；045 仍是增强能力项，不影响该结论。
 
 兼容性只支持 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 和

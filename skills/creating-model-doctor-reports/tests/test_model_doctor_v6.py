@@ -990,7 +990,7 @@ class ModelDoctorV6Tests(unittest.TestCase):
             self.fail(f"assembly rejected the reviews v2 envelope: {error}")
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             assessment["schemaVersion"],
         )
         self.assertNotIn("failureAnalysis", assessment["tests"][0])
@@ -1472,11 +1472,11 @@ test_manifest_count: 1
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
 
         self.assertEqual(
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             schema["$id"],
         )
         self.assertEqual(
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             schema["properties"]["schemaVersion"]["const"],
         )
         self.assertIn("capabilitySummary", schema["required"])
@@ -1501,7 +1501,7 @@ test_manifest_count: 1
         self.assertIsNone(re.fullmatch(pattern, "模型READY状态未判定。"))
         self.assertIsNotNone(re.fullmatch(pattern, "Evidence was already recorded."))
 
-    def test_renderer_places_final_conclusion_after_detection_information(self) -> None:
+    def test_renderer_places_sections_in_approved_reading_order(self) -> None:
         try:
             assessment = assemble_assessment(self._parsed(), self._reviews())
             html = render_report(assessment, ASSET_DIR)
@@ -1509,48 +1509,42 @@ test_manifest_count: 1
             self.fail(f"renderer rejected the desired v7 contract: {error}")
 
         expected_order = (
-            '<section class="run-information"',
-            '<section class="opencodex-compatibility ',
-            '<section class="final-conclusion"',
-            '<section class="protocol-conformance"',
-            '<table class="summary-table">',
-            '<section class="result-section"',
+            '<section class="report-section" id="conclusion"',
+            '<section class="report-section" id="issues"',
+            '<section class="report-section" id="run-info"',
+            '<section class="report-section" id="capabilities"',
+            '<section class="report-section" id="scope"',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
         self.assertTrue(all(position >= 0 for position in positions), positions)
         self.assertEqual(tuple(sorted(positions)), positions)
-        self.assertEqual(1, html.count('<section class="opencodex-compatibility '))
-        self.assertEqual(1, html.count('<section class="final-conclusion"'))
+        self.assertNotIn('id="protocol"', html)
         parser = _MainChildParser()
         parser.feed(html)
         self.assertEqual(
             [
-                ("section", "run-information"),
-                (
-                    "section",
-                    "opencodex-compatibility "
-                    "opencodex-compatibility-NOT_ASSESSED",
-                ),
-                ("section", "final-conclusion"),
-                ("section", "protocol-conformance"),
-                ("table", "summary-table"),
-                ("section", "result-section"),
+                ("header", "report-header"),
+                ("section", "report-section"),
+                ("section", "report-section"),
+                ("section", "report-section"),
+                ("section", "report-section"),
+                ("section", "report-section"),
             ],
             parser.children[:6],
         )
 
     def test_opencodex_compatibility_renders_all_levels(self) -> None:
-        for level, label in (
-            ("PASS", "OpenCodex 数据格式兼容"),
-            ("FAIL", "OpenCodex 数据格式不兼容"),
-            ("NOT_ASSESSED", "OpenCodex 数据格式未评定"),
+        for level, value in (
+            ("PASS", "兼容"),
+            ("FAIL", "不兼容"),
+            ("NOT_ASSESSED", "未评定"),
         ):
             with self.subTest(level=level):
                 html = _opencodex_compatibility(
                     {
                         "profile": "opencodex-2.7.42-data-format",
                         "level": level,
-                        "label": label,
+                        "label": f"OpenCodex 数据格式{value}",
                         "protocolFamily": "OPENAI_CHAT_COMPLETIONS",
                         "requiredTestIds": ["002", "004"],
                         "failedTestIds": [],
@@ -1559,80 +1553,64 @@ test_manifest_count: 1
                     }
                 )
 
+                tone = {"PASS": "pass", "FAIL": "fail"}.get(level, "neutral")
+                self.assertIn(f'class="verdict-block {tone}"', html)
                 self.assertIn(
-                    f'class="opencodex-compatibility '
-                    f'opencodex-compatibility-{level}"',
+                    '<p class="verdict-label">能否直接接入 OpenCodex（数据格式）</p>',
                     html,
                 )
-                self.assertIn(label, html)
-                self.assertIn("OpenAI Chat Completions", html)
-                self.assertIn("002、004", html)
-                self.assertIn("<dd>无</dd>", html)
+                self.assertIn(f'<p class="verdict-value">{value}</p>', html)
+                self.assertIn('<p class="verdict-statement">固定兼容性结论。</p>', html)
+                self.assertIn('<p class="verdict-boundary">固定范围边界。</p>', html)
 
     def test_opencodex_compatibility_escapes_all_dynamic_fields(self) -> None:
         payloads = {
-            "profile": '<profile data-x="1">profile</profile>',
             "level": '<level data-x="2">level</level>',
-            "label": '<label data-x="3">label</label>',
-            "protocolFamily": '<protocol data-x="4">protocol</protocol>',
-            "requiredTestIds": ['<required data-x="5">required</required>'],
-            "failedTestIds": ['<failed data-x="6">failed</failed>'],
             "statement": '<statement data-x="7">statement</statement>',
             "scopeBoundary": '<scope data-x="8">scope</scope>',
         }
 
         html = _opencodex_compatibility(payloads)
 
-        scalar_values = (
-            payloads["profile"],
-            payloads["level"],
-            payloads["label"],
-            payloads["protocolFamily"],
+        for payload in (
             payloads["statement"],
             payloads["scopeBoundary"],
-            payloads["requiredTestIds"][0],
-            payloads["failedTestIds"][0],
-        )
-        for payload in scalar_values:
+        ):
             with self.subTest(payload=payload):
                 self.assertNotIn(payload, html)
                 self.assertIn(escape(payload, quote=True), html)
-        self.assertIn(
-            'class="opencodex-compatibility '
-            'opencodex-compatibility-NOT_ASSESSED"',
-            html,
-        )
+        self.assertIn('class="verdict-block neutral"', html)
         self.assertNotIn('class="<level', html)
+        self.assertNotIn("<level data-x", html)
 
     def test_opencodex_compatibility_css_is_responsive_and_print_safe(self) -> None:
         css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
-        mobile_css = css.split("@media (max-width: 640px)", 1)[1].split(
+        mobile_css = css.split("@media (max-width: 680px)", 1)[1].split(
             "@media print", 1
         )[0]
         print_css = css.split("@media print", 1)[1]
 
-        self.assertIn(".opencodex-compatibility", css)
+        self.assertIn(".verdict-block", css)
         self.assertRegex(
             css,
-            r"\.opencodex-compatibility-details\s+dd\s*\{[^}]*"
+            r"\.verdict-boundary\s*\{[^}]*"
             r"overflow-wrap:\s*anywhere;",
         )
         self.assertRegex(
             mobile_css,
-            r"\.opencodex-compatibility-details\s*>\s*div\s*\{[^}]*"
-            r"grid-template-columns:\s*minmax\(0,\s*1fr\);",
+            r"\.result-columns[^{]*\{[^}]*grid-template-columns:\s*1fr;",
         )
         self.assertRegex(
             print_css,
-            r"\.opencodex-compatibility\s*\{[^}]*break-inside:\s*avoid;",
+            r"\.verdict-block[^{]*\{[^}]*break-inside:\s*avoid;",
         )
         for variable, value in {
-            "--verdict-pass": "#18794e",
-            "--verdict-fail": "#b42318",
-            "--verdict-neutral": "#5b6168",
+            "--pass": "#167453",
+            "--fail": "#b42318",
+            "--neutral": "#4b5563",
         }.items():
             with self.subTest(variable=variable):
-                self.assertIn(f"{variable}: {value};", print_css)
+                self.assertIn(f"{variable}: {value};", css)
 
     def test_final_conclusion_renders_all_three_fact_rows(self) -> None:
         assessment = assemble_assessment(self._parsed(), self._reviews())
@@ -1640,18 +1618,18 @@ test_manifest_count: 1
         html = render_report(assessment, ASSET_DIR)
 
         for expected in (
-            "接口协议格式",
-            "上下文能力",
-            "并发能力",
+            "接口格式（依据检测 002）",
+            "长文本处理（依据检测 014-018）",
+            "同时请求（依据检测 057）",
             "本轮证据不足以确认接口协议格式。",
             "本轮未采集上下文档位证据。",
             "本轮未采集并发波次证据。",
         ):
             self.assertIn(expected, html)
         expected_order = (
-            '<h2 id="final-conclusion-heading"',
+            'id="conclusion"',
             '<dl class="verified-facts">',
-            '<table class="summary-table">',
+            '<section class="report-section" id="issues"',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
         self.assertTrue(all(position >= 0 for position in positions), positions)
@@ -1727,8 +1705,8 @@ test_manifest_count: 1
 
         html = render_report(assessment, ASSET_DIR)
 
-        self.assertEqual(1, html.count("未通过项证据复核"))
-        self.assertIn("证据充分", html)
+        self.assertEqual(1, html.count("为什么没有通过"))
+        self.assertIn("现有记录足以确认本次结果", html)
         self.assertIn("响应直接违反了本项核心契约。", html)
         self.assertIn("不能据此推断后端模型身份。", html)
 
@@ -1739,32 +1717,25 @@ test_manifest_count: 1
 
         self.assertIn("关键证据摘录", html)
         self.assertIn("记录了可观察响应。", html)
-        self.assertIn("失败类型", html)
-        self.assertIn("DIRECT", html)
-        self.assertIn("证据引用", html)
+        self.assertIn("为什么判为未通过", html)
+        self.assertIn("实际结果没有完成要求", html)
+        self.assertNotIn("<dd>DIRECT</dd>", html)
+        self.assertIn("对应的原始记录编号", html)
         self.assertIn("request:req-fail", html)
         self.assertIn("curl exit 0", html)
-        self.assertIn("TTFB 0.050000s", html)
-        self.assertNotIn("TTFT 0.050000s", html)
+        self.assertIn("首次返回 0.050000 秒", html)
 
     def test_print_css_reveals_evidence_and_removes_code_clipping(self) -> None:
         css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
-        mobile_css = css.split("@media (max-width: 640px)", 1)[1].split(
-            "@media print", 1
-        )[0]
         print_css = css.split("@media print", 1)[1]
 
-        self.assertRegex(
-            mobile_css,
-            r"\.verified-facts\s*>\s*div\s*\{[^}]*grid-template-columns:\s*1fr;",
-        )
         self.assertNotRegex(
             print_css,
             r"\.verified-facts(?:\s*>\s*div)?\s*\{[^}]*display:\s*none;",
         )
         self.assertRegex(
             print_css,
-            r"\.evidence-row\[hidden\]\s*\{\s*display:\s*table-row;",
+            r"\.test-detail[^{]*\{[^}]*display:\s*block\s*!important;",
         )
         self.assertRegex(print_css, r"pre\s*\{[^}]*max-height:\s*none;")
         self.assertRegex(print_css, r"pre\s*\{[^}]*overflow:\s*visible;")
@@ -1787,17 +1758,17 @@ test_manifest_count: 1
         )
         for omitted in (
             "HTML_HEADLINE_MUST_NOT_RENDER",
-            "HTML_ISSUE_TITLE_MUST_NOT_RENDER",
-            "HTML_ISSUE_STATEMENT_MUST_NOT_RENDER",
-            "HTML_ISSUE_BOUNDARY_MUST_NOT_RENDER",
-            "关联检测项：",
             "本节仅总结本轮可观察能力，不构成项目 READY/BLOCKED 判定。",
             'class="final-conclusion-lead"',
             'class="final-conclusion-list"',
             'class="final-conclusion-scope"',
         ):
             self.assertNotIn(omitted, html)
-        self.assertIn('class="general-verdict ', html)
+        self.assertIn("当前主要有 1 类问题：HTML_ISSUE_TITLE_MUST_NOT_RENDER。", html)
+        self.assertIn("HTML_ISSUE_STATEMENT_MUST_NOT_RENDER", html)
+        self.assertIn("HTML_ISSUE_BOUNDARY_MUST_NOT_RENDER", html)
+        self.assertIn("关联检测项", html)
+        self.assertIn('class="verdict-block ', html)
         self.assertIn('<dl class="verified-facts">', html)
 
     def test_final_conclusion_css_omits_removed_freeform_styles(self) -> None:
@@ -1825,7 +1796,7 @@ test_manifest_count: 1
         html = render_report(assessment, ASSET_DIR)
 
         self.assertNotIn("<script>alert(1)</script>", html)
-        self.assertNotIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
         self.assertIn("&lt;b&gt;bad&lt;/b&gt;", html)
 
     def test_all_pass_summary_renders_without_empty_issue_list(self) -> None:
@@ -1855,6 +1826,8 @@ test_manifest_count: 1
 
         self.assertNotIn("本轮所有已执行检测项均通过。", html)
         self.assertNotIn('<ol class="final-conclusion-list">', html)
+        self.assertIn("本轮没有需要处理的问题", html)
+        self.assertIn("本轮检查没有未通过项。", html)
 
     def test_cli_rejects_non_object_reviews_with_v2_message(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1914,11 +1887,12 @@ test_manifest_count: 1
 
         self.assertEqual(0, exit_code, stderr.getvalue())
         self.assertEqual(
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             assessment["schemaVersion"],
         )
-        self.assertIn('<section class="final-conclusion"', html)
-        self.assertEqual(1, html.count("未通过项证据复核"))
+        self.assertIn('<section class="report-section" id="conclusion"', html)
+        self.assertIn("大模型能力诊断报告", html)
+        self.assertEqual(1, html.count("为什么没有通过"))
 
     def test_skill_instructions_require_the_three_stage_flow(self) -> None:
         skill_text = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
@@ -1937,7 +1911,7 @@ test_manifest_count: 1
 
         for marker in (
             "llm-capability-doctor.reviews.v2",
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             "interfaceProtocol",
             "contextWindow",
             "highestVerifiedInputTokens",
@@ -1957,7 +1931,7 @@ test_manifest_count: 1
             "collector v0.11.0",
             "llm-capability-doctor.evidence.v3",
             "compatibility_profile: opencodex-2.7.42-data-format",
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             "openCodexCompatibility",
             "002、004、005、006、040、041、043、047",
             "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。",
@@ -1979,7 +1953,7 @@ test_manifest_count: 1
             "collector v0.11.0",
             "llm-capability-doctor.evidence.v3",
             "compatibility_profile: opencodex-2.7.42-data-format",
-            "assessment.v7.capabilitySummary.openCodexCompatibility",
+            "assessment.v8.capabilitySummary.openCodexCompatibility",
             "002、004、005、006、040、041、043、047",
             "OPENAI_CHAT_COMPLETIONS",
             "OPENAI_RESPONSES",
@@ -2089,7 +2063,7 @@ test_manifest_count: 1
         readme = (SKILL_DIR.parents[1] / "README.md").read_text(encoding="utf-8")
 
         for marker in (
-            "llm-capability-doctor.assessment.v7",
+            "llm-capability-doctor.assessment.v8",
             "002、004、005、006、040、041、043、047",
             "OpenAI Chat Completions",
             "OpenAI Responses",

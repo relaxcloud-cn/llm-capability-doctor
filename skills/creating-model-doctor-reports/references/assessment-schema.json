@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "llm-capability-doctor.assessment.v7",
+  "$id": "llm-capability-doctor.assessment.v8",
   "title": "LLM Capability Doctor Evidence-Bound Assessment",
   "type": "object",
   "required": [
@@ -12,24 +12,35 @@
     "warnings",
     "summary",
     "capabilitySummary",
-    "protocolConformance",
     "categories",
     "tests"
   ],
   "properties": {
     "schemaVersion": {
-      "const": "llm-capability-doctor.assessment.v7"
+      "const": "llm-capability-doctor.assessment.v8"
     },
     "generatedAt": {
       "type": "string"
     },
     "source": {
       "type": "object",
-      "required": ["fileName", "size", "sha256"],
+      "required": [
+        "fileName",
+        "size",
+        "sha256"
+      ],
       "properties": {
-        "fileName": {"type": "string"},
-        "size": {"type": "integer", "minimum": 0},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        "fileName": {
+          "type": "string"
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
       },
       "additionalProperties": false
     },
@@ -44,14 +55,25 @@
     },
     "summary": {
       "type": "object",
-      "required": ["counts"],
+      "required": [
+        "counts"
+      ],
       "properties": {
         "counts": {
           "type": "object",
-          "required": ["PASS", "FAIL"],
+          "required": [
+            "PASS",
+            "FAIL"
+          ],
           "properties": {
-            "PASS": {"type": "integer", "minimum": 0},
-            "FAIL": {"type": "integer", "minimum": 0}
+            "PASS": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "FAIL": {
+              "type": "integer",
+              "minimum": 0
+            }
           },
           "additionalProperties": false
         }
@@ -61,22 +83,33 @@
     "capabilitySummary": {
       "$ref": "#/$defs/capabilitySummary"
     },
-    "protocolConformance": {
-      "$ref": "#/$defs/protocolConformance"
-    },
     "categories": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["name", "counts"],
+        "required": [
+          "name",
+          "counts"
+        ],
         "properties": {
-          "name": {"type": "string"},
+          "name": {
+            "type": "string"
+          },
           "counts": {
             "type": "object",
-            "required": ["PASS", "FAIL"],
+            "required": [
+              "PASS",
+              "FAIL"
+            ],
             "properties": {
-              "PASS": {"type": "integer", "minimum": 0},
-              "FAIL": {"type": "integer", "minimum": 0}
+              "PASS": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "FAIL": {
+                "type": "integer",
+                "minimum": 0
+              }
             },
             "additionalProperties": false
           }
@@ -104,13 +137,28 @@
           "requests"
         ],
         "properties": {
-          "testId": {"type": "string", "pattern": "^[0-9]{3}$"},
-          "category": {"type": "string", "minLength": 1},
-          "name": {"type": "string", "minLength": 1},
-          "reviewedStatus": {
-            "enum": ["PASS", "FAIL"]
+          "testId": {
+            "type": "string",
+            "pattern": "^[0-9]{3}$"
           },
-          "conclusion": {"type": "string", "minLength": 1},
+          "category": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reviewedStatus": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          },
+          "conclusion": {
+            "type": "string",
+            "minLength": 1
+          },
           "logic": {
             "type": "object",
             "required": [
@@ -121,48 +169,77 @@
               "capabilityBoundary"
             ],
             "properties": {
-              "purpose": {"type": "string"},
-              "method": {"type": "string"},
+              "purpose": {
+                "type": "string"
+              },
+              "method": {
+                "type": "string"
+              },
               "passCriteria": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                  "type": "string"
+                },
                 "minItems": 1
               },
               "failCriteria": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": {
+                  "type": "string"
+                },
                 "minItems": 1
               },
-              "capabilityBoundary": {"type": "string"}
+              "capabilityBoundary": {
+                "type": "string"
+              }
             },
             "additionalProperties": false
           },
-          "rawObservation": {"type": "string", "minLength": 1},
+          "rawObservation": {
+            "type": "string",
+            "minLength": 1
+          },
           "metrics": {
             "type": "array",
-            "items": {"type": "object"}
+            "items": {
+              "type": "object"
+            }
           },
           "evidenceRefs": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
             "minItems": 1
           },
           "evidenceExcerpts": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1},
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
             "minItems": 1
           },
           "limitations": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1}
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "retestInstructions": {
             "type": "array",
-            "items": {"type": "string", "minLength": 1}
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           },
           "requests": {
             "type": "array",
-            "items": {"type": "object"}
+            "items": {
+              "type": "object"
+            }
           },
           "failureAnalysis": {
             "$ref": "#/$defs/failureAnalysis"
@@ -172,12 +249,26 @@
           {
             "if": {
               "properties": {
-                "reviewedStatus": {"const": "FAIL"}
+                "reviewedStatus": {
+                  "const": "FAIL"
+                }
               },
-              "required": ["reviewedStatus"]
+              "required": [
+                "reviewedStatus"
+              ]
             },
-            "then": {"required": ["failureAnalysis"]},
-            "else": {"not": {"required": ["failureAnalysis"]}}
+            "then": {
+              "required": [
+                "failureAnalysis"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "failureAnalysis"
+                ]
+              }
+            }
           }
         ],
         "additionalProperties": false
@@ -185,366 +276,6 @@
     }
   },
   "$defs": {
-    "protocolConformance": {
-      "type": "object",
-      "required": [
-        "ruleSetVersion",
-        "baselineDate",
-        "baselines",
-        "summary",
-        "results"
-      ],
-      "properties": {
-        "ruleSetVersion": {
-          "const": "official-protocol-conformance.2026-08-18"
-        },
-        "baselineDate": {
-          "const": "2026-08-18"
-        },
-        "baselines": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolBaseline"},
-          "minItems": 5,
-          "maxItems": 5,
-          "uniqueItems": true
-        },
-        "summary": {
-          "$ref": "#/$defs/protocolConformanceSummary"
-        },
-        "results": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolConformanceResult"}
-        }
-      },
-      "additionalProperties": false
-    },
-    "protocolBaseline": {
-      "type": "object",
-      "required": [
-        "protocol",
-        "officialVersion",
-        "referenceDate",
-        "sourceUrl",
-        "supportingReferences"
-      ],
-      "properties": {
-        "protocol": {
-          "enum": [
-            "openai_chat",
-            "openai_responses",
-            "anthropic_messages",
-            "gemini_generate_content",
-            "ollama_chat"
-          ]
-        },
-        "officialVersion": {"type": "string", "minLength": 1},
-        "referenceDate": {"const": "2026-08-18"},
-        "sourceUrl": {"type": "string", "minLength": 1},
-        "supportingReferences": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 1},
-          "minItems": 1,
-          "uniqueItems": true
-        }
-      },
-      "allOf": [
-        {
-          "oneOf": [
-            {
-              "required": [
-                "protocol",
-                "officialVersion",
-                "referenceDate",
-                "sourceUrl",
-                "supportingReferences"
-              ],
-              "properties": {
-                "protocol": {"const": "openai_chat"},
-                "officialVersion": {
-                  "const": "OpenAPI 2.3.0, commit 2186421dca0cca7c1e67caa7739005e8b1ccc4dd"
-                },
-                "referenceDate": {"const": "2026-08-18"},
-                "sourceUrl": {
-                  "const": "https://github.com/openai/openai-openapi/blob/2186421dca0cca7c1e67caa7739005e8b1ccc4dd/openapi.json"
-                },
-                "supportingReferences": {
-                  "const": [
-                    "https://platform.openai.com/docs/api-reference/chat/object",
-                    "https://platform.openai.com/docs/api-reference/chat/streaming",
-                    "https://platform.openai.com/docs/guides/error-codes/api-errors"
-                  ]
-                }
-              }
-            },
-            {
-              "required": [
-                "protocol",
-                "officialVersion",
-                "referenceDate",
-                "sourceUrl",
-                "supportingReferences"
-              ],
-              "properties": {
-                "protocol": {"const": "openai_responses"},
-                "officialVersion": {
-                  "const": "OpenAPI 2.3.0, commit 2186421dca0cca7c1e67caa7739005e8b1ccc4dd"
-                },
-                "referenceDate": {"const": "2026-08-18"},
-                "sourceUrl": {
-                  "const": "https://github.com/openai/openai-openapi/blob/2186421dca0cca7c1e67caa7739005e8b1ccc4dd/openapi.json"
-                },
-                "supportingReferences": {
-                  "const": [
-                    "https://platform.openai.com/docs/api-reference/responses/object",
-                    "https://platform.openai.com/docs/api-reference/responses-streaming",
-                    "https://platform.openai.com/docs/guides/error-codes/api-errors"
-                  ]
-                }
-              }
-            },
-            {
-              "required": [
-                "protocol",
-                "officialVersion",
-                "referenceDate",
-                "sourceUrl",
-                "supportingReferences"
-              ],
-              "properties": {
-                "protocol": {"const": "anthropic_messages"},
-                "officialVersion": {
-                  "const": "anthropic-version: 2023-06-01"
-                },
-                "referenceDate": {"const": "2026-08-18"},
-                "sourceUrl": {
-                  "const": "https://platform.claude.com/docs/en/api/messages/create"
-                },
-                "supportingReferences": {
-                  "const": [
-                    "https://platform.claude.com/docs/en/api/messages-streaming",
-                    "https://platform.claude.com/docs/en/api/errors"
-                  ]
-                }
-              }
-            },
-            {
-              "required": [
-                "protocol",
-                "officialVersion",
-                "referenceDate",
-                "sourceUrl",
-                "supportingReferences"
-              ],
-              "properties": {
-                "protocol": {"const": "gemini_generate_content"},
-                "officialVersion": {
-                  "const": "v1beta Discovery revision 20260816"
-                },
-                "referenceDate": {"const": "2026-08-18"},
-                "sourceUrl": {
-                  "const": "https://generativelanguage.googleapis.com/$discovery/rest?version=v1beta"
-                },
-                "supportingReferences": {
-                  "const": [
-                    "https://ai.google.dev/api/generate-content",
-                    "https://ai.google.dev/api/rest/generativelanguage"
-                  ]
-                }
-              }
-            },
-            {
-              "required": [
-                "protocol",
-                "officialVersion",
-                "referenceDate",
-                "sourceUrl",
-                "supportingReferences"
-              ],
-              "properties": {
-                "protocol": {"const": "ollama_chat"},
-                "officialVersion": {
-                  "const": "API types commit d67ad83426633195089509347ffd4fe795120198"
-                },
-                "referenceDate": {"const": "2026-08-18"},
-                "sourceUrl": {
-                  "const": "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/api/types.go"
-                },
-                "supportingReferences": {
-                  "const": [
-                    "https://github.com/ollama/ollama/blob/d67ad83426633195089509347ffd4fe795120198/docs/openapi.yaml",
-                    "https://docs.ollama.com/api/chat",
-                    "https://docs.ollama.com/api/errors"
-                  ]
-                }
-              }
-            }
-          ]
-        }
-      ],
-      "additionalProperties": false
-    },
-    "protocolConformanceSummary": {
-      "type": "object",
-      "required": [
-        "totalRequests",
-        "checkedRequests",
-        "consistentRequests",
-        "differentRequests",
-        "byProtocol",
-        "byCheck",
-        "byDifferenceKind"
-      ],
-      "properties": {
-        "totalRequests": {"type": "integer", "minimum": 0},
-        "checkedRequests": {"type": "integer", "minimum": 0},
-        "consistentRequests": {"type": "integer", "minimum": 0},
-        "differentRequests": {"type": "integer", "minimum": 0},
-        "byProtocol": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolConformanceProtocolGroup"}
-        },
-        "byCheck": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolConformanceCheckGroup"}
-        },
-        "byDifferenceKind": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolConformanceDifferenceGroup"}
-        }
-      },
-      "additionalProperties": false
-    },
-    "protocolConformanceProtocolGroup": {
-      "type": "object",
-      "required": [
-        "protocol",
-        "totalRequests",
-        "consistentRequests",
-        "differentRequests"
-      ],
-      "properties": {
-        "protocol": {"type": "string", "minLength": 1},
-        "totalRequests": {"type": "integer", "minimum": 0},
-        "consistentRequests": {"type": "integer", "minimum": 0},
-        "differentRequests": {"type": "integer", "minimum": 0}
-      },
-      "additionalProperties": false
-    },
-    "protocolConformanceCheckGroup": {
-      "type": "object",
-      "required": [
-        "checkId",
-        "totalRequests",
-        "consistentRequests",
-        "differentRequests"
-      ],
-      "properties": {
-        "checkId": {"type": "string", "minLength": 1},
-        "totalRequests": {"type": "integer", "minimum": 0},
-        "consistentRequests": {"type": "integer", "minimum": 0},
-        "differentRequests": {"type": "integer", "minimum": 0}
-      },
-      "additionalProperties": false
-    },
-    "protocolConformanceDifferenceGroup": {
-      "type": "object",
-      "required": ["differenceKind", "count"],
-      "properties": {
-        "differenceKind": {
-          "$ref": "#/$defs/protocolDifferenceKind"
-        },
-        "count": {"type": "integer", "minimum": 0}
-      },
-      "additionalProperties": false
-    },
-    "protocolConformanceResult": {
-      "type": "object",
-      "required": [
-        "requestId",
-        "protocol",
-        "checkIds",
-        "stream",
-        "httpStatus",
-        "status",
-        "differences"
-      ],
-      "properties": {
-        "requestId": {"type": "string", "minLength": 1},
-        "protocol": {"type": ["string", "null"], "minLength": 1},
-        "checkIds": {
-          "type": "array",
-          "items": {"type": "string", "minLength": 1},
-          "uniqueItems": true
-        },
-        "stream": {"type": "boolean"},
-        "httpStatus": {"type": ["integer", "null"]},
-        "status": {"enum": ["CONSISTENT", "DIFFERENT"]},
-        "differences": {
-          "type": "array",
-          "items": {"$ref": "#/$defs/protocolDifference"}
-        }
-      },
-      "allOf": [
-        {
-          "if": {
-            "properties": {"status": {"const": "CONSISTENT"}},
-            "required": ["status"]
-          },
-          "then": {"properties": {"differences": {"maxItems": 0}}},
-          "else": {"properties": {"differences": {"minItems": 1}}}
-        }
-      ],
-      "additionalProperties": false
-    },
-    "protocolDifference": {
-      "type": "object",
-      "required": [
-        "requestId",
-        "protocol",
-        "location",
-        "differenceKind",
-        "expected",
-        "actual",
-        "officialReference"
-      ],
-      "properties": {
-        "requestId": {"type": "string", "minLength": 1},
-        "protocol": {"type": ["string", "null"], "minLength": 1},
-        "location": {"type": "string", "pattern": "^/"},
-        "differenceKind": {
-          "enum": [
-            "EVIDENCE_GAP",
-            "FRAMING",
-            "INVALID_JSON",
-            "MISSING_FIELD",
-            "UNEXPECTED_FIELD",
-            "TYPE_MISMATCH",
-            "ENUM_MISMATCH",
-            "VALUE_MISMATCH",
-            "SEQUENCE",
-            "CORRELATION"
-          ]
-        },
-        "expected": {"type": "string", "minLength": 1},
-        "actual": {"type": "string", "minLength": 1},
-        "officialReference": {"type": "string", "minLength": 1}
-      },
-      "additionalProperties": false
-    },
-    "protocolDifferenceKind": {
-      "enum": [
-        "EVIDENCE_GAP",
-        "FRAMING",
-        "INVALID_JSON",
-        "MISSING_FIELD",
-        "UNEXPECTED_FIELD",
-        "TYPE_MISMATCH",
-        "ENUM_MISMATCH",
-        "VALUE_MISMATCH",
-        "SEQUENCE",
-        "CORRELATION"
-      ]
-    },
     "failureAnalysis": {
       "type": "object",
       "required": [
@@ -565,21 +296,37 @@
           ]
         },
         "evidenceSufficiency": {
-          "enum": ["SUFFICIENT", "LIMITED", "INSUFFICIENT"]
+          "enum": [
+            "SUFFICIENT",
+            "LIMITED",
+            "INSUFFICIENT"
+          ]
         },
-        "supportedClaim": {"type": "string", "minLength": 1},
+        "supportedClaim": {
+          "type": "string",
+          "minLength": 1
+        },
         "unsupportedClaims": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1}
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         },
         "dependsOnTestIds": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^[0-9]{3}$"},
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{3}$"
+          },
           "uniqueItems": true
         },
         "evidenceRefs": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "minItems": 1,
           "uniqueItems": true
         }
@@ -608,13 +355,19 @@
         },
         "testRefs": {
           "type": "array",
-          "items": {"type": "string", "pattern": "^[0-9]{3}$"},
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9]{3}$"
+          },
           "minItems": 1,
           "uniqueItems": true
         },
         "evidenceRefs": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "minItems": 1,
           "uniqueItems": true
         },
@@ -642,7 +395,12 @@
       ],
       "properties": {
         "level": {
-          "enum": ["PASS", "CONDITIONAL_PASS", "FAIL", "NOT_ASSESSED"]
+          "enum": [
+            "PASS",
+            "CONDITIONAL_PASS",
+            "FAIL",
+            "NOT_ASSESSED"
+          ]
         },
         "label": {
           "enum": [
@@ -652,36 +410,85 @@
             "通用能力未评定"
           ]
         },
-        "collectedTests": {"type": "integer", "minimum": 0},
-        "passedTests": {"type": "integer", "minimum": 0},
-        "totalTests": {"type": "integer"},
-        "passedCoreTests": {"type": "integer", "minimum": 0},
-        "totalCoreTests": {"type": "integer"},
-        "passedEnhancedTests": {"type": "integer", "minimum": 0},
-        "totalEnhancedTests": {"type": "integer"},
-        "statement": {"type": "string", "minLength": 1}
+        "collectedTests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "passedTests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalTests": {
+          "type": "integer"
+        },
+        "passedCoreTests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalCoreTests": {
+          "type": "integer"
+        },
+        "passedEnhancedTests": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "totalEnhancedTests": {
+          "type": "integer"
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "oneOf": [
         {
           "properties": {
-            "collectedTests": {"maximum": 46},
-            "passedTests": {"maximum": 46},
-            "totalTests": {"const": 46},
-            "passedCoreTests": {"maximum": 31},
-            "totalCoreTests": {"const": 31},
-            "passedEnhancedTests": {"maximum": 15},
-            "totalEnhancedTests": {"const": 15}
+            "collectedTests": {
+              "maximum": 46
+            },
+            "passedTests": {
+              "maximum": 46
+            },
+            "totalTests": {
+              "const": 46
+            },
+            "passedCoreTests": {
+              "maximum": 31
+            },
+            "totalCoreTests": {
+              "const": 31
+            },
+            "passedEnhancedTests": {
+              "maximum": 15
+            },
+            "totalEnhancedTests": {
+              "const": 15
+            }
           }
         },
         {
           "properties": {
-            "collectedTests": {"maximum": 47},
-            "passedTests": {"maximum": 47},
-            "totalTests": {"const": 47},
-            "passedCoreTests": {"maximum": 32},
-            "totalCoreTests": {"const": 32},
-            "passedEnhancedTests": {"maximum": 15},
-            "totalEnhancedTests": {"const": 15}
+            "collectedTests": {
+              "maximum": 47
+            },
+            "passedTests": {
+              "maximum": 47
+            },
+            "totalTests": {
+              "const": 47
+            },
+            "passedCoreTests": {
+              "maximum": 32
+            },
+            "totalCoreTests": {
+              "const": 32
+            },
+            "passedEnhancedTests": {
+              "maximum": 15
+            },
+            "totalEnhancedTests": {
+              "const": 15
+            }
           }
         }
       ],
@@ -704,7 +511,11 @@
           "const": "opencodex-2.7.42-data-format"
         },
         "level": {
-          "enum": ["PASS", "FAIL", "NOT_ASSESSED"]
+          "enum": [
+            "PASS",
+            "FAIL",
+            "NOT_ASSESSED"
+          ]
         },
         "label": {
           "enum": [
@@ -725,17 +536,38 @@
           ]
         },
         "requiredTestIds": {
-          "const": ["002", "004", "005", "006", "040", "041", "043", "047"]
+          "const": [
+            "002",
+            "004",
+            "005",
+            "006",
+            "040",
+            "041",
+            "043",
+            "047"
+          ]
         },
         "failedTestIds": {
           "type": "array",
           "items": {
-            "enum": ["002", "004", "005", "006", "040", "041", "043", "047"]
+            "enum": [
+              "002",
+              "004",
+              "005",
+              "006",
+              "040",
+              "041",
+              "043",
+              "047"
+            ]
           },
           "maxItems": 8,
           "uniqueItems": true
         },
-        "statement": {"type": "string", "minLength": 1},
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
         "scopeBoundary": {
           "const": "仅判断本轮模型端数据格式，不覆盖鉴权、网络、部署或 ClawOps 运行环境。"
         }
@@ -769,7 +601,9 @@
         },
         "issues": {
           "type": "array",
-          "items": {"$ref": "#/$defs/capabilityIssue"},
+          "items": {
+            "$ref": "#/$defs/capabilityIssue"
+          },
           "maxItems": 5
         },
         "scopeBoundary": {
@@ -780,7 +614,11 @@
     },
     "verifiedFacts": {
       "type": "object",
-      "required": ["interfaceProtocol", "contextWindow", "concurrency"],
+      "required": [
+        "interfaceProtocol",
+        "contextWindow",
+        "concurrency"
+      ],
       "properties": {
         "interfaceProtocol": {
           "$ref": "#/$defs/interfaceProtocolFact"
@@ -807,7 +645,11 @@
       ],
       "properties": {
         "evidenceState": {
-          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+          "enum": [
+            "VERIFIED",
+            "INCONCLUSIVE",
+            "NOT_COLLECTED"
+          ]
         },
         "family": {
           "enum": [
@@ -820,15 +662,30 @@
             "UNKNOWN"
           ]
         },
-        "requestFormat": {"type": "string", "minLength": 1},
-        "responseFormat": {"type": "string", "minLength": 1},
-        "statement": {"type": "string", "minLength": 1},
+        "requestFormat": {
+          "type": "string",
+          "minLength": 1
+        },
+        "responseFormat": {
+          "type": "string",
+          "minLength": 1
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidenceRefs": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "boundary": {"type": "string", "minLength": 1}
+        "boundary": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
@@ -846,31 +703,56 @@
       ],
       "properties": {
         "evidenceState": {
-          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+          "enum": [
+            "VERIFIED",
+            "INCONCLUSIVE",
+            "NOT_COLLECTED"
+          ]
         },
         "highestVerifiedTier": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "highestVerifiedInputTokens": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
         "firstFailedTier": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "minLength": 1
         },
         "firstFailedInputTokens": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0
         },
-        "statement": {"type": "string", "minLength": 1},
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidenceRefs": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "boundary": {"type": "string", "minLength": 1}
+        "boundary": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     },
@@ -885,19 +767,35 @@
       ],
       "properties": {
         "evidenceState": {
-          "enum": ["VERIFIED", "INCONCLUSIVE", "NOT_COLLECTED"]
+          "enum": [
+            "VERIFIED",
+            "INCONCLUSIVE",
+            "NOT_COLLECTED"
+          ]
         },
         "highestVerifiedConcurrentRequests": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 1
         },
-        "statement": {"type": "string", "minLength": 1},
+        "statement": {
+          "type": "string",
+          "minLength": 1
+        },
         "evidenceRefs": {
           "type": "array",
-          "items": {"type": "string", "minLength": 1},
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
           "uniqueItems": true
         },
-        "boundary": {"type": "string", "minLength": 1}
+        "boundary": {
+          "type": "string",
+          "minLength": 1
+        }
       },
       "additionalProperties": false
     }

@@ -711,7 +711,7 @@ class GeneralVerdictAssessmentTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual("llm-capability-doctor.assessment.v7", schema["$id"])
+        self.assertEqual("llm-capability-doctor.assessment.v8", schema["$id"])
         summary_schema = schema["$defs"]["capabilitySummary"]
         self.assertIn("openCodexCompatibility", summary_schema["required"])
         self.assertEqual(
@@ -820,29 +820,53 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
             ),
         }
 
+    def _assessment(self, summary: dict, different: int = 4) -> dict:
+        verdict = summary["generalVerdict"]
+        collected = verdict.get("collectedTests", 0)
+        passed = verdict.get("passedTests", 0)
+        return {
+            "summary": {
+                "counts": {
+                    "PASS": passed,
+                    "FAIL": max(collected - passed, 0),
+                }
+            },
+            "capabilitySummary": summary,
+            "protocolConformance": {
+                "summary": {
+                    "totalRequests": 121,
+                    "checkedRequests": 121,
+                    "consistentRequests": 121 - different,
+                    "differentRequests": different,
+                }
+            },
+        }
+
     def test_final_conclusion_uses_fixed_customer_information_order(self) -> None:
         statuses = {test_id: "PASS" for test_id in RETAINED_TEST_IDS}
         for test_id in ("017", "018", "020", "024", "035", "036"):
             statuses[test_id] = "FAIL"
         summary = self._summary(derive_general_verdict(statuses, V2_CONTRACT))
 
-        html = _capability_summary(summary)
+        html = _capability_summary(self._assessment(summary))
 
         markers = (
-            "最终结论",
-            "综合结论：通用能力有条件通过",
+            "本次检测结果",
+            '<p class="verdict-value">通用能力有条件通过</p>',
             summary["generalVerdict"]["statement"],
-            "40/46 通过",
-            "OpenAI Chat",
+            "40 通过 · 6 未通过",
+            "31 / 31 通过",
             "32K Token 近似档",
+            "当前主要有 1 类问题：一项增强能力受限。",
+            "OpenAI Chat",
             "32 并发",
         )
         positions = tuple(html.find(marker) for marker in markers)
         self.assertTrue(all(position >= 0 for position in positions), positions)
         self.assertEqual(tuple(sorted(positions)), positions)
-        self.assertEqual(1, html.count("综合结论："))
+        self.assertEqual(1, html.count('<p class="verdict-value">通用能力有条件通过</p>'))
         self.assertNotIn(summary["headline"], html)
-        self.assertNotIn(summary["issues"][0]["title"], html)
+        self.assertIn(summary["issues"][0]["title"], html)
         self.assertNotIn(summary["scopeBoundary"], html)
 
     def test_all_verdict_labels_render(self) -> None:
@@ -859,20 +883,19 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
 
         for statuses, label in scenarios:
             with self.subTest(label=label):
-                html = _capability_summary(
-                    self._summary(
-                        derive_general_verdict(
-                            statuses,
-                            V1_CONTRACT if len(statuses) < 46 else V2_CONTRACT,
-                        )
+                summary = self._summary(
+                    derive_general_verdict(
+                        statuses,
+                        V1_CONTRACT if len(statuses) < 46 else V2_CONTRACT,
                     )
                 )
-                self.assertIn(f"综合结论：{label}", html)
+                html = _capability_summary(self._assessment(summary))
+                self.assertIn(f'<p class="verdict-value">{label}</p>', html)
 
     def test_partial_report_shows_collected_count_instead_of_pass_ratio(self) -> None:
-        html = _capability_summary(
-            self._summary(derive_general_verdict({"001": "PASS"}, V1_CONTRACT))
-        )
+        summary = self._summary(derive_general_verdict({"001": "PASS"}, V1_CONTRACT))
+
+        html = _capability_summary(self._assessment(summary))
 
         self.assertIn("已采集 1/46", html)
         self.assertNotIn("1/46 通过", html)
@@ -887,7 +910,7 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
             "<img src=x onerror=alert(1)>"
         )
 
-        html = _capability_summary(summary)
+        html = _capability_summary(self._assessment(summary))
 
         self.assertNotIn("<script data-x", html)
         self.assertNotIn("<b>statement</b>", html)
@@ -900,16 +923,16 @@ class GeneralVerdictHtmlTests(unittest.TestCase):
         css = (SKILL_DIR / "assets" / "report.css").read_text(encoding="utf-8")
 
         for selector in (
-            ".general-verdict",
-            ".general-verdict-label",
-            ".capability-fact-strip",
-            ".capability-fact-strip > div",
+            ".verdict-block",
+            ".verdict-value",
+            ".fact-strip",
+            ".fact-strip > div",
         ):
             self.assertIn(selector, css)
-        mobile = css[css.index("@media (max-width: 640px)") :]
-        self.assertIn(".capability-fact-strip", mobile)
+        mobile = css[css.index("@media (max-width: 680px)") :]
+        self.assertIn(".fact-strip", mobile)
         printing = css[css.index("@media print") :]
-        self.assertIn(".general-verdict", printing)
+        self.assertIn(".verdict-block", printing)
 
 
 class GeneralVerdictSkillContractTests(unittest.TestCase):

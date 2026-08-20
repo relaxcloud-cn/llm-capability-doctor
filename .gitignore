@@ -6,3 +6,4 @@ target/
 *.log
 *-assessment.json
 *-customer-readiness-report.html
+*-model-capability-report.html
