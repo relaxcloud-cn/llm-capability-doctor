@@ -1513,7 +1513,6 @@ test_manifest_count: 1
             '<section class="report-section" id="issues"',
             '<section class="report-section" id="run-info"',
             '<section class="report-section" id="capabilities"',
-            '<section class="report-section" id="scope"',
         )
         positions = tuple(html.find(marker) for marker in expected_order)
         self.assertTrue(all(position >= 0 for position in positions), positions)
@@ -1528,10 +1527,45 @@ test_manifest_count: 1
                 ("section", "report-section"),
                 ("section", "report-section"),
                 ("section", "report-section"),
-                ("section", "report-section"),
             ],
-            parser.children[:6],
+            parser.children[:5],
         )
+
+    def test_renderer_omits_sidebar_actions_and_result_scope(self) -> None:
+        assessment = assemble_assessment(self._parsed(), self._reviews())
+        html = render_report(assessment, ASSET_DIR)
+        script = (ASSET_DIR / "report.js").read_text(encoding="utf-8")
+        css = (ASSET_DIR / "report.css").read_text(encoding="utf-8")
+
+        retained = (
+            'id="conclusion"',
+            'id="issues"',
+            'id="run-info"',
+            'id="capabilities"',
+        )
+        positions = tuple(html.find(marker) for marker in retained)
+        self.assertTrue(all(position >= 0 for position in positions), positions)
+        self.assertEqual(tuple(sorted(positions)), positions)
+        for deleted in (
+            'id="expand-all"',
+            'id="collapse-all"',
+            'id="print-report"',
+            'href="#scope"',
+            'value="scope"',
+            'id="scope"',
+            "展开全部",
+            "收起全部",
+            "打印报告",
+            "结果适用范围",
+        ):
+            with self.subTest(deleted=deleted):
+                self.assertNotIn(deleted, html)
+        for deleted in ('"expand-all"', '"collapse-all"', '"print-report"'):
+            with self.subTest(script=deleted):
+                self.assertNotIn(deleted, script)
+        for deleted in (".sidebar-actions", ".action-button", ".scope-list"):
+            with self.subTest(css=deleted):
+                self.assertNotIn(deleted, css)
 
     def test_opencodex_compatibility_renders_all_levels(self) -> None:
         for level, value in (

@@ -37,21 +37,6 @@
   });
   if (search) search.addEventListener("input", applyFilters);
 
-  const expandAll = document.getElementById("expand-all");
-  const collapseAll = document.getElementById("collapse-all");
-  const printReport = document.getElementById("print-report");
-  if (expandAll) {
-    expandAll.addEventListener("click", () => {
-      document.querySelectorAll("details").forEach((detail) => { if (!detail.hidden) detail.open = true; });
-    });
-  }
-  if (collapseAll) {
-    collapseAll.addEventListener("click", () => {
-      document.querySelectorAll("details").forEach((detail) => { detail.open = false; });
-    });
-  }
-  if (printReport) printReport.addEventListener("click", () => window.print());
-
   const mobileNav = document.getElementById("mobile-section-nav");
   if (mobileNav) {
     mobileNav.addEventListener("change", (event) => {

@@ -3,9 +3,8 @@
 
 The layout follows the approved report design: a neutral diagnostic report
 with a fixed reading path 总体结果 → 需要处理的问题 → 本次检测信息 →
-能力检查结果 → 结果适用范围.  The assessment JSON stays
-the audit record; plain-language domain and test names come from the fixed
-display catalog keyed by test ID.
+能力检查结果.  The assessment JSON stays the audit record; plain-language
+domain and test names come from the fixed display catalog keyed by test ID.
 """
 
 from __future__ import annotations
@@ -52,12 +51,6 @@ IDENTITY_BOUNDARY = (
     "发送内容和返回内容里的模型名称可能不同；这些名称不能单独证明背后实际"
     "使用的是哪个商业模型。"
 )
-SCOPE_BULLET_TEMPLATES = (
-    "这份报告只覆盖本次 {total} 项检查，不能代表模型在所有问题、所有业务和所有知识领域中的表现。",
-    "OpenCodex 兼容结论只检查模型接口的数据格式，不包括网络、部署和 ClawOps 运行环境。",
-    "长文本和同时请求的数字只表示本次实际通过的最高档位，不代表模型的真实上限或长期表现。",
-    "发送内容和返回内容中的模型名称不能单独证明背后实际使用的是哪个商业模型。",
-)
 CAPABILITY_SECTION_DESCRIPTION = (
     "分别检查接口能否正常使用、能否按格式输出、能否处理长文本、能否按要求"
     "回答、逻辑任务、工具调用、响应速度和安全业务场景。每一项都可以展开查看"
@@ -68,7 +61,6 @@ NAV_SECTIONS = (
     ("issues", "需要处理的问题"),
     ("run-info", "本次检测信息"),
     ("capabilities", "能力检查"),
-    ("scope", "结果适用范围"),
 )
 
 
@@ -474,19 +466,6 @@ def _verified_facts(facts: dict) -> str:
     return f'<dl class="verified-facts">{rendered}</dl>'
 
 
-def _scope_section(test_total: int) -> str:
-    bullets = "".join(
-        f"<li>{_e(template.format(total=test_total))}</li>"
-        for template in SCOPE_BULLET_TEMPLATES
-    )
-    return (
-        '<section class="report-section" id="scope" data-nav-section>'
-        f"{_section_head('05 · 结果适用范围', '这份报告能说明什么')}"
-        f'<ul class="scope-list">{bullets}</ul>'
-        "</section>"
-    )
-
-
 def _tier_for_test(test_id: str, core_ids: frozenset) -> str:
     return "core" if test_id in core_ids else "enhanced"
 
@@ -726,17 +705,12 @@ def _sidebar(model: object) -> str:
         f'{"".join(options)}'
         "</select></div>"
         '<div class="workspace">'
-        '<aside class="sidebar" aria-label="报告目录与操作">'
+        '<aside class="sidebar" aria-label="报告目录">'
         '<div class="sidebar-head">'
         "<strong>报告目录</strong>"
         f"<span>{_e(model)}</span>"
         "</div>"
         f'<nav class="sidebar-nav">{"".join(links)}</nav>'
-        '<div class="sidebar-actions">'
-        '<button class="action-button" type="button" id="expand-all">展开全部</button>'
-        '<button class="action-button" type="button" id="collapse-all">收起全部</button>'
-        '<button class="action-button" type="button" id="print-report">打印报告</button>'
-        "</div>"
         "</aside>"
     )
 
@@ -761,7 +735,6 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
         contract = V3_CONTRACT
     core_ids, _enhanced_ids = CONTRACT_VERDICT_PARTITIONS[contract]
 
-    test_total = len(tests)
     started_at = run.get("started_at") or "未记录"
 
     return f"""<!doctype html>
@@ -791,8 +764,6 @@ def render_report(assessment: dict, asset_dir: Path) -> str:
   {_run_metadata(run, capability_summary.get('verifiedFacts', {}), assessment.get('source', {}), tests)}
 
   {_capabilities_section(tests, core_ids)}
-
-  {_scope_section(test_total)}
 </main>
 </div>
 <script>{script}</script>
