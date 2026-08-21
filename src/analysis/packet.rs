@@ -7,7 +7,10 @@ use super::evidence_reader::{ParsedEvidence, ParsedRequest};
 use super::projection::{RequestProjection, parse_protocol, project};
 use super::rules::rule_for;
 use crate::protocol::stream::AssistantTurn;
-use crate::protocol::tools::{ExecutedToolResult, ToolRequestPhase, validate_tool_request};
+use crate::protocol::tools::{
+    ExecutedToolResult, ToolConversation, ToolRequestPhase, expected_weather_call_name,
+    validate_tool_request,
+};
 use crate::protocol::{Protocol, normalize_request_url};
 
 pub const MAX_EXCERPT_BYTES: usize = 4_096;
@@ -556,7 +559,7 @@ fn tool_loop_failures(
     }
     if !tool_result_chain_valid(test_id, requests, projections) {
         failures.push(format!(
-            "check {test_id} has an invalid protocol-native tool result correlation"
+            "check {test_id} has an invalid protocol-native tool result correlation or history chain"
         ));
     }
     if test_id == "048" {
@@ -583,19 +586,21 @@ fn expected_tool_call(test_id: &str, index: usize, projection: &RequestProjectio
     match expected {
         Some((name, arguments)) => {
             projection.tool_calls.len() == 1
-                && logical_tool_name(test_id, &projection.tool_calls[0].name) == name
+                && projection.protocol.and_then(|protocol| {
+                    logical_tool_name(test_id, protocol, &projection.tool_calls[0].name)
+                }) == Some(name)
                 && projection.tool_calls[0].arguments == arguments
         }
         None => projection.tool_calls.is_empty(),
     }
 }
 
-fn logical_tool_name<'a>(test_id: &str, name: &'a str) -> &'a str {
-    if test_id == "047" && matches!(name, "doctor__get_weather" | "doctor/get_weather") {
-        "get_weather"
-    } else {
-        name
+fn logical_tool_name<'a>(test_id: &str, protocol: Protocol, name: &'a str) -> Option<&'a str> {
+    if name == "get_time" {
+        return Some(name);
     }
+    let expected_weather = expected_weather_call_name(protocol, test_id);
+    (name == expected_weather).then_some("get_weather")
 }
 
 fn tool_result_chain_valid(
@@ -620,31 +625,40 @@ fn tool_result_chain_valid(
         return false;
     }
     let endpoint = validation_endpoint(protocol);
-    for (index, request) in requests.iter().enumerate() {
-        let Ok(body) = serde_json::from_str::<Value>(&request.request_body) else {
+    let Some(initial_request) = requests.first() else {
+        return false;
+    };
+    let Ok(initial_body) = serde_json::from_str::<Value>(&initial_request.request_body) else {
+        return false;
+    };
+    if !validate_tool_request(
+        protocol,
+        &endpoint,
+        true,
+        &initial_body,
+        ToolRequestPhase::Initial,
+    )
+    .is_empty()
+    {
+        return false;
+    }
+    let Ok(mut conversation) = ToolConversation::from_initial(protocol, initial_body) else {
+        return false;
+    };
+    for index in 1..requests.len() {
+        let Some(previous) = projections[index - 1].assistant_turn.as_ref() else {
             return false;
         };
-        let errors = if index == 0 {
-            validate_tool_request(protocol, &endpoint, true, &body, ToolRequestPhase::Initial)
-        } else {
-            let Some(previous) = projections[index - 1].assistant_turn.as_ref() else {
-                return false;
-            };
-            let Some(results) = expected_tool_results(test_id, index - 1, previous) else {
-                return false;
-            };
-            validate_tool_request(
-                protocol,
-                &endpoint,
-                true,
-                &body,
-                ToolRequestPhase::FollowUp {
-                    previous,
-                    results: &results,
-                },
-            )
+        let Some(results) = expected_tool_results(test_id, protocol, index - 1, previous) else {
+            return false;
         };
-        if !errors.is_empty() {
+        let Ok(expected) = conversation.append_follow_up(previous, &results) else {
+            return false;
+        };
+        let Ok(actual) = serde_json::from_str::<Value>(&requests[index].request_body) else {
+            return false;
+        };
+        if !expected.stream || actual != expected.body {
             return false;
         }
     }
@@ -663,6 +677,7 @@ fn validation_endpoint(protocol: Protocol) -> Url {
 
 fn expected_tool_results(
     test_id: &str,
+    protocol: Protocol,
     turn_index: usize,
     previous: &AssistantTurn,
 ) -> Option<Vec<ExecutedToolResult>> {
@@ -671,10 +686,12 @@ fn expected_tool_results(
         .iter()
         .cloned()
         .map(|call| {
-            let (output, is_error) = match logical_tool_name(test_id, &call.name) {
-                "get_weather" if test_id == "049" && turn_index == 0 => ("ERROR: timeout", true),
-                "get_weather" => ("WEATHER_SUNNY", false),
-                "get_time" => ("TIME_UTC_12:00", false),
+            let (output, is_error) = match logical_tool_name(test_id, protocol, &call.name) {
+                Some("get_weather") if test_id == "049" && turn_index == 0 => {
+                    ("ERROR: timeout", true)
+                }
+                Some("get_weather") => ("WEATHER_SUNNY", false),
+                Some("get_time") => ("TIME_UTC_12:00", false),
                 _ => return None,
             };
             Some(ExecutedToolResult {
@@ -1233,6 +1250,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_tool_loop_rejects_bare_weather_name_for_namespaced_check() {
+        let mut first = parsed_request(
+            "test-047-turn-1",
+            &openai_chat_tool_stream("get_weather", json!({"city": "Beijing"}), "call-weather"),
+        );
+        let mut second = parsed_request(
+            "test-047-turn-2",
+            &openai_chat_tool_stream("get_time", json!({"zone": "UTC"}), "call-time"),
+        );
+        let mut final_turn = parsed_request(
+            "test-047-turn-3",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+                    .replace("046_OK", "047_OK")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut second, "2", "continued"),
+            (&mut final_turn, "3", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        populate_tool_request_bodies(
+            Protocol::OpenAiChat,
+            "047",
+            [&mut first, &mut second, &mut final_turn],
+        )
+        .await;
+        let evidence = evidence_for_requests("047", vec![first, second, final_turn]);
+
+        let packet = build_packet(&evidence, "047").await.unwrap();
+
+        assert!(has_failure(&packet, "tool call sequence"));
+    }
+
+    #[tokio::test]
     async fn tool_loop_rejects_mismatched_follow_up_correlation() {
         let mut first = parsed_request(
             "test-046-turn-1",
@@ -1276,6 +1343,52 @@ mod tests {
         let packet = build_packet(&evidence, "046").await.unwrap();
 
         assert!(has_failure(&packet, "tool result correlation"));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_rejects_follow_up_with_deleted_history_prefix() {
+        let mut first = parsed_request(
+            "test-046-turn-1",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_tool.sse")
+            ),
+        );
+        let mut final_turn = parsed_request(
+            "test-046-turn-2",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut final_turn, "2", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        populate_tool_request_bodies(Protocol::OpenAiChat, "046", [&mut first, &mut final_turn])
+            .await;
+        let mut body: Value = serde_json::from_str(&final_turn.request_body).unwrap();
+        body["messages"].as_array_mut().unwrap().remove(0);
+        final_turn.request_body = body.to_string();
+        let evidence = evidence_for_requests("046", vec![first, final_turn]);
+
+        let packet = build_packet(&evidence, "046").await.unwrap();
+
+        assert!(has_failure(&packet, "history chain"));
     }
 
     #[tokio::test]

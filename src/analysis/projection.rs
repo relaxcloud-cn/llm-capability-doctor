@@ -6,6 +6,7 @@ use crate::protocol::stream::{AssistantTurn, parse_stream};
 use crate::protocol::{Protocol, matches_response};
 
 pub struct RequestProjection {
+    pub protocol: Option<Protocol>,
     pub visible_text: Option<String>,
     pub protocol_valid: bool,
     pub text_response_valid: bool,
@@ -26,6 +27,7 @@ pub async fn project(request: &ParsedRequest) -> RequestProjection {
         .and_then(|value| parse_protocol(value))
     else {
         return RequestProjection {
+            protocol: None,
             visible_text: None,
             protocol_valid: false,
             text_response_valid: false,
@@ -52,6 +54,7 @@ pub async fn project(request: &ParsedRequest) -> RequestProjection {
             },
         );
         return RequestProjection {
+            protocol: Some(protocol),
             visible_text,
             protocol_valid: parsed.stream_termination == StreamTermination::Completed
                 && parsed.contract_errors.is_empty(),
@@ -73,6 +76,7 @@ pub async fn project(request: &ParsedRequest) -> RequestProjection {
 fn project_non_stream(protocol: Protocol, body: &[u8]) -> RequestProjection {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return RequestProjection {
+            protocol: Some(protocol),
             visible_text: None,
             protocol_valid: false,
             text_response_valid: false,
@@ -102,6 +106,7 @@ fn project_non_stream(protocol: Protocol, body: &[u8]) -> RequestProjection {
         Protocol::Unknown => None,
     };
     RequestProjection {
+        protocol: Some(protocol),
         visible_text,
         protocol_valid: native_envelope_valid(protocol, &value),
         text_response_valid: matches_response(protocol, body),

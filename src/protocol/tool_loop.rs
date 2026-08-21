@@ -3,14 +3,16 @@
 use serde_json::json;
 
 use crate::evidence::ToolLoopOutcome;
+use crate::protocol::Protocol;
 use crate::protocol::stream::{AssistantTurn, ToolCall};
-use crate::protocol::tools::ExecutedToolResult;
+use crate::protocol::tools::{ExecutedToolResult, expected_weather_call_name};
 
 pub(crate) const MAX_ASSISTANT_TURNS: usize = 4;
 
 #[derive(Debug)]
 pub(crate) struct ToolLoopState {
     check_id: &'static str,
+    protocol: Protocol,
     assistant_turns: usize,
     weather_attempts: usize,
     terminal: Option<LoopDecision>,
@@ -27,13 +29,20 @@ pub(crate) enum LoopDecision {
 }
 
 impl ToolLoopState {
-    pub(crate) fn new(check_id: &'static str) -> Option<Self> {
-        matches!(check_id, "046" | "047" | "048" | "049").then_some(Self {
-            check_id,
-            assistant_turns: 0,
-            weather_attempts: 0,
-            terminal: None,
-        })
+    pub(crate) fn for_protocol(check_id: &'static str, protocol: Protocol) -> Option<Self> {
+        (matches!(check_id, "046" | "047" | "048" | "049") && protocol != Protocol::Unknown)
+            .then_some(Self {
+                check_id,
+                protocol,
+                assistant_turns: 0,
+                weather_attempts: 0,
+                terminal: None,
+            })
+    }
+
+    #[cfg(test)]
+    fn new(check_id: &'static str) -> Option<Self> {
+        Self::for_protocol(check_id, Protocol::OllamaChat)
     }
 
     pub(crate) fn advance(&mut self, turn: &AssistantTurn) -> LoopDecision {
@@ -79,15 +88,15 @@ impl ToolLoopState {
     }
 
     fn validate_call(&self, position: usize, call: &ToolCall) -> Option<String> {
-        let name = logical_tool_name(self.check_id, &call.name);
+        let Some(name) = logical_tool_name(self.check_id, self.protocol, &call.name) else {
+            return Some(format!(
+                "tool_loop.unknown_tool:/tool_calls/{position}/name"
+            ));
+        };
         let allowed = match name {
             "get_weather" => true,
             "get_time" => self.check_id == "047",
-            _ => {
-                return Some(format!(
-                    "tool_loop.unknown_tool:/tool_calls/{position}/name"
-                ));
-            }
+            _ => unreachable!("logical tool names are allowlisted"),
         };
         if !allowed {
             return Some(format!(
@@ -105,7 +114,8 @@ impl ToolLoopState {
     }
 
     fn execute(&mut self, call: ToolCall) -> ExecutedToolResult {
-        let name = logical_tool_name(self.check_id, &call.name);
+        let name = logical_tool_name(self.check_id, self.protocol, &call.name)
+            .expect("calls are allowlisted before execution");
         let (output, is_error) = match name {
             "get_weather" if self.check_id == "049" && self.weather_attempts == 0 => {
                 ("ERROR: timeout", true)
@@ -125,12 +135,12 @@ impl ToolLoopState {
     }
 }
 
-fn logical_tool_name<'a>(check_id: &str, name: &'a str) -> &'a str {
-    if check_id == "047" && matches!(name, "doctor__get_weather" | "doctor/get_weather") {
-        "get_weather"
-    } else {
-        name
+fn logical_tool_name<'a>(check_id: &str, protocol: Protocol, name: &'a str) -> Option<&'a str> {
+    if name == "get_time" {
+        return Some(name);
     }
+    let expected_weather = expected_weather_call_name(protocol, check_id);
+    (name == expected_weather).then_some("get_weather")
 }
 
 fn stop(outcome: ToolLoopOutcome, contract_errors: Vec<String>) -> LoopDecision {
@@ -145,6 +155,7 @@ mod tests {
     use serde_json::json;
 
     use crate::evidence::ToolLoopOutcome;
+    use crate::protocol::Protocol;
     use crate::protocol::stream::{AssistantTurn, ProtocolHistory, ToolCall, ToolCorrelation};
 
     use super::{LoopDecision, ToolLoopState};
@@ -189,7 +200,7 @@ mod tests {
 
     #[test]
     fn check_047_accepts_responses_namespace_tool_name() {
-        let mut state = ToolLoopState::new("047").unwrap();
+        let mut state = ToolLoopState::for_protocol("047", Protocol::OpenAiResponses).unwrap();
 
         let decision = state.advance(&turn(
             vec![call("doctor/get_weather", json!({"city": "Beijing"}))],
@@ -197,6 +208,31 @@ mod tests {
         ));
 
         assert!(matches!(decision, LoopDecision::Continue(_)));
+    }
+
+    #[test]
+    fn check_047_requires_the_provider_declared_weather_name() {
+        let cases = [
+            (Protocol::OpenAiChat, "doctor__get_weather"),
+            (Protocol::OpenAiResponses, "doctor/get_weather"),
+            (Protocol::AnthropicMessages, "doctor__get_weather"),
+            (Protocol::GeminiGenerateContent, "doctor__get_weather"),
+            (Protocol::OllamaChat, "get_weather"),
+        ];
+        let candidates = ["doctor__get_weather", "doctor/get_weather", "get_weather"];
+
+        for (protocol, expected) in cases {
+            for candidate in candidates {
+                let mut state = ToolLoopState::for_protocol("047", protocol).unwrap();
+                let decision =
+                    state.advance(&turn(vec![call(candidate, json!({"city": "Beijing"}))], ""));
+                assert_eq!(
+                    matches!(decision, LoopDecision::Continue(_)),
+                    candidate == expected,
+                    "{protocol:?} {candidate}"
+                );
+            }
+        }
     }
 
     #[test]

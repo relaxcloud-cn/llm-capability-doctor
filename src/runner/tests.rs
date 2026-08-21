@@ -232,7 +232,7 @@ async fn official_tool_loop_matrix_completes_all_protocols_and_checks() {
         Protocol::OllamaChat,
     ] {
         for check_id in ["046", "047", "048", "049"] {
-            let turns = successful_turns(check_id);
+            let turns = successful_turns(protocol, check_id);
             let scripts = turns
                 .iter()
                 .map(|turn| {
@@ -937,7 +937,7 @@ async fn unknown_protocol_reuses_probe_evidence_without_sending_tool_seed() {
 
 #[tokio::test]
 async fn execute_check_manifests_every_completed_tool_turn_in_order() {
-    let turns = successful_turns("047");
+    let turns = successful_turns(Protocol::OpenAiChat, "047");
     let scripts = turns
         .iter()
         .map(|turn| {
@@ -990,11 +990,12 @@ async fn protocol_detection_requires_a_successful_http_status() {
     );
 }
 
-fn successful_turns(check_id: &str) -> Vec<ScriptedAssistantTurn> {
+fn successful_turns(protocol: Protocol, check_id: &str) -> Vec<ScriptedAssistantTurn> {
+    let weather_name = crate::protocol::tools::expected_weather_call_name(protocol, check_id);
     let mut turns = vec![scripted_tool(
         check_id,
         1,
-        "get_weather",
+        weather_name,
         serde_json::json!({"city": "Beijing"}),
     )];
     if check_id == "047" {

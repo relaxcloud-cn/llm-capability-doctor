@@ -142,7 +142,8 @@ impl Runner {
                 None
             }
         };
-        let mut state = ToolLoopState::new(test.id).expect("tool-loop checks are allowlisted");
+        let mut state = ToolLoopState::for_protocol(test.id, initial.protocol)
+            .expect("tool-loop checks and protocols are allowlisted");
         let loop_protocol = initial.protocol;
         let loop_auth_mode = initial.auth_mode;
         let mut current = initial;
