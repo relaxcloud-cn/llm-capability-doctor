@@ -1,3 +1,4 @@
+pub mod analysis;
 pub mod audit;
 pub mod catalog;
 pub mod checks;
