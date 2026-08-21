@@ -126,7 +126,7 @@ impl ToolLoopState {
 }
 
 fn logical_tool_name<'a>(check_id: &str, name: &'a str) -> &'a str {
-    if check_id == "047" && name == "doctor__get_weather" {
+    if check_id == "047" && matches!(name, "doctor__get_weather" | "doctor/get_weather") {
         "get_weather"
     } else {
         name
@@ -185,6 +185,18 @@ mod tests {
             panic!("expected loop to continue");
         };
         results
+    }
+
+    #[test]
+    fn check_047_accepts_responses_namespace_tool_name() {
+        let mut state = ToolLoopState::new("047").unwrap();
+
+        let decision = state.advance(&turn(
+            vec![call("doctor/get_weather", json!({"city": "Beijing"}))],
+            "",
+        ));
+
+        assert!(matches!(decision, LoopDecision::Continue(_)));
     }
 
     #[test]

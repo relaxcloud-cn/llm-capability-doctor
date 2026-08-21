@@ -1,10 +1,14 @@
 use serde::Serialize;
 use serde_json::{Value, json};
 use thiserror::Error;
+use url::Url;
 
 use super::evidence_reader::{ParsedEvidence, ParsedRequest};
-use super::projection::{RequestProjection, project};
+use super::projection::{RequestProjection, parse_protocol, project};
 use super::rules::rule_for;
+use crate::protocol::stream::AssistantTurn;
+use crate::protocol::tools::{ExecutedToolResult, ToolRequestPhase, validate_tool_request};
+use crate::protocol::{Protocol, normalize_request_url};
 
 pub const MAX_EXCERPT_BYTES: usize = 4_096;
 pub const MAX_CHECKS_PER_BATCH: usize = 4;
@@ -550,6 +554,11 @@ fn tool_loop_failures(
             "check {test_id} does not contain the required tool call sequence"
         ));
     }
+    if !tool_result_chain_valid(test_id, requests, projections) {
+        failures.push(format!(
+            "check {test_id} has an invalid protocol-native tool result correlation"
+        ));
+    }
     if test_id == "048" {
         valid &= projections
             .last()
@@ -582,39 +591,176 @@ fn expected_tool_call(test_id: &str, index: usize, projection: &RequestProjectio
 }
 
 fn logical_tool_name<'a>(test_id: &str, name: &'a str) -> &'a str {
-    if test_id == "047" && name == "doctor__get_weather" {
+    if test_id == "047" && matches!(name, "doctor__get_weather" | "doctor/get_weather") {
         "get_weather"
     } else {
         name
     }
 }
 
+fn tool_result_chain_valid(
+    test_id: &str,
+    requests: &[&ParsedRequest],
+    projections: &[RequestProjection],
+) -> bool {
+    let Some(protocol) = requests
+        .first()
+        .and_then(|request| request.metadata.get("protocol"))
+        .and_then(|value| parse_protocol(value))
+    else {
+        return false;
+    };
+    if requests.iter().any(|request| {
+        request
+            .metadata
+            .get("protocol")
+            .and_then(|value| parse_protocol(value))
+            != Some(protocol)
+    }) {
+        return false;
+    }
+    let endpoint = validation_endpoint(protocol);
+    for (index, request) in requests.iter().enumerate() {
+        let Ok(body) = serde_json::from_str::<Value>(&request.request_body) else {
+            return false;
+        };
+        let errors = if index == 0 {
+            validate_tool_request(protocol, &endpoint, true, &body, ToolRequestPhase::Initial)
+        } else {
+            let Some(previous) = projections[index - 1].assistant_turn.as_ref() else {
+                return false;
+            };
+            let Some(results) = expected_tool_results(test_id, index - 1, previous) else {
+                return false;
+            };
+            validate_tool_request(
+                protocol,
+                &endpoint,
+                true,
+                &body,
+                ToolRequestPhase::FollowUp {
+                    previous,
+                    results: &results,
+                },
+            )
+        };
+        if !errors.is_empty() {
+            return false;
+        }
+    }
+    true
+}
+
+fn validation_endpoint(protocol: Protocol) -> Url {
+    let configured = if protocol == Protocol::GeminiGenerateContent {
+        Url::parse("https://example.test/v1/models/fixture:generateContent")
+    } else {
+        Url::parse("https://example.test/v1/chat")
+    }
+    .expect("static validation endpoint is valid");
+    normalize_request_url(protocol, &configured, true)
+}
+
+fn expected_tool_results(
+    test_id: &str,
+    turn_index: usize,
+    previous: &AssistantTurn,
+) -> Option<Vec<ExecutedToolResult>> {
+    previous
+        .tool_calls
+        .iter()
+        .cloned()
+        .map(|call| {
+            let (output, is_error) = match logical_tool_name(test_id, &call.name) {
+                "get_weather" if test_id == "049" && turn_index == 0 => ("ERROR: timeout", true),
+                "get_weather" => ("WEATHER_SUNNY", false),
+                "get_time" => ("TIME_UTC_12:00", false),
+                _ => return None,
+            };
+            Some(ExecutedToolResult {
+                call,
+                output: output.into(),
+                is_error,
+            })
+        })
+        .collect()
+}
+
 fn native_structured_request_error(request: &ParsedRequest) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(&request.response_body) else {
         return false;
     };
-    match metadata(request, "protocol", "unknown").as_str() {
-        "openai_chat" | "openai_responses" => value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| !message.trim().is_empty()),
-        "anthropic_messages" => {
-            value.get("type").and_then(Value::as_str) == Some("error")
-                && value
-                    .pointer("/error/message")
-                    .and_then(Value::as_str)
-                    .is_some_and(|message| !message.trim().is_empty())
-        }
-        "gemini_generate_content" => value
-            .pointer("/error/message")
-            .and_then(Value::as_str)
-            .is_some_and(|message| !message.trim().is_empty()),
-        "ollama_chat" => value
-            .get("error")
-            .and_then(Value::as_str)
-            .is_some_and(|message| !message.trim().is_empty()),
-        _ => false,
+    let Some(descriptor) =
+        native_error_descriptor(&metadata(request, "protocol", "unknown"), &value)
+    else {
+        return false;
+    };
+    let lower = descriptor.to_ascii_lowercase();
+    let authentication_or_quota = [
+        "api key",
+        "apikey",
+        "authenticat",
+        "unauthoriz",
+        "credential",
+        "permission",
+        "quota",
+        "rate limit",
+    ];
+    if authentication_or_quota
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return false;
     }
+    [
+        "json",
+        "parse",
+        "parsing",
+        "malformed",
+        "syntax",
+        "decode",
+        "request body",
+        "body format",
+        "invalid body",
+        "unexpected end",
+        "unexpected eof",
+        "invalid character",
+        "looking for beginning",
+        "cannot unmarshal",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
+fn native_error_descriptor(protocol: &str, value: &Value) -> Option<String> {
+    match protocol {
+        "openai_chat" | "openai_responses" => {
+            let message = non_empty_value_string(value.pointer("/error/message"))?;
+            let kind = non_empty_value_string(value.pointer("/error/type"))
+                .or_else(|| non_empty_value_string(value.pointer("/error/code")))?;
+            Some(format!("{kind} {message}"))
+        }
+        "anthropic_messages" => {
+            (value.get("type").and_then(Value::as_str) == Some("error")).then_some(())?;
+            let kind = non_empty_value_string(value.pointer("/error/type"))?;
+            let message = non_empty_value_string(value.pointer("/error/message"))?;
+            Some(format!("{kind} {message}"))
+        }
+        "gemini_generate_content" => {
+            value.pointer("/error/code").and_then(Value::as_u64)?;
+            let status = non_empty_value_string(value.pointer("/error/status"))?;
+            let message = non_empty_value_string(value.pointer("/error/message"))?;
+            Some(format!("{status} {message}"))
+        }
+        "ollama_chat" => non_empty_value_string(value.get("error")).map(str::to_owned),
+        _ => None,
+    }
+}
+
+fn non_empty_value_string(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .filter(|text| !text.trim().is_empty())
 }
 
 fn parse_structured_output(test_id: &str, text: &str) -> Option<Value> {
@@ -730,6 +876,9 @@ mod tests {
     use crate::analysis::evidence_reader::{
         EvidenceSource, ParsedEvidence, ParsedRequest, ParsedTest,
     };
+    use crate::protocol::Protocol;
+    use crate::protocol::stream::parse_stream;
+    use crate::protocol::tools::{ExecutedToolResult, ToolConversation, tool_prompt, tool_request};
 
     #[tokio::test]
     async fn packet_contains_only_manifest_owned_requests() {
@@ -951,6 +1100,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_request_rejects_authentication_error_with_http_400() {
+        let mut request = parsed_request(
+            "test-008",
+            r#"{"error":{"message":"invalid API key","type":"invalid_request_error"}}"#,
+        );
+        request.metrics.insert("http_status".into(), "400".into());
+        let evidence = single_test_evidence("008", request);
+
+        let packet = build_packet(&evidence, "008").await.unwrap();
+
+        assert!(has_failure(&packet, "structured request error"));
+    }
+
+    #[tokio::test]
     async fn direct_marker_does_not_complete_a_required_tool_loop() {
         let response = r#"{"choices":[{"message":{"content":"MODEL_DOCTOR_CASE_046_OK"}}]}"#;
         let mut request = parsed_request("test-046-turn-1", response);
@@ -1002,6 +1165,8 @@ mod tests {
                 .metadata
                 .insert("tool_loop_outcome".into(), outcome.into());
         }
+        populate_tool_request_bodies(Protocol::OpenAiChat, "046", [&mut first, &mut final_turn])
+            .await;
         let evidence = evidence_for_requests("046", vec![first, final_turn]);
 
         let packet = build_packet(&evidence, "046").await.unwrap();
@@ -1054,11 +1219,173 @@ mod tests {
                 .metadata
                 .insert("tool_loop_outcome".into(), outcome.into());
         }
+        populate_tool_request_bodies(
+            Protocol::OpenAiChat,
+            "047",
+            [&mut first, &mut second, &mut final_turn],
+        )
+        .await;
         let evidence = evidence_for_requests("047", vec![first, second, final_turn]);
 
         let packet = build_packet(&evidence, "047").await.unwrap();
 
         assert!(has_failure(&packet, "tool call sequence"));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_rejects_mismatched_follow_up_correlation() {
+        let mut first = parsed_request(
+            "test-046-turn-1",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_tool.sse")
+            ),
+        );
+        let mut final_turn = parsed_request(
+            "test-046-turn-2",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut final_turn, "2", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        populate_tool_request_bodies(Protocol::OpenAiChat, "046", [&mut first, &mut final_turn])
+            .await;
+        let mut body: Value = serde_json::from_str(&final_turn.request_body).unwrap();
+        body["messages"][2]["tool_call_id"] = Value::String("forged-call-id".into());
+        final_turn.request_body = body.to_string();
+        let evidence = evidence_for_requests("046", vec![first, final_turn]);
+
+        let packet = build_packet(&evidence, "046").await.unwrap();
+
+        assert!(has_failure(&packet, "tool result correlation"));
+    }
+
+    #[tokio::test]
+    async fn responses_namespace_tool_loop_passes_with_native_correlations() {
+        let mut first = parsed_request(
+            "test-047-turn-1",
+            &openai_responses_tool_stream("doctor/get_weather", 1),
+        );
+        let mut second = parsed_request(
+            "test-047-turn-2",
+            &openai_responses_tool_stream("get_time", 2),
+        );
+        let mut final_turn = parsed_request(
+            "test-047-turn-3",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_responses_final.sse")
+                    .replace("046_OK", "047_OK")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut second, "2", "continued"),
+            (&mut final_turn, "3", "completed"),
+        ] {
+            request
+                .metadata
+                .insert("protocol".into(), "openai_responses".into());
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        populate_tool_request_bodies(
+            Protocol::OpenAiResponses,
+            "047",
+            [&mut first, &mut second, &mut final_turn],
+        )
+        .await;
+        let evidence = evidence_for_requests("047", vec![first, second, final_turn]);
+
+        let packet = build_packet(&evidence, "047").await.unwrap();
+
+        assert!(
+            packet.deterministic_facts.hard_failures.is_empty(),
+            "{:?}",
+            packet.deterministic_facts.hard_failures
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_loop_rejects_missing_timeout_result() {
+        let mut first = parsed_request(
+            "test-049-turn-1",
+            &openai_chat_tool_stream("get_weather", json!({"city": "Beijing"}), "call-weather-1"),
+        );
+        let mut second = parsed_request(
+            "test-049-turn-2",
+            &openai_chat_tool_stream("get_weather", json!({"city": "Beijing"}), "call-weather-2"),
+        );
+        let mut final_turn = parsed_request(
+            "test-049-turn-3",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+                    .replace("046_OK", "049_OK")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut second, "2", "continued"),
+            (&mut final_turn, "3", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        populate_tool_request_bodies(
+            Protocol::OpenAiChat,
+            "049",
+            [&mut first, &mut second, &mut final_turn],
+        )
+        .await;
+        second.request_body = second
+            .request_body
+            .replace("ERROR: timeout", "WEATHER_SUNNY");
+        let evidence = evidence_for_requests("049", vec![first, second, final_turn]);
+
+        let packet = build_packet(&evidence, "049").await.unwrap();
+
+        assert!(has_failure(&packet, "tool result correlation"));
     }
 
     #[tokio::test]
@@ -1236,6 +1563,66 @@ mod tests {
             }]
         });
         format!("data: {chunk}\n\ndata: [DONE]\n\n")
+    }
+
+    fn openai_responses_tool_stream(name: &str, turn: usize) -> String {
+        let mut body = include_str!("../protocol/fixtures/openai_responses_tool.sse")
+            .replace("_046", &format!("_047_turn_{turn}"))
+            .replace("get_weather", name);
+        if name == "get_time" {
+            body = body
+                .replace(r#"{\"city\":\""#, r#"{\"zone\":\""#)
+                .replace(r#"Beijing\"}"#, r#"UTC\"}"#);
+        }
+        body.push('\n');
+        body
+    }
+
+    async fn populate_tool_request_bodies<const N: usize>(
+        protocol: Protocol,
+        test_id: &str,
+        requests: [&mut ParsedRequest; N],
+    ) {
+        let prompt = tool_prompt(test_id).unwrap();
+        let initial = tool_request(protocol, "fixture-model", test_id, prompt);
+        let mut conversation =
+            ToolConversation::from_initial(protocol, initial.body.clone()).unwrap();
+        requests[0].request_body = initial.body.to_string();
+        for index in 1..requests.len() {
+            let parsed = parse_stream(protocol, requests[index - 1].response_body.as_bytes()).await;
+            let turn = parsed.assistant_turn.unwrap();
+            let results = turn
+                .tool_calls
+                .iter()
+                .cloned()
+                .map(|call| fixture_tool_result(test_id, index - 1, call))
+                .collect::<Vec<_>>();
+            let follow_up = conversation.append_follow_up(&turn, &results).unwrap();
+            requests[index].request_body = follow_up.body.to_string();
+        }
+    }
+
+    fn fixture_tool_result(
+        test_id: &str,
+        turn_index: usize,
+        call: crate::protocol::stream::ToolCall,
+    ) -> ExecutedToolResult {
+        let logical_name = call
+            .name
+            .strip_prefix("doctor__")
+            .or_else(|| call.name.strip_prefix("doctor/"))
+            .unwrap_or(&call.name);
+        let (output, is_error) = match logical_name {
+            "get_weather" if test_id == "049" && turn_index == 0 => ("ERROR: timeout", true),
+            "get_weather" => ("WEATHER_SUNNY", false),
+            "get_time" => ("TIME_UTC_12:00", false),
+            _ => panic!("unexpected fixture tool {}", call.name),
+        };
+        ExecutedToolResult {
+            call,
+            output: output.into(),
+            is_error,
+        }
     }
 
     fn packet_fixture(test_id: &str, response_size: usize) -> EvidencePacket {

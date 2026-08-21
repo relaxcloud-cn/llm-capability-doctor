@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::evidence_reader::ParsedRequest;
 use crate::evidence::StreamTermination;
-use crate::protocol::stream::parse_stream;
+use crate::protocol::stream::{AssistantTurn, parse_stream};
 use crate::protocol::{Protocol, matches_response};
 
 pub struct RequestProjection {
@@ -11,6 +11,7 @@ pub struct RequestProjection {
     pub text_response_valid: bool,
     pub usage_valid: bool,
     pub tool_calls: Vec<ProjectedToolCall>,
+    pub assistant_turn: Option<AssistantTurn>,
 }
 
 pub struct ProjectedToolCall {
@@ -30,6 +31,7 @@ pub async fn project(request: &ParsedRequest) -> RequestProjection {
             text_response_valid: false,
             usage_valid: false,
             tool_calls: Vec::new(),
+            assistant_turn: None,
         };
     };
     if request.metadata.get("stream").map(String::as_str) == Some("1") {
@@ -61,6 +63,7 @@ pub async fn project(request: &ParsedRequest) -> RequestProjection {
                     .is_some_and(|turn| !turn.final_text.trim().is_empty()),
             usage_valid: false,
             tool_calls,
+            assistant_turn: parsed.assistant_turn,
         };
     }
 
@@ -75,6 +78,7 @@ fn project_non_stream(protocol: Protocol, body: &[u8]) -> RequestProjection {
             text_response_valid: false,
             usage_valid: false,
             tool_calls: Vec::new(),
+            assistant_turn: None,
         };
     };
     let visible_text = match protocol {
@@ -103,6 +107,7 @@ fn project_non_stream(protocol: Protocol, body: &[u8]) -> RequestProjection {
         text_response_valid: matches_response(protocol, body),
         usage_valid: usage_valid(protocol, &value),
         tool_calls: Vec::new(),
+        assistant_turn: None,
     }
 }
 
@@ -253,10 +258,7 @@ fn usage_valid(protocol: Protocol, value: &Value) -> bool {
         Protocol::Unknown => &[],
     };
     paths.iter().any(|(input, output)| {
-        value
-            .pointer(input)
-            .and_then(Value::as_u64)
-            .is_some_and(|count| count > 0)
+        value.pointer(input).and_then(Value::as_u64).is_some()
             && value
                 .pointer(output)
                 .and_then(Value::as_u64)
@@ -264,7 +266,7 @@ fn usage_valid(protocol: Protocol, value: &Value) -> bool {
     })
 }
 
-fn parse_protocol(value: &str) -> Option<Protocol> {
+pub(super) fn parse_protocol(value: &str) -> Option<Protocol> {
     match value {
         "openai_chat" => Some(Protocol::OpenAiChat),
         "openai_responses" => Some(Protocol::OpenAiResponses),
@@ -337,6 +339,19 @@ mod tests {
         let projection = project(&request).await;
 
         assert!(!projection.usage_valid);
+    }
+
+    #[tokio::test]
+    async fn accepts_zero_input_tokens_when_output_is_positive() {
+        let request = request_fixture(
+            "openai_chat",
+            false,
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":0,"completion_tokens":1}}"#,
+        );
+
+        let projection = project(&request).await;
+
+        assert!(projection.usage_valid);
     }
 
     #[tokio::test]
