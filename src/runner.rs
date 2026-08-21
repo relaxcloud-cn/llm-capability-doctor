@@ -31,6 +31,8 @@ pub struct RunOutcome {
     pub request_count: usize,
     pub manifest_count: usize,
     pub log_path: PathBuf,
+    pub detected_protocol: Protocol,
+    pub detected_auth_mode: AuthMode,
 }
 
 pub async fn run(
@@ -78,12 +80,16 @@ pub async fn run(
     };
     runner.execute().await?;
     let duration = started.elapsed();
+    let detected_protocol = runner.detected_protocol;
+    let detected_auth_mode = runner.detected_auth_mode;
     runner.audit.finish(duration, Local::now())?;
     Ok(RunOutcome {
         duration,
         request_count: runner.audit.request_count(),
         manifest_count: runner.audit.manifest_count(),
         log_path,
+        detected_protocol,
+        detected_auth_mode,
     })
 }
 

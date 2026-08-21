@@ -14,6 +14,21 @@ use crate::test_support::{
     RawTcpServer, ScriptedAssistantTurn, ServerAction, encode_official_stream,
 };
 
+#[test]
+fn run_outcome_exposes_detected_connection_metadata() {
+    let outcome = RunOutcome {
+        duration: Duration::ZERO,
+        request_count: 46,
+        manifest_count: 46,
+        log_path: std::path::PathBuf::from("doctor.log"),
+        detected_protocol: Protocol::OpenAiChat,
+        detected_auth_mode: AuthMode::Bearer,
+    };
+
+    assert_eq!(outcome.detected_protocol, Protocol::OpenAiChat);
+    assert_eq!(outcome.detected_auth_mode, AuthMode::Bearer);
+}
+
 #[tokio::test]
 async fn ordinary_stream_request_records_official_terminal() {
     let body = openai_chat_final_stream("MODEL_DOCTOR_CASE_006_OK", true);
@@ -1113,6 +1128,7 @@ fn test_config(url: url::Url, log_path: &std::path::Path, timeout: Duration) -> 
         timeout: timeout.as_secs().max(1),
         list_tests: false,
         insecure: false,
+        self_analyze: false,
     }
     .into_config(None)
     .expect("test config")

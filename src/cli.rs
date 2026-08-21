@@ -40,6 +40,10 @@ pub struct Cli {
     /// Disable TLS certificate validation for controlled environments.
     #[arg(long)]
     pub insecure: bool,
+
+    /// Analyze completed evidence by calling the tested model through the same endpoint.
+    #[arg(long)]
+    pub self_analyze: bool,
 }
 
 pub struct Config {
@@ -49,6 +53,7 @@ pub struct Config {
     pub log_file: Option<PathBuf>,
     pub timeout: Duration,
     pub insecure: bool,
+    pub self_analyze: bool,
 }
 
 pub struct SecretString(String);
@@ -97,6 +102,7 @@ impl Cli {
             log_file: self.log_file,
             timeout: Duration::from_secs(self.timeout),
             insecure: self.insecure,
+            self_analyze: self.self_analyze,
         })
     }
 }
@@ -113,7 +119,7 @@ fn parse_positive_integer(value: &str) -> Result<u64, String> {
 
 #[cfg(test)]
 mod tests {
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use url::Url;
 
     use super::{Cli, CliError};
@@ -127,7 +133,45 @@ mod tests {
             timeout: 120,
             list_tests: false,
             insecure: false,
+            self_analyze: false,
         }
+    }
+
+    #[test]
+    fn self_analysis_is_opt_in() {
+        let disabled = Cli::try_parse_from([
+            "doctor",
+            "--url",
+            "https://example.test/v1/chat/completions",
+            "--model",
+            "m",
+            "--api-key",
+            "k",
+        ])
+        .unwrap();
+        assert!(!disabled.self_analyze);
+
+        let enabled = Cli::try_parse_from([
+            "doctor",
+            "--url",
+            "https://example.test/v1/chat/completions",
+            "--model",
+            "m",
+            "--api-key",
+            "k",
+            "--self-analyze",
+        ])
+        .unwrap();
+        assert!(enabled.self_analyze);
+    }
+
+    #[test]
+    fn help_exposes_no_analysis_destination() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("--self-analyze"));
+        assert!(!help.contains("--analysis-url"));
+        assert!(!help.contains("--upload"));
     }
 
     fn config_error(value: &str) -> CliError {
