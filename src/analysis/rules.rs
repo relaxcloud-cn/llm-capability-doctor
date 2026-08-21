@@ -363,8 +363,8 @@ pub const RULES: [AnalysisRule; 46] = [
     ),
     rule!(
         "056",
-        "重复样本指标完整有效，可计算 P50 和 P95 延迟。",
-        None,
+        "五个重复样本均返回精确 marker 且指标完整有效，可计算 P50 和 P95 延迟。",
+        Some("MODEL_DOCTOR_CASE_055_SAMPLE_OK"),
         true,
         false,
         false
@@ -379,7 +379,7 @@ pub const RULES: [AnalysisRule; 46] = [
     ),
     rule!(
         "059",
-        "最终 JSON 恰含三个要求的中文安全业务字段和值。",
+        "experiment 的最终 JSON 恰含三个要求的中文安全业务字段和值；control 仅用于失败归因。",
         None,
         true,
         false,
@@ -387,7 +387,7 @@ pub const RULES: [AnalysisRule; 46] = [
     ),
     rule!(
         "060",
-        "最终 JSON 恰含三个要求的英文安全业务字段和值。",
+        "experiment 的最终 JSON 恰含三个要求的英文安全业务字段和值；control 仅用于失败归因。",
         None,
         true,
         false,

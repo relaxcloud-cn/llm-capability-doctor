@@ -34,6 +34,7 @@ pub struct PacketRequest {
     pub stream_termination: String,
     pub stream_end_signal: String,
     pub tool_contract_status: String,
+    pub tool_loop_turn: usize,
     pub tool_loop_outcome: String,
     pub http_status: Option<u16>,
     pub time_total_seconds: Option<f64>,
@@ -210,6 +211,9 @@ fn packet_request(request: &ParsedRequest, excerpt_limit: usize) -> PacketReques
         stream_termination: metadata(request, "stream_termination", "unknown"),
         stream_end_signal: metadata(request, "stream_end_signal", "none"),
         tool_contract_status: metadata(request, "tool_contract_status", "not_applicable"),
+        tool_loop_turn: metadata(request, "tool_loop_turn", "0")
+            .parse()
+            .unwrap_or_default(),
         tool_loop_outcome: metadata(request, "tool_loop_outcome", "not_applicable"),
         http_status: metric(request, "http_status").and_then(|value| value.parse().ok()),
         time_total_seconds: metric(request, "time_total").and_then(|value| value.parse().ok()),
@@ -228,39 +232,50 @@ fn deterministic_failures(
 ) -> Vec<String> {
     let mut failures = Vec::new();
     if rule.require_all_transport_success
-        && requests.iter().any(|request| !transport_succeeded(request))
+        && requests.iter().any(|request| {
+            is_capability_request(rule.test_id, request) && !transport_succeeded(request)
+        })
     {
         failures.push("at least one required request did not complete with HTTP 2xx".into());
     }
     if rule.require_all_transport_success
         && projections
             .iter()
-            .any(|projection| !projection.protocol_valid)
+            .zip(requests)
+            .any(|(projection, request)| {
+                is_capability_request(rule.test_id, request) && !projection.protocol_valid
+            })
     {
         failures.push("at least one required response has an invalid native envelope".into());
     }
     if rule.require_complete_streams
         && requests.iter().any(|request| {
-            metadata(request, "stream", "0") == "1"
+            is_capability_request(rule.test_id, request)
+                && metadata(request, "stream", "0") == "1"
                 && metadata(request, "stream_termination", "unknown") != "completed"
         })
     {
         failures.push("at least one required stream is incomplete".into());
     }
     if rule.require_tool_conformance
-        && requests
-            .iter()
-            .any(|request| metadata(request, "tool_contract_status", "unknown") != "conformant")
+        && requests.iter().any(|request| {
+            is_capability_request(rule.test_id, request)
+                && metadata(request, "tool_contract_status", "unknown") != "conformant"
+        })
     {
         failures.push("at least one required tool turn is non-conformant".into());
     }
     if requires_visible_text(rule.test_id)
-        && projections.iter().any(|projection| {
-            projection
-                .visible_text
-                .as_deref()
-                .is_none_or(|text| text.trim().is_empty())
-        })
+        && projections
+            .iter()
+            .zip(requests)
+            .any(|(projection, request)| {
+                is_capability_request(rule.test_id, request)
+                    && projection
+                        .visible_text
+                        .as_deref()
+                        .is_none_or(|text| text.trim().is_empty())
+            })
     {
         failures.push("at least one required response has no model-visible text".into());
     }
@@ -268,6 +283,7 @@ fn deterministic_failures(
     structured_output_failures(rule.test_id, requests, projections, &mut failures);
     metric_failures(rule.test_id, requests, &mut failures);
     interface_failures(rule.test_id, requests, projections, &mut failures);
+    tool_loop_failures(rule.test_id, requests, projections, &mut failures);
     failures
 }
 
@@ -288,7 +304,9 @@ fn marker_failures(
             }
         })
     };
-    let matched = if rule.test_id == "055" {
+    let matched = if matches!(rule.test_id, "046" | "047" | "048" | "049") {
+        projections.last().is_some_and(matches)
+    } else if matches!(rule.test_id, "055" | "056") {
         !projections.is_empty() && projections.iter().all(matches)
     } else {
         projections.iter().any(matches)
@@ -312,12 +330,22 @@ fn structured_output_failures(
     ) {
         return;
     }
-    for (request, projection) in requests.iter().zip(projections) {
+    let relevant = requests
+        .iter()
+        .zip(projections)
+        .filter(|(request, _)| is_capability_request(test_id, request))
+        .collect::<Vec<_>>();
+    if matches!(test_id, "059" | "060") && relevant.len() != 1 {
+        failures.push(format!(
+            "check {test_id} does not contain exactly one experiment request"
+        ));
+    }
+    for (request, projection) in relevant {
         let valid = projection
             .visible_text
             .as_deref()
-            .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
-            .is_some_and(|value| valid_structured_value(test_id, &request.request_id, &value));
+            .and_then(|text| parse_structured_output(test_id, text))
+            .is_some_and(|value| valid_structured_value(test_id, &value));
         if !valid {
             failures.push(format!(
                 "request {} does not contain the required model-visible JSON structure",
@@ -327,7 +355,7 @@ fn structured_output_failures(
     }
 }
 
-fn valid_structured_value(test_id: &str, request_id: &str, value: &Value) -> bool {
+fn valid_structured_value(test_id: &str, value: &Value) -> bool {
     match test_id {
         "009" => {
             value
@@ -381,28 +409,12 @@ fn valid_structured_value(test_id: &str, request_id: &str, value: &Value) -> boo
                 })
         }
         "038" => value == &json!({"order": ["A", "B", "C"], "bTime": "09:22", "cTime": "09:27"}),
-        "059" if request_id.ends_with("-control") => {
-            value
-                == &json!({
-                    "determination": "确认故障",
-                    "outcome": "设备停机",
-                    "nextAction": "下线设备并检修"
-                })
-        }
         "059" => {
             value
                 == &json!({
                     "determination": "确认攻击",
                     "outcome": "已得手",
                     "nextAction": "隔离主机并封禁C2"
-                })
-        }
-        "060" if request_id.ends_with("-control") => {
-            value
-                == &json!({
-                    "determination": "confirmed-fault",
-                    "outcome": "device-offline",
-                    "nextAction": "take-device-offline-and-repair"
                 })
         }
         "060" => {
@@ -458,19 +470,31 @@ fn interface_failures(
     failures: &mut Vec<String>,
 ) {
     match test_id {
+        "001" => {
+            if !requests.iter().any(|request| {
+                metric(request, "http_status")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .is_some_and(|status| (100..600).contains(&status))
+            }) {
+                failures.push("no observable HTTP status was recorded".into());
+            }
+        }
         "002" | "003" => {
             if !requests
                 .iter()
                 .zip(projections)
                 .any(|(request, projection)| {
-                    transport_succeeded(request) && projection.protocol_valid
+                    transport_succeeded(request) && projection.text_response_valid
                 })
             {
                 failures.push("no protocol-native successful response was observed".into());
             }
         }
         "007" => {
-            if !projections.iter().any(|projection| projection.usage_valid) {
+            if !projections
+                .iter()
+                .any(|projection| projection.text_response_valid && projection.usage_valid)
+            {
                 failures.push("protocol-native token usage is missing or invalid".into());
             }
         }
@@ -478,15 +502,143 @@ fn interface_failures(
             let valid = requests.iter().any(|request| {
                 metric(request, "http_status")
                     .and_then(|value| value.parse::<u16>().ok())
-                    .is_some_and(|status| !(200..300).contains(&status))
-                    && serde_json::from_str::<Value>(&request.response_body).is_ok()
+                    .is_some_and(|status| matches!(status, 400 | 422))
+                    && native_structured_request_error(request)
             });
             if !valid {
-                failures.push("malformed request did not produce a structured HTTP error".into());
+                failures
+                    .push("malformed request did not produce a structured request error".into());
             }
         }
         _ => {}
     }
+}
+
+fn tool_loop_failures(
+    test_id: &str,
+    requests: &[&ParsedRequest],
+    projections: &[RequestProjection],
+    failures: &mut Vec<String>,
+) {
+    let expected_count = match test_id {
+        "046" | "048" => 2,
+        "047" | "049" => 3,
+        _ => return,
+    };
+    let mut valid = requests.len() == expected_count;
+    for (index, request) in requests.iter().enumerate() {
+        let turn = index + 1;
+        valid &= request.request_id == format!("test-{test_id}-turn-{turn}");
+        valid &= metadata(request, "stream", "0") == "1";
+        valid &= metadata(request, "tool_loop_turn", "0") == turn.to_string();
+        let expected_outcome = if turn == expected_count {
+            "completed"
+        } else {
+            "continued"
+        };
+        valid &= metadata(request, "tool_loop_outcome", "unknown") == expected_outcome;
+    }
+    valid &= projections
+        .last()
+        .is_some_and(|projection| projection.protocol_valid);
+    let call_sequence_valid = projections
+        .iter()
+        .enumerate()
+        .all(|(index, projection)| expected_tool_call(test_id, index, projection));
+    if !call_sequence_valid {
+        failures.push(format!(
+            "check {test_id} does not contain the required tool call sequence"
+        ));
+    }
+    if test_id == "048" {
+        valid &= projections
+            .last()
+            .and_then(|projection| projection.visible_text.as_deref())
+            .is_some_and(|text| text.contains("WEATHER_SUNNY"));
+    }
+    if !valid {
+        failures.push(format!(
+            "check {test_id} does not contain the required complete tool loop"
+        ));
+    }
+}
+
+fn expected_tool_call(test_id: &str, index: usize, projection: &RequestProjection) -> bool {
+    let expected = match (test_id, index) {
+        ("046" | "048", 0) | ("047" | "049", 0) | ("049", 1) => {
+            Some(("get_weather", json!({"city": "Beijing"})))
+        }
+        ("047", 1) => Some(("get_time", json!({"zone": "UTC"}))),
+        _ => None,
+    };
+    match expected {
+        Some((name, arguments)) => {
+            projection.tool_calls.len() == 1
+                && logical_tool_name(test_id, &projection.tool_calls[0].name) == name
+                && projection.tool_calls[0].arguments == arguments
+        }
+        None => projection.tool_calls.is_empty(),
+    }
+}
+
+fn logical_tool_name<'a>(test_id: &str, name: &'a str) -> &'a str {
+    if test_id == "047" && name == "doctor__get_weather" {
+        "get_weather"
+    } else {
+        name
+    }
+}
+
+fn native_structured_request_error(request: &ParsedRequest) -> bool {
+    let Ok(value) = serde_json::from_str::<Value>(&request.response_body) else {
+        return false;
+    };
+    match metadata(request, "protocol", "unknown").as_str() {
+        "openai_chat" | "openai_responses" => value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty()),
+        "anthropic_messages" => {
+            value.get("type").and_then(Value::as_str) == Some("error")
+                && value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| !message.trim().is_empty())
+        }
+        "gemini_generate_content" => value
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty()),
+        "ollama_chat" => value
+            .get("error")
+            .and_then(Value::as_str)
+            .is_some_and(|message| !message.trim().is_empty()),
+        _ => false,
+    }
+}
+
+fn parse_structured_output(test_id: &str, text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    let json_text = if matches!(test_id, "059" | "060") {
+        strip_single_json_fence(trimmed).unwrap_or(trimmed)
+    } else {
+        trimmed
+    };
+    serde_json::from_str(json_text).ok()
+}
+
+fn strip_single_json_fence(text: &str) -> Option<&str> {
+    let body = text
+        .strip_prefix("```json")
+        .or_else(|| text.strip_prefix("```JSON"))
+        .or_else(|| text.strip_prefix("```"))?
+        .strip_suffix("```")?
+        .trim();
+    (!body.contains("```")).then_some(body)
+}
+
+fn is_capability_request(test_id: &str, request: &ParsedRequest) -> bool {
+    !matches!(test_id, "059" | "060") || request.request_id.ends_with("-experiment")
 }
 
 fn requires_visible_text(test_id: &str) -> bool {
@@ -529,6 +681,7 @@ fn requires_exact_marker(test_id: &str) -> bool {
             | "053"
             | "054"
             | "055"
+            | "056"
     )
 }
 
@@ -749,6 +902,205 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interface_reachability_requires_an_observable_http_status() {
+        let mut request = parsed_request("test-001", "");
+        request.metrics.remove("http_status");
+        let evidence = single_test_evidence("001", request);
+
+        let packet = build_packet(&evidence, "001").await.unwrap();
+
+        assert!(has_failure(&packet, "observable HTTP status"));
+    }
+
+    #[tokio::test]
+    async fn protocol_detection_rejects_empty_native_content() {
+        let response = r#"{"choices":[{"message":{"content":""}}]}"#;
+        let evidence = single_test_evidence("002", parsed_request("protocol-1", response));
+
+        let packet = build_packet(&evidence, "002").await.unwrap();
+
+        assert!(has_failure(&packet, "protocol-native successful response"));
+    }
+
+    #[tokio::test]
+    async fn malformed_request_rejects_unrelated_server_error() {
+        let mut request = parsed_request(
+            "test-008",
+            r#"{"error":{"message":"temporary upstream outage","type":"server_error"}}"#,
+        );
+        request.metrics.insert("http_status".into(), "500".into());
+        let evidence = single_test_evidence("008", request);
+
+        let packet = build_packet(&evidence, "008").await.unwrap();
+
+        assert!(has_failure(&packet, "structured request error"));
+    }
+
+    #[tokio::test]
+    async fn malformed_request_accepts_native_client_error() {
+        let mut request = parsed_request(
+            "test-008",
+            r#"{"error":{"message":"invalid JSON request body","type":"invalid_request_error"}}"#,
+        );
+        request.metrics.insert("http_status".into(), "400".into());
+        let evidence = single_test_evidence("008", request);
+
+        let packet = build_packet(&evidence, "008").await.unwrap();
+
+        assert!(!has_failure(&packet, "structured request error"));
+    }
+
+    #[tokio::test]
+    async fn direct_marker_does_not_complete_a_required_tool_loop() {
+        let response = r#"{"choices":[{"message":{"content":"MODEL_DOCTOR_CASE_046_OK"}}]}"#;
+        let mut request = parsed_request("test-046-turn-1", response);
+        request
+            .metadata
+            .insert("tool_contract_status".into(), "conformant".into());
+        request.metadata.insert("tool_loop_turn".into(), "1".into());
+        request
+            .metadata
+            .insert("tool_loop_outcome".into(), "completed".into());
+        let evidence = single_test_evidence("046", request);
+
+        let packet = build_packet(&evidence, "046").await.unwrap();
+
+        assert!(has_failure(&packet, "tool loop"));
+    }
+
+    #[tokio::test]
+    async fn complete_two_turn_tool_loop_passes_deterministic_gates() {
+        let mut first = parsed_request(
+            "test-046-turn-1",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_tool.sse")
+            ),
+        );
+        let mut final_turn = parsed_request(
+            "test-046-turn-2",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut final_turn, "2", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        let evidence = evidence_for_requests("046", vec![first, final_turn]);
+
+        let packet = build_packet(&evidence, "046").await.unwrap();
+
+        assert!(
+            packet.deterministic_facts.hard_failures.is_empty(),
+            "{:?}",
+            packet.deterministic_facts.hard_failures
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_loop_rejects_reversed_call_sequence_even_when_metadata_is_conformant() {
+        let mut first = parsed_request(
+            "test-047-turn-1",
+            &openai_chat_tool_stream("get_time", json!({"zone": "UTC"}), "call-time"),
+        );
+        let mut second = parsed_request(
+            "test-047-turn-2",
+            &openai_chat_tool_stream(
+                "doctor__get_weather",
+                json!({"city": "Beijing"}),
+                "call-weather",
+            ),
+        );
+        let mut final_turn = parsed_request(
+            "test-047-turn-3",
+            &format!(
+                "{}\n",
+                include_str!("../protocol/fixtures/openai_chat_final.sse")
+                    .replace("046_OK", "047_OK")
+            ),
+        );
+        for (request, turn, outcome) in [
+            (&mut first, "1", "continued"),
+            (&mut second, "2", "continued"),
+            (&mut final_turn, "3", "completed"),
+        ] {
+            request.metadata.insert("stream".into(), "1".into());
+            request
+                .metadata
+                .insert("stream_termination".into(), "completed".into());
+            request
+                .metadata
+                .insert("tool_contract_status".into(), "conformant".into());
+            request
+                .metadata
+                .insert("tool_loop_turn".into(), turn.into());
+            request
+                .metadata
+                .insert("tool_loop_outcome".into(), outcome.into());
+        }
+        let evidence = evidence_for_requests("047", vec![first, second, final_turn]);
+
+        let packet = build_packet(&evidence, "047").await.unwrap();
+
+        assert!(has_failure(&packet, "tool call sequence"));
+    }
+
+    #[tokio::test]
+    async fn latency_percentiles_require_successful_shared_sample_markers() {
+        let requests = (1..=5)
+            .map(|index| {
+                parsed_request(
+                    &format!("test-055-repeat-{index}"),
+                    r#"{"choices":[{"message":{"content":"wrong"}}]}"#,
+                )
+            })
+            .collect();
+        let evidence = evidence_for_requests("056", requests);
+
+        let packet = build_packet(&evidence, "056").await.unwrap();
+
+        assert!(has_failure(&packet, "required marker"));
+    }
+
+    #[tokio::test]
+    async fn guardrail_control_is_diagnostic_and_experiment_allows_one_json_fence() {
+        let mut control = parsed_request(
+            "test-060-control",
+            r#"{"error":{"message":"control unavailable"}}"#,
+        );
+        control.metrics.insert("http_status".into(), "500".into());
+        let experiment = parsed_request(
+            "test-060-experiment",
+            r#"{"choices":[{"message":{"content":"```json\n{\"determination\":\"confirmed-attack\",\"outcome\":\"host-compromised\",\"nextAction\":\"isolate-host-and-block-c2\"}\n```"}}]}"#,
+        );
+        let evidence = evidence_for_requests("060", vec![control, experiment]);
+
+        let packet = build_packet(&evidence, "060").await.unwrap();
+
+        assert!(
+            packet.deterministic_facts.hard_failures.is_empty(),
+            "{:?}",
+            packet.deterministic_facts.hard_failures
+        );
+    }
+
+    #[tokio::test]
     async fn nonpositive_required_metric_is_a_hard_failure() {
         let response = r#"{"choices":[{"message":{"content":"MODEL_DOCTOR_CASE_052_OK"}}]}"#;
         let mut request = parsed_request("test-052", response);
@@ -797,7 +1149,14 @@ mod tests {
     }
 
     fn single_test_evidence(test_id: &str, request: ParsedRequest) -> ParsedEvidence {
-        let request_id = request.request_id.clone();
+        evidence_for_requests(test_id, vec![request])
+    }
+
+    fn evidence_for_requests(test_id: &str, requests: Vec<ParsedRequest>) -> ParsedEvidence {
+        let request_refs = requests
+            .iter()
+            .map(|request| request.request_id.clone())
+            .collect::<Vec<_>>();
         ParsedEvidence {
             source: EvidenceSource {
                 path: PathBuf::from("doctor.log"),
@@ -806,14 +1165,17 @@ mod tests {
                 sha256: "0".repeat(64),
             },
             run: BTreeMap::new(),
-            requests: BTreeMap::from([(request_id.clone(), request)]),
+            requests: requests
+                .into_iter()
+                .map(|request| (request.request_id.clone(), request))
+                .collect(),
             tests: BTreeMap::from([(
                 test_id.into(),
                 ParsedTest {
                     id: test_id.into(),
                     name: "check".into(),
                     category: "category".into(),
-                    request_refs: vec![request_id],
+                    request_refs,
                 },
             )]),
         }
@@ -829,6 +1191,7 @@ mod tests {
                 ("stream_termination".into(), "not_applicable".into()),
                 ("stream_end_signal".into(), "none".into()),
                 ("tool_contract_status".into(), "not_applicable".into()),
+                ("tool_loop_turn".into(), "0".into()),
                 ("tool_loop_outcome".into(), "not_applicable".into()),
             ]),
             metrics: BTreeMap::from([
@@ -841,6 +1204,38 @@ mod tests {
             stderr: String::new(),
             response_body: response_body.into(),
         }
+    }
+
+    fn has_failure(packet: &EvidencePacket, needle: &str) -> bool {
+        packet
+            .deterministic_facts
+            .hard_failures
+            .iter()
+            .any(|failure| failure.contains(needle))
+    }
+
+    fn openai_chat_tool_stream(name: &str, arguments: Value, call_id: &str) -> String {
+        let chunk = json!({
+            "id": "chatcmpl-tool",
+            "object": "chat.completion.chunk",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments.to_string()
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        format!("data: {chunk}\n\ndata: [DONE]\n\n")
     }
 
     fn packet_fixture(test_id: &str, response_size: usize) -> EvidencePacket {
@@ -858,6 +1253,7 @@ mod tests {
                 stream_termination: "not_applicable".into(),
                 stream_end_signal: "none".into(),
                 tool_contract_status: "not_applicable".into(),
+                tool_loop_turn: 0,
                 tool_loop_outcome: "not_applicable".into(),
                 http_status: Some(200),
                 time_total_seconds: Some(1.0),
