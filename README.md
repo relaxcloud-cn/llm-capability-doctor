@@ -30,7 +30,7 @@ New-Item -ItemType Directory -Force .\model-doctor-output | Out-Null; .\model-ca
 
 ## 客户侧自分析（可选）
 
-在上面的检测命令末尾追加 `--self-analyze`。CLI 会先完成全部 46 项检测并关闭日志，然后通过同一个接口、模型、API Key 和协议，让被测模型分批分析自己的本地证据。
+在上面的检测命令末尾追加 `--self-analyze`。CLI 会先完成全部 46 项检测并关闭日志，然后通过同一个接口、模型、API Key 和调用方式，让被测模型分批分析自己的本地证据。
 
 ```bash
 ./model-capability-doctor-v0.12.0-linux-x86_64 --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file './model-doctor-output/model-doctor.log' --self-analyze
