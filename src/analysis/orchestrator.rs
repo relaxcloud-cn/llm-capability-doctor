@@ -180,7 +180,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
 ) -> Result<AnalysisOutcome, AnalysisError> {
     let redactor = Redactor::new(&settings.api_key, &settings.url);
     let evidence = read(&settings.log_path, &redactor)?;
-    let batches = default_batches(&evidence)?;
+    let batches = default_batches(&evidence).await?;
     let mut tests = Vec::with_capacity(crate::catalog::CATALOG.len());
     let mut batch_results = Vec::with_capacity(batches.len());
     let mut cancelled = false;
@@ -251,7 +251,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
         generated_at: Local::now().to_rfc3339(),
         source,
         target: AnalysisTargetMetadata {
-            endpoint: redactor.redact_url(&settings.url),
+            endpoint: redact_endpoint_metadata(&settings.url, &redactor),
             requested_model: redactor.redact_text(&settings.model),
             detected_protocol: settings.protocol.to_string(),
             authentication_mode: settings.auth_mode.to_string(),
@@ -311,7 +311,7 @@ async fn process_batch<C: AnalysisClient>(
                     });
                 }
             },
-            Err(error) if attempts == 1 && matches!(error, ClientError::InvalidJson(_)) => {
+            Err(error) if attempts == 1 && repairable_candidate_response(&error) => {
                 prompt = build_repair_prompt(&original_prompt, &[error.to_string()])?;
             }
             Err(error) => {
@@ -324,6 +324,15 @@ async fn process_batch<C: AnalysisClient>(
         }
     }
     unreachable!("batch loop always returns")
+}
+
+fn repairable_candidate_response(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::InvalidJson(_)
+            | ClientError::InvalidResponseEnvelope(_)
+            | ClientError::MissingAssistantContent
+    )
 }
 
 fn available_result(review: ValidatedReview, redactor: &Redactor) -> AnalysisTestResult {
@@ -348,6 +357,30 @@ fn redact_values(values: Vec<String>, redactor: &Redactor) -> Vec<String> {
         .into_iter()
         .map(|value| redactor.redact_text(&value))
         .collect()
+}
+
+fn redact_endpoint_metadata(url: &Url, redactor: &Redactor) -> String {
+    let mut safe = url.clone();
+    if !safe.username().is_empty() {
+        safe.set_username("[REDACTED]")
+            .expect("HTTP endpoint URLs support userinfo");
+    }
+    if safe.password().is_some() {
+        safe.set_password(Some("[REDACTED]"))
+            .expect("HTTP endpoint URLs support userinfo");
+    }
+    let query_keys: Vec<String> = safe
+        .query_pairs()
+        .map(|(key, _)| key.into_owned())
+        .collect();
+    safe.set_query(None);
+    if !query_keys.is_empty() {
+        let mut query = safe.query_pairs_mut();
+        for key in query_keys {
+            query.append_pair(&key, "[REDACTED]");
+        }
+    }
+    redactor.redact_url(&safe)
 }
 
 fn unavailable_results(batch: &[EvidencePacket], error: &str) -> Vec<AnalysisTestResult> {
@@ -494,7 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn repairs_one_invalid_batch_then_succeeds() {
-        let (directory, settings, batches) = fixture();
+        let (directory, settings, batches) = fixture().await;
         let mut responses = vec![Err(ClientError::InvalidJson("missing reviews".into()))];
         responses.push(Ok(valid_envelope_for(&batches[0])));
         responses.extend(
@@ -519,8 +552,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repairs_one_missing_candidate_response_then_succeeds() {
+        let (_directory, settings, batches) = fixture().await;
+        let mut responses = vec![Err(ClientError::MissingAssistantContent)];
+        responses.push(Ok(valid_envelope_for(&batches[0])));
+        responses.extend(
+            batches[1..]
+                .iter()
+                .map(|batch| Ok(valid_envelope_for(batch))),
+        );
+        let client = FakeClient::new(responses);
+
+        let outcome = analyze_with_client(settings, &client, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(client.call_count(), batches.len() + 1);
+        assert!(client.prompts()[1].contains("no protocol-native assistant content"));
+    }
+
+    #[tokio::test]
     async fn failed_batch_is_explicit_and_later_batches_continue() {
-        let (_directory, settings, batches) = fixture();
+        let (_directory, settings, batches) = fixture().await;
         let mut responses = vec![Err(ClientError::Transport("offline".into()))];
         responses.extend(
             batches[1..]
@@ -540,7 +594,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancellation_stops_calls_and_flushes_unavailable_results() {
-        let (_directory, settings, _batches) = fixture();
+        let (_directory, settings, _batches) = fixture().await;
         let client = FakeClient::new(Vec::new());
         let cancellation = CancellationToken::new();
         cancellation.cancel();
@@ -579,7 +633,7 @@ mod tests {
     async fn output_file_is_private() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_directory, settings, batches) = fixture();
+        let (_directory, settings, batches) = fixture().await;
         let responses = batches
             .iter()
             .map(|batch| Ok(valid_envelope_for(batch)))
@@ -600,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn source_path_is_redacted_in_output_metadata() {
-        let (_directory, settings, batches) = fixture_named("secret-key-doctor.log");
+        let (_directory, settings, batches) = fixture_named("secret-key-doctor.log").await;
         let responses = batches
             .iter()
             .map(|batch| Ok(valid_envelope_for(batch)))
@@ -616,15 +670,33 @@ mod tests {
         assert!(output.contains("[REDACTED]-doctor.log"));
     }
 
-    fn fixture() -> (
+    #[test]
+    fn endpoint_metadata_masks_every_query_value_and_userinfo() {
+        let url = Url::parse(
+            "https://user:password@example.test/v1/chat?X-Amz-Signature=signed-secret&region=us-east-1",
+        )
+        .unwrap();
+        let redactor = Redactor::new("api-key", &url);
+
+        let endpoint = redact_endpoint_metadata(&url, &redactor);
+
+        assert!(!endpoint.contains("user"));
+        assert!(!endpoint.contains("password"));
+        assert!(!endpoint.contains("signed-secret"));
+        assert!(!endpoint.contains("us-east-1"));
+        assert!(endpoint.contains("X-Amz-Signature=%5BREDACTED%5D"));
+        assert!(endpoint.contains("region=%5BREDACTED%5D"));
+    }
+
+    async fn fixture() -> (
         tempfile::TempDir,
         AnalysisSettings,
         Vec<Vec<EvidencePacket>>,
     ) {
-        fixture_named("doctor.log")
+        fixture_named("doctor.log").await
     }
 
-    fn fixture_named(
+    async fn fixture_named(
         log_file_name: &str,
     ) -> (
         tempfile::TempDir,
@@ -637,7 +709,7 @@ mod tests {
         let url = "https://example.test/v1/chat/completions".parse().unwrap();
         let redactor = Redactor::new("secret-key", &url);
         let parsed = read(&log_path, &redactor).unwrap();
-        let batches = default_batches(&parsed).unwrap();
+        let batches = default_batches(&parsed).await.unwrap();
         let settings = AnalysisSettings {
             log_path,
             url,

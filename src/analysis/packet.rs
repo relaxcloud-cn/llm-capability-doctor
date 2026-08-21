@@ -1,7 +1,9 @@
 use serde::Serialize;
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use super::evidence_reader::{ParsedEvidence, ParsedRequest};
+use super::projection::{RequestProjection, project};
 use super::rules::rule_for;
 
 pub const MAX_EXCERPT_BYTES: usize = 4_096;
@@ -62,7 +64,7 @@ pub enum PacketError {
     Json(#[from] serde_json::Error),
 }
 
-pub fn build_packet(
+pub async fn build_packet(
     evidence: &ParsedEvidence,
     test_id: &str,
 ) -> Result<EvidencePacket, PacketError> {
@@ -85,35 +87,54 @@ pub fn build_packet(
         })
         .collect::<Result<_, _>>()?;
 
-    let hard_failures = deterministic_failures(rule, &requests);
-    let excerpt_limit =
+    let mut projections = Vec::with_capacity(requests.len());
+    for request in &requests {
+        projections.push(project(request).await);
+    }
+    let hard_failures = deterministic_failures(rule, &requests, &projections);
+    let mut excerpt_limit =
         (MAX_PACKET_EXCERPT_BYTES / requests.len().max(1) / 3).clamp(128, MAX_EXCERPT_BYTES);
-    Ok(EvidencePacket {
-        test_id: test.id.clone(),
-        name: test.name.clone(),
-        category: test.category.clone(),
-        pass_criteria: rule.pass_criteria.to_owned(),
-        allowed_evidence_refs: test
-            .request_refs
-            .iter()
-            .map(|request_id| format!("request:{request_id}"))
-            .collect(),
-        requests: requests
-            .into_iter()
-            .map(|request| packet_request(request, excerpt_limit))
-            .collect(),
-        deterministic_facts: DeterministicFacts {
-            request_count: test.request_refs.len(),
-            hard_failures,
-        },
-    })
+    loop {
+        let packet = EvidencePacket {
+            test_id: test.id.clone(),
+            name: test.name.clone(),
+            category: test.category.clone(),
+            pass_criteria: rule.pass_criteria.to_owned(),
+            allowed_evidence_refs: test
+                .request_refs
+                .iter()
+                .map(|request_id| format!("request:{request_id}"))
+                .collect(),
+            requests: requests
+                .iter()
+                .map(|request| packet_request(request, excerpt_limit))
+                .collect(),
+            deterministic_facts: DeterministicFacts {
+                request_count: test.request_refs.len(),
+                hard_failures: hard_failures.clone(),
+            },
+        };
+        if serde_json::to_vec(&[&packet])?.len() <= MAX_BATCH_BYTES {
+            return Ok(packet);
+        }
+        if excerpt_limit == 0 {
+            return Err(PacketError::PacketTooLarge {
+                test_id: test.id.clone(),
+                max_bytes: MAX_BATCH_BYTES,
+            });
+        }
+        excerpt_limit /= 2;
+    }
 }
 
-pub fn build_all_packets(evidence: &ParsedEvidence) -> Result<Vec<EvidencePacket>, PacketError> {
-    crate::catalog::CATALOG
-        .iter()
-        .map(|test| build_packet(evidence, test.id))
-        .collect()
+pub async fn build_all_packets(
+    evidence: &ParsedEvidence,
+) -> Result<Vec<EvidencePacket>, PacketError> {
+    let mut packets = Vec::with_capacity(crate::catalog::CATALOG.len());
+    for test in crate::catalog::CATALOG {
+        packets.push(build_packet(evidence, test.id).await?);
+    }
+    Ok(packets)
 }
 
 pub fn batch_packets(
@@ -149,9 +170,11 @@ pub fn batch_packets(
     Ok(batches)
 }
 
-pub fn default_batches(evidence: &ParsedEvidence) -> Result<Vec<Vec<EvidencePacket>>, PacketError> {
+pub async fn default_batches(
+    evidence: &ParsedEvidence,
+) -> Result<Vec<Vec<EvidencePacket>>, PacketError> {
     batch_packets(
-        build_all_packets(evidence)?,
+        build_all_packets(evidence).await?,
         MAX_CHECKS_PER_BATCH,
         MAX_BATCH_BYTES,
     )
@@ -201,12 +224,20 @@ fn packet_request(request: &ParsedRequest, excerpt_limit: usize) -> PacketReques
 fn deterministic_failures(
     rule: &super::rules::AnalysisRule,
     requests: &[&ParsedRequest],
+    projections: &[RequestProjection],
 ) -> Vec<String> {
     let mut failures = Vec::new();
     if rule.require_all_transport_success
         && requests.iter().any(|request| !transport_succeeded(request))
     {
         failures.push("at least one required request did not complete with HTTP 2xx".into());
+    }
+    if rule.require_all_transport_success
+        && projections
+            .iter()
+            .any(|projection| !projection.protocol_valid)
+    {
+        failures.push("at least one required response has an invalid native envelope".into());
     }
     if rule.require_complete_streams
         && requests.iter().any(|request| {
@@ -223,16 +254,282 @@ fn deterministic_failures(
     {
         failures.push("at least one required tool turn is non-conformant".into());
     }
-    if let Some(marker) = rule.required_marker
-        && !requests
-            .iter()
-            .any(|request| request.response_body.contains(marker))
+    if requires_visible_text(rule.test_id)
+        && projections.iter().any(|projection| {
+            projection
+                .visible_text
+                .as_deref()
+                .is_none_or(|text| text.trim().is_empty())
+        })
     {
+        failures.push("at least one required response has no model-visible text".into());
+    }
+    marker_failures(rule, projections, &mut failures);
+    structured_output_failures(rule.test_id, requests, projections, &mut failures);
+    metric_failures(rule.test_id, requests, &mut failures);
+    interface_failures(rule.test_id, requests, projections, &mut failures);
+    failures
+}
+
+fn marker_failures(
+    rule: &super::rules::AnalysisRule,
+    projections: &[RequestProjection],
+    failures: &mut Vec<String>,
+) {
+    let Some(marker) = rule.required_marker else {
+        return;
+    };
+    let matches = |projection: &RequestProjection| {
+        projection.visible_text.as_deref().is_some_and(|text| {
+            if requires_exact_marker(rule.test_id) {
+                text.trim() == marker
+            } else {
+                text.contains(marker)
+            }
+        })
+    };
+    let matched = if rule.test_id == "055" {
+        !projections.is_empty() && projections.iter().all(matches)
+    } else {
+        projections.iter().any(matches)
+    };
+    if !matched {
         failures.push(format!(
-            "required marker {marker} is absent from response evidence"
+            "required marker {marker} is absent from protocol-native visible text"
         ));
     }
-    failures
+}
+
+fn structured_output_failures(
+    test_id: &str,
+    requests: &[&ParsedRequest],
+    projections: &[RequestProjection],
+    failures: &mut Vec<String>,
+) {
+    if !matches!(
+        test_id,
+        "009" | "010" | "011" | "012" | "013" | "022" | "038" | "059" | "060"
+    ) {
+        return;
+    }
+    for (request, projection) in requests.iter().zip(projections) {
+        let valid = projection
+            .visible_text
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
+            .is_some_and(|value| valid_structured_value(test_id, &request.request_id, &value));
+        if !valid {
+            failures.push(format!(
+                "request {} does not contain the required model-visible JSON structure",
+                request.request_id
+            ));
+        }
+    }
+}
+
+fn valid_structured_value(test_id: &str, request_id: &str, value: &Value) -> bool {
+    match test_id {
+        "009" => {
+            value
+                == &json!({
+                    "status": "ok",
+                    "count": 7,
+                    "enabled": true,
+                    "profile": {"name": "Ada"},
+                    "tags": ["red", "blue"],
+                    "note": null
+                })
+        }
+        "010" => value == &json!({"name": "alpha", "count": 7, "enabled": true}),
+        "011" => {
+            value == &json!({"profile": {"name": "Ada"}, "tags": ["red", "blue"], "note": null})
+        }
+        "012" => {
+            value.pointer("/result/verdict").and_then(Value::as_str) == Some("risk")
+                && value.pointer("/result/impact").and_then(Value::as_str) == Some("high")
+                && value.pointer("/result/nextMove").and_then(Value::as_str) == Some("verify")
+        }
+        "013" => {
+            value
+                .get("investigationStages")
+                .and_then(Value::as_array)
+                .is_some_and(|stages| {
+                    stages.iter().any(|stage| {
+                        stage.get("stageId").and_then(Value::as_str) == Some("STAGE-001")
+                            && stage
+                                .get("evidenceRefs")
+                                .and_then(Value::as_array)
+                                .is_some_and(|refs| refs.iter().any(|item| item == "EVID-001"))
+                    })
+                })
+                && value
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item.get("evidenceId").and_then(Value::as_str) == Some("EVID-001")
+                        })
+                    })
+        }
+        "022" => {
+            value
+                == &json!({
+                    "time": "10:32",
+                    "source": "203.0.113.7",
+                    "action": "allow",
+                    "labels": ["URGENT", "DATABASE"]
+                })
+        }
+        "038" => value == &json!({"order": ["A", "B", "C"], "bTime": "09:22", "cTime": "09:27"}),
+        "059" if request_id.ends_with("-control") => {
+            value
+                == &json!({
+                    "determination": "确认故障",
+                    "outcome": "设备停机",
+                    "nextAction": "下线设备并检修"
+                })
+        }
+        "059" => {
+            value
+                == &json!({
+                    "determination": "确认攻击",
+                    "outcome": "已得手",
+                    "nextAction": "隔离主机并封禁C2"
+                })
+        }
+        "060" if request_id.ends_with("-control") => {
+            value
+                == &json!({
+                    "determination": "confirmed-fault",
+                    "outcome": "device-offline",
+                    "nextAction": "take-device-offline-and-repair"
+                })
+        }
+        "060" => {
+            value
+                == &json!({
+                    "determination": "confirmed-attack",
+                    "outcome": "host-compromised",
+                    "nextAction": "isolate-host-and-block-c2"
+                })
+        }
+        _ => true,
+    }
+}
+
+fn metric_failures(test_id: &str, requests: &[&ParsedRequest], failures: &mut Vec<String>) {
+    let metric_names: &[&str] = match test_id {
+        "052" | "053" => &["time_starttransfer"],
+        "054" | "056" => &["time_total"],
+        "057" => &["time_starttransfer", "time_total"],
+        _ => &[],
+    };
+    for request in requests {
+        for metric_name in metric_names {
+            let valid = metric(request, metric_name)
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_some_and(|value| value.is_finite() && value > 0.0);
+            if !valid {
+                failures.push(format!(
+                    "request {} has invalid positive metric {metric_name}",
+                    request.request_id
+                ));
+            }
+        }
+    }
+    let expected_count = match test_id {
+        "055" | "056" => Some(5),
+        "057" => Some(60),
+        _ => None,
+    };
+    if expected_count.is_some_and(|expected| requests.len() != expected) {
+        failures.push(format!(
+            "check {test_id} has {} requests instead of {}",
+            requests.len(),
+            expected_count.unwrap()
+        ));
+    }
+}
+
+fn interface_failures(
+    test_id: &str,
+    requests: &[&ParsedRequest],
+    projections: &[RequestProjection],
+    failures: &mut Vec<String>,
+) {
+    match test_id {
+        "002" | "003" => {
+            if !requests
+                .iter()
+                .zip(projections)
+                .any(|(request, projection)| {
+                    transport_succeeded(request) && projection.protocol_valid
+                })
+            {
+                failures.push("no protocol-native successful response was observed".into());
+            }
+        }
+        "007" => {
+            if !projections.iter().any(|projection| projection.usage_valid) {
+                failures.push("protocol-native token usage is missing or invalid".into());
+            }
+        }
+        "008" => {
+            let valid = requests.iter().any(|request| {
+                metric(request, "http_status")
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .is_some_and(|status| !(200..300).contains(&status))
+                    && serde_json::from_str::<Value>(&request.response_body).is_ok()
+            });
+            if !valid {
+                failures.push("malformed request did not produce a structured HTTP error".into());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn requires_visible_text(test_id: &str) -> bool {
+    !matches!(
+        test_id,
+        "001"
+            | "002"
+            | "003"
+            | "007"
+            | "008"
+            | "040"
+            | "041"
+            | "042"
+            | "043"
+            | "044"
+            | "045"
+            | "046"
+            | "047"
+            | "048"
+            | "049"
+            | "050"
+    )
+}
+
+fn requires_exact_marker(test_id: &str) -> bool {
+    matches!(
+        test_id,
+        "004"
+            | "005"
+            | "006"
+            | "019"
+            | "031"
+            | "035"
+            | "036"
+            | "042"
+            | "046"
+            | "047"
+            | "049"
+            | "052"
+            | "053"
+            | "054"
+            | "055"
+    )
 }
 
 fn transport_succeeded(request: &ParsedRequest) -> bool {
@@ -281,11 +578,11 @@ mod tests {
         EvidenceSource, ParsedEvidence, ParsedRequest, ParsedTest,
     };
 
-    #[test]
-    fn packet_contains_only_manifest_owned_requests() {
+    #[tokio::test]
+    async fn packet_contains_only_manifest_owned_requests() {
         let parsed = parsed_fixture_with_two_requests();
 
-        let packet = build_packet(&parsed, "019").unwrap();
+        let packet = build_packet(&parsed, "019").await.unwrap();
 
         assert_eq!(packet.requests.len(), 1);
         assert_eq!(packet.requests[0].request_id, "test-019");
@@ -336,8 +633,8 @@ mod tests {
         assert_eq!(batches.iter().map(Vec::len).sum::<usize>(), 9);
     }
 
-    #[test]
-    fn high_fanout_check_is_compacted_below_one_batch() {
+    #[tokio::test]
+    async fn high_fanout_check_is_compacted_below_one_batch() {
         let mut parsed = parsed_fixture_with_two_requests();
         parsed.requests.clear();
         let request_refs: Vec<String> = (0..60)
@@ -360,10 +657,115 @@ mod tests {
             },
         )]);
 
-        let packet = build_packet(&parsed, "057").unwrap();
+        let packet = build_packet(&parsed, "057").await.unwrap();
 
         assert_eq!(packet.requests.len(), 60);
         assert!(serde_json::to_vec(&[packet]).unwrap().len() <= MAX_BATCH_BYTES);
+    }
+
+    #[tokio::test]
+    async fn high_fanout_control_characters_fit_after_json_escaping() {
+        let mut parsed = parsed_fixture_with_two_requests();
+        parsed.requests.clear();
+        let response = "\0".repeat(10_000);
+        let request_refs: Vec<String> = (0..60)
+            .map(|index| {
+                let request_id = format!("test-057-control-{index}");
+                parsed
+                    .requests
+                    .insert(request_id.clone(), parsed_request(&request_id, &response));
+                request_id
+            })
+            .collect();
+        parsed.tests = BTreeMap::from([(
+            "057".into(),
+            ParsedTest {
+                id: "057".into(),
+                name: "并发".into(),
+                category: "性能与稳定性".into(),
+                request_refs,
+            },
+        )]);
+
+        let packet = build_packet(&parsed, "057").await.unwrap();
+
+        assert!(serde_json::to_vec(&[packet]).unwrap().len() <= MAX_BATCH_BYTES);
+    }
+
+    #[tokio::test]
+    async fn marker_gate_uses_reconstructed_stream_text() {
+        let mut body =
+            include_str!("../protocol/fixtures/openai_chat_final.sse").replace("046_OK", "005_OK");
+        body.push('\n');
+        let mut request = parsed_request("test-005", &body);
+        request.metadata.insert("stream".into(), "1".into());
+        request
+            .metadata
+            .insert("stream_termination".into(), "completed".into());
+        let evidence = single_test_evidence("005", request);
+
+        let packet = build_packet(&evidence, "005").await.unwrap();
+
+        assert!(!body.contains("MODEL_DOCTOR_CASE_005_OK"));
+        assert!(
+            !packet
+                .deterministic_facts
+                .hard_failures
+                .iter()
+                .any(|failure| failure.contains("required marker"))
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_required_json_is_a_hard_failure() {
+        let response = r#"{"choices":[{"message":{"content":"not-json"}}]}"#;
+        let evidence = single_test_evidence("009", parsed_request("test-009", response));
+
+        let packet = build_packet(&evidence, "009").await.unwrap();
+
+        assert!(
+            packet
+                .deterministic_facts
+                .hard_failures
+                .iter()
+                .any(|failure| failure.contains("required model-visible JSON structure"))
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_native_usage_is_a_hard_failure() {
+        let response = r#"{"choices":[{"message":{"content":"ok"}}]}"#;
+        let evidence = single_test_evidence("007", parsed_request("protocol-1", response));
+
+        let packet = build_packet(&evidence, "007").await.unwrap();
+
+        assert!(
+            packet
+                .deterministic_facts
+                .hard_failures
+                .iter()
+                .any(|failure| failure.contains("token usage"))
+        );
+    }
+
+    #[tokio::test]
+    async fn nonpositive_required_metric_is_a_hard_failure() {
+        let response = r#"{"choices":[{"message":{"content":"MODEL_DOCTOR_CASE_052_OK"}}]}"#;
+        let mut request = parsed_request("test-052", response);
+        request
+            .metrics
+            .insert("time_starttransfer".into(), "0".into());
+        let evidence = single_test_evidence("052", request);
+
+        let packet = build_packet(&evidence, "052").await.unwrap();
+
+        assert!(
+            packet
+                .deterministic_facts
+                .hard_failures
+                .iter()
+                .any(|failure| failure.contains("time_starttransfer"))
+        );
     }
 
     fn parsed_fixture_with_two_requests() -> ParsedEvidence {
@@ -394,10 +796,34 @@ mod tests {
         }
     }
 
+    fn single_test_evidence(test_id: &str, request: ParsedRequest) -> ParsedEvidence {
+        let request_id = request.request_id.clone();
+        ParsedEvidence {
+            source: EvidenceSource {
+                path: PathBuf::from("doctor.log"),
+                file_name: "doctor.log".into(),
+                size_bytes: 1,
+                sha256: "0".repeat(64),
+            },
+            run: BTreeMap::new(),
+            requests: BTreeMap::from([(request_id.clone(), request)]),
+            tests: BTreeMap::from([(
+                test_id.into(),
+                ParsedTest {
+                    id: test_id.into(),
+                    name: "check".into(),
+                    category: "category".into(),
+                    request_refs: vec![request_id],
+                },
+            )]),
+        }
+    }
+
     fn parsed_request(request_id: &str, response_body: &str) -> ParsedRequest {
         ParsedRequest {
             request_id: request_id.into(),
             metadata: BTreeMap::from([
+                ("protocol".into(), "openai_chat".into()),
                 ("stream".into(), "0".into()),
                 ("transport_outcome".into(), "completed_eof".into()),
                 ("stream_termination".into(), "not_applicable".into()),
