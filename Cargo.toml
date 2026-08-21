@@ -35,3 +35,7 @@ nix = { version = "0.31.3", features = ["signal"] }
 lto = "thin"
 codegen-units = 1
 strip = true
+
+[[test]]
+name = "cli_self_analysis"
+path = "src/cli_self_analysis_test.rs"

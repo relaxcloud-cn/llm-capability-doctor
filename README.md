@@ -28,18 +28,26 @@ Windows x86_64（PowerShell）：
 New-Item -ItemType Directory -Force .\model-doctor-output | Out-Null; .\model-capability-doctor-v0.12.0-windows-x86_64.exe --url "https://model.example/v1/chat/completions" --model "your-model-name" --api-key "your-api-key" --log-file ".\model-doctor-output\model-doctor.log"
 ```
 
-## 交付日志
+## 客户侧自分析（可选）
+
+在上面的检测命令末尾追加 `--self-analyze`。CLI 会先完成全部 46 项检测并关闭日志，然后通过同一个接口、模型、API Key 和协议，让被测模型分批分析自己的本地证据。
+
+```bash
+./model-capability-doctor-v0.12.0-linux-x86_64 --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file './model-doctor-output/model-doctor.log' --self-analyze
+```
+
+分析结果写入同目录的 `model-doctor-self-analysis.json`。日志和分析文件均保留在客户环境；CLI 不提供日志上传或独立分析地址。单批分析失败会在 JSON 中标记为 `ANALYSIS_UNAVAILABLE`，不会改变检测日志已成功生成的状态。
+
+## 查看本地结果
 
 Linux/macOS：
 
 ```bash
-ls -lh ./model-doctor-output/model-doctor.log
+ls -lh ./model-doctor-output/model-doctor.log ./model-doctor-output/model-doctor-self-analysis.json
 ```
 
 Windows PowerShell：
 
 ```powershell
-Get-Item .\model-doctor-output\model-doctor.log
+Get-Item .\model-doctor-output\model-doctor.log, .\model-doctor-output\model-doctor-self-analysis.json
 ```
-
-将生成的 `model-doctor.log` 发回即可。

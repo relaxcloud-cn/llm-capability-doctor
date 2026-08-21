@@ -410,6 +410,9 @@ fn non_empty(
 }
 
 #[cfg(test)]
+pub(crate) use tests::complete_test_log;
+
+#[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
 
@@ -423,7 +426,7 @@ mod tests {
     fn reads_complete_v4_and_preserves_ordered_refs() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("doctor.log");
-        std::fs::write(&path, complete_log()).unwrap();
+        std::fs::write(&path, complete_test_log()).unwrap();
         let redactor = Redactor::new(
             "secret-token",
             &Url::parse("https://example.test/v1/chat/completions").unwrap(),
@@ -443,7 +446,7 @@ mod tests {
         let path = directory.path().join("doctor.log");
         std::fs::write(
             &path,
-            complete_log().replace("========== END ==========\n", ""),
+            complete_test_log().replace("========== END ==========\n", ""),
         )
         .unwrap();
         let redactor = Redactor::new("secret-token", &Url::parse("https://example.test").unwrap());
@@ -460,7 +463,7 @@ mod tests {
         let path = directory.path().join("doctor.log");
         std::fs::write(
             &path,
-            complete_log().replace("cmVzcG9uc2U=", "c2VjcmV0LXRva2Vu"),
+            complete_test_log().replace("cmVzcG9uc2U=", "c2VjcmV0LXRva2Vu"),
         )
         .unwrap();
         let redactor = Redactor::new("secret-token", &Url::parse("https://example.test").unwrap());
@@ -470,7 +473,7 @@ mod tests {
         assert_eq!(parsed.requests["test-shared"].response_body, "[REDACTED]");
     }
 
-    fn complete_log() -> String {
+    pub(crate) fn complete_test_log() -> String {
         let mut log = String::from(
             "========== MODEL DOCTOR RUN ==========\n\
              run_id: run-1\n\

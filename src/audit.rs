@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -13,6 +13,7 @@ use url::Url;
 use crate::evidence::{
     StreamEndSignal, StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome,
 };
+use crate::private_file::open_private_file;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
@@ -465,29 +466,6 @@ fn format_timestamp(value: DateTime<Local>) -> String {
 
 fn single_line(value: &str) -> String {
     value.replace('\r', "\\r").replace('\n', "\\n")
-}
-
-#[cfg(unix)]
-fn open_private_file(path: &Path) -> std::io::Result<File> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn open_private_file(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(path)
 }
 
 #[cfg(test)]

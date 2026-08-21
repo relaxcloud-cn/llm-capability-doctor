@@ -9,5 +9,7 @@ pub mod protocol;
 pub mod redaction;
 pub mod runner;
 
+pub(crate) mod private_file;
+
 #[cfg(test)]
 pub(crate) mod test_support;
