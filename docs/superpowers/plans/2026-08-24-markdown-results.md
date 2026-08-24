@@ -16,7 +16,7 @@
 - Modify: `src/analysis/orchestrator.rs`
 - Modify: `README.md`
 
-- [ ] **Step 1: Add renderer tests before implementation**
+- [x] **Step 1: Add renderer tests before implementation**
 
 Add these unit tests in `src/analysis/orchestrator.rs`:
 
@@ -26,11 +26,11 @@ Add these unit tests in `src/analysis/orchestrator.rs`:
 - `markdown_escapes_table_content`: render observations and causes containing `|` and newlines; assert the table has escaped pipes and no raw multiline cell.
 - `markdown_and_json_use_distinct_collision_safe_paths`: create an existing JSON and Markdown sibling, then assert the next paths are timestamped and neither existing file is overwritten.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 Run `cargo test analysis::orchestrator::tests::markdown --lib`. Expected: compile/test failure because the renderer and Markdown output path do not exist yet.
 
-- [ ] **Step 3: Update README output list after the renderer contract is fixed**
+- [x] **Step 3: Update README output list after the renderer contract is fixed**
 
 Document `model-doctor-self-analysis.md` beside the existing JSON and state that it contains category conclusions plus failed/unavailable details.
 
@@ -39,7 +39,7 @@ Document `model-doctor-self-analysis.md` beside the existing JSON and state that
 **Files:**
 - Modify: `src/analysis/orchestrator.rs`
 
-- [ ] **Step 1: Add catalog lookup and Markdown escaping helpers**
+- [x] **Step 1: Add catalog lookup and Markdown escaping helpers**
 
 Implement helpers with these signatures:
 
@@ -52,7 +52,7 @@ fn result_status(result: &AnalysisTestResult) -> &'static str;
 
 `markdown_cell` replaces backslashes/newlines and escapes `|`; `result_status` maps validated PASS to `PASS`, validated FAIL to `FAIL`, and unavailable state to `ANALYSIS_UNAVAILABLE`.
 
-- [ ] **Step 2: Add category and detail renderers**
+- [x] **Step 2: Add category and detail renderers**
 
 Implement:
 
@@ -65,7 +65,7 @@ fn render_non_pass_details(artifact: &SelfAnalysisArtifact, output: &mut String)
 
 Use catalog order for categories and tests. A category is `满足` only when every member has validated PASS; otherwise it is `不满足`. Reasons list every non-pass item as `ID 名称：failureCause` or `ID 名称：分析不可用（limitation）`. Details include status, decision source, failure cause, observations, refs, limitations, and validation notes only for non-pass results.
 
-- [ ] **Step 3: Write Markdown beside JSON using collision-safe private output**
+- [x] **Step 3: Write Markdown beside JSON using collision-safe private output**
 
 Refactor the existing JSON path helper to accept an extension and add:
 
@@ -76,7 +76,7 @@ fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBu
 
 Write UTF-8 Markdown through the same private temp file, hard-link, collision-safe process. Keep `AnalysisOutcome.path` as the JSON path for compatibility and add `markdown_path: PathBuf` so CLI can report both artifacts.
 
-- [ ] **Step 4: Render both files from the same artifact**
+- [x] **Step 4: Render both files from the same artifact**
 
 In `analyze_with_client`, serialize/write JSON and Markdown after the artifact is complete. Return both paths; do not make Markdown generation call the model or recompute PASS/FAIL.
 
@@ -86,15 +86,15 @@ In `analyze_with_client`, serialize/write JSON and Markdown after the artifact i
 - Modify: `src/main.rs`
 - Modify: `README.md`
 
-- [ ] **Step 1: Print both artifact paths in the CLI summary**
+- [x] **Step 1: Print both artifact paths in the CLI summary**
 
 Update `print_analysis_outcome` to print the JSON path and Markdown path while preserving existing counts and cancellation wording.
 
-- [ ] **Step 2: Update CLI/integration assertions**
+- [x] **Step 2: Update CLI/integration assertions**
 
 Keep `default_cli_run_creates_no_self_analysis_artifact` unchanged for the no-flag path. Extend the orchestrator fixture assertions so both sibling files exist, JSON remains v2, Markdown contains the category table and 46 detail rows, and sensitive fixture values remain absent. Update `print_analysis_outcome` output assertions only if a CLI unit seam is introduced.
 
-- [ ] **Step 3: Run focused tests**
+- [x] **Step 3: Run focused tests**
 
 Run `cargo test analysis::orchestrator::tests::markdown analysis::orchestrator::tests --lib` and inspect generated Markdown from the fixture.
 
@@ -103,11 +103,11 @@ Run `cargo test analysis::orchestrator::tests::markdown analysis::orchestrator::
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-24-markdown-results.md`
 
-- [ ] **Step 1: Run the full verification suite**
+- [x] **Step 1: Run the full verification suite**
 
 Run `cargo fmt --check`, `git diff --check`, `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo build --release`, and `python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 'test_*.py'`.
 
-- [ ] **Step 2: Mark the plan complete and inspect the diff**
+- [x] **Step 2: Mark the plan complete and inspect the diff**
 
 Confirm the output path, status aggregation, reason rendering, escaping, collision handling, and no hard-gate logic are all represented in the final diff.
 

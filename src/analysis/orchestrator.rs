@@ -1,5 +1,6 @@
+use std::fmt::Write as FmtWrite;
 use std::fs::File;
-use std::io::Write;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -67,6 +68,7 @@ pub struct AnalysisSettings {
 
 pub struct AnalysisOutcome {
     pub path: PathBuf,
+    pub markdown_path: PathBuf,
     pub available_count: usize,
     pub pass_count: usize,
     pub fail_count: usize,
@@ -266,8 +268,11 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
     let fail_count = artifact.counts.fail;
     let unavailable_count = artifact.counts.unavailable;
     let path = write_artifact(&settings.log_path, &artifact)?;
+    let markdown = render_markdown(&artifact);
+    let markdown_path = write_markdown_artifact(&settings.log_path, markdown.as_bytes())?;
     Ok(AnalysisOutcome {
         path,
+        markdown_path,
         available_count: pass_count + fail_count,
         pass_count,
         fail_count,
@@ -401,12 +406,268 @@ fn unavailable_results(batch: &[EvidencePacket], error: &str) -> Vec<AnalysisTes
         .collect()
 }
 
-pub(crate) fn collision_safe_output_path(log_path: &Path) -> PathBuf {
+fn markdown_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '|' => escaped.push_str("\\|"),
+            '\r' | '\n' => escaped.push(' '),
+            _ => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn result_status(result: &AnalysisTestResult) -> &'static str {
+    match result.validated_status {
+        Some(ValidatedStatus::Pass) => "PASS",
+        Some(ValidatedStatus::Fail) => "FAIL",
+        None => "ANALYSIS_UNAVAILABLE",
+    }
+}
+
+fn decision_source_label(source: Option<DecisionSource>) -> &'static str {
+    match source {
+        Some(DecisionSource::TargetModel) => "TARGET_MODEL",
+        None => "-",
+    }
+}
+
+fn result_reason(result: &AnalysisTestResult) -> String {
+    match result_status(result) {
+        "PASS" => "-".into(),
+        "FAIL" => result
+            .failure_cause
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("模型未提供 failureCause")
+            .into(),
+        _ => {
+            let limitation = result
+                .limitations
+                .iter()
+                .find(|value| !value.trim().is_empty())
+                .map(String::as_str)
+                .unwrap_or("未返回分析结果");
+            format!("分析不可用：{limitation}")
+        }
+    }
+}
+
+fn result_for<'a>(
+    artifact: &'a SelfAnalysisArtifact,
+    test_id: &str,
+) -> Option<&'a AnalysisTestResult> {
+    artifact
+        .tests
+        .iter()
+        .find(|result| result.test_id == test_id)
+}
+
+fn missing_result_reason(test: &crate::catalog::TestCase) -> String {
+    format!("{} {}：分析不可用（结果缺失）", test.id, test.name)
+}
+
+fn non_pass_reason(test: &crate::catalog::TestCase, result: Option<&AnalysisTestResult>) -> String {
+    match result {
+        Some(result) => format!("{} {}：{}", test.id, test.name, result_reason(result)),
+        None => missing_result_reason(test),
+    }
+}
+
+fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
+    let mut output = String::new();
+    writeln!(output, "# 模型能力检测结果").unwrap();
+    output.push('\n');
+    output.push_str("## 运行信息\n\n");
+    output.push_str("| 项目 | 值 |\n|---|---|\n");
+    writeln!(
+        output,
+        "| 生成时间 | {} |",
+        markdown_cell(&artifact.generated_at)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| 请求模型 | {} |",
+        markdown_cell(&artifact.target.requested_model)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| 检测协议 | {} |",
+        markdown_cell(&artifact.target.detected_protocol)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| 分析来源 | {} |",
+        markdown_cell(artifact.provenance)
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| 检测项总数 | {}（PASS {} / FAIL {} / 不可用 {}） |",
+        artifact.tests.len(),
+        artifact.counts.pass,
+        artifact.counts.fail,
+        artifact.counts.unavailable
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "| Endpoint | {} |",
+        markdown_cell(&artifact.target.endpoint)
+    )
+    .unwrap();
+    output.push('\n');
+
+    render_category_summary(artifact, &mut output);
+    render_test_table(artifact, &mut output);
+    render_non_pass_details(artifact, &mut output);
+    output
+}
+
+fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    output.push_str("## 大分类结论\n\n");
+    output.push_str("| 能力分类 | 结论 | 具体原因 |\n|---|---|---|\n");
+    let mut categories = Vec::new();
+    for test in crate::catalog::CATALOG {
+        if !categories.contains(&test.category) {
+            categories.push(test.category);
+        }
+    }
+    for category in categories {
+        let members: Vec<_> = crate::catalog::CATALOG
+            .iter()
+            .filter(|test| test.category == category)
+            .collect();
+        let non_pass: Vec<_> = members
+            .iter()
+            .filter(|test| {
+                result_for(artifact, test.id)
+                    .map(|result| result_status(result) != "PASS")
+                    .unwrap_or(true)
+            })
+            .collect();
+        let status = if non_pass.is_empty() {
+            "满足"
+        } else {
+            "不满足"
+        };
+        let reason = if non_pass.is_empty() {
+            format!("{}/{} 项检测通过", members.len(), members.len())
+        } else {
+            non_pass
+                .iter()
+                .map(|test| non_pass_reason(test, result_for(artifact, test.id)))
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        writeln!(
+            output,
+            "| {} | {} | {} |",
+            markdown_cell(category),
+            status,
+            markdown_cell(&reason)
+        )
+        .unwrap();
+    }
+    output.push('\n');
+}
+
+fn render_test_table(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    output.push_str("## 46 项检测明细\n\n");
+    output.push_str("| 编号 | 分类 | 检测项 | 结果 | 原因 |\n|---|---|---|---|---|\n");
+    for test in crate::catalog::CATALOG {
+        let result = result_for(artifact, test.id);
+        let status = result.map(result_status).unwrap_or("ANALYSIS_UNAVAILABLE");
+        let reason = result
+            .map(result_reason)
+            .unwrap_or_else(|| "分析不可用（结果缺失）".into());
+        writeln!(
+            output,
+            "| {} | {} | {} | {} | {} |",
+            markdown_cell(test.id),
+            markdown_cell(test.category),
+            markdown_cell(test.name),
+            status,
+            markdown_cell(&reason)
+        )
+        .unwrap();
+    }
+    output.push('\n');
+}
+
+fn render_non_pass_details(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    let details: Vec<_> = crate::catalog::CATALOG
+        .iter()
+        .filter_map(|test| {
+            result_for(artifact, test.id)
+                .filter(|result| result_status(result) != "PASS")
+                .map(|result| (test, result))
+        })
+        .collect();
+    if details.is_empty() {
+        return;
+    }
+    output.push_str("## 非通过项详情\n\n");
+    for (test, result) in details {
+        writeln!(
+            output,
+            "### {} {}\n\n- 分类：{}\n- 结果：`{}`\n- 决策来源：`{}`\n- 原因：{}\n",
+            test.id,
+            markdown_cell(test.name),
+            markdown_cell(test.category),
+            result_status(result),
+            decision_source_label(result.decision_source),
+            markdown_cell(&result_reason(result))
+        )
+        .unwrap();
+        if !result.observations.is_empty() {
+            output.push_str("**模型观察**\n\n");
+            for observation in &result.observations {
+                writeln!(output, "- {}", markdown_cell(observation)).unwrap();
+            }
+            output.push('\n');
+        }
+        if !result.evidence_refs.is_empty() {
+            writeln!(
+                output,
+                "**证据引用**：{}\n",
+                result
+                    .evidence_refs
+                    .iter()
+                    .map(|reference| format!("`{}`", markdown_cell(reference)))
+                    .collect::<Vec<_>>()
+                    .join("、")
+            )
+            .unwrap();
+        }
+        if !result.limitations.is_empty() {
+            output.push_str("**限制说明**\n\n");
+            for limitation in &result.limitations {
+                writeln!(output, "- {}", markdown_cell(limitation)).unwrap();
+            }
+            output.push('\n');
+        }
+        if !result.validation_notes.is_empty() {
+            output.push_str("**校验说明**\n\n");
+            for note in &result.validation_notes {
+                writeln!(output, "- {}", markdown_cell(note)).unwrap();
+            }
+            output.push('\n');
+        }
+    }
+}
+
+pub(crate) fn collision_safe_output_path(log_path: &Path, extension: &str) -> PathBuf {
     let stem = log_path
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("model-doctor");
-    let initial = log_path.with_file_name(format!("{stem}-self-analysis.json"));
+    let initial = log_path.with_file_name(format!("{stem}-self-analysis.{extension}"));
     if !initial.exists() {
         return initial;
     }
@@ -418,7 +679,8 @@ pub(crate) fn collision_safe_output_path(log_path: &Path) -> PathBuf {
         } else {
             format!("{timestamp}-{sequence}")
         };
-        let candidate = log_path.with_file_name(format!("{stem}-self-analysis-{suffix}.json"));
+        let candidate =
+            log_path.with_file_name(format!("{stem}-self-analysis-{suffix}.{extension}"));
         if !candidate.exists() {
             return candidate;
         }
@@ -432,6 +694,14 @@ fn write_artifact(
 ) -> Result<PathBuf, AnalysisError> {
     let mut bytes = serde_json::to_vec_pretty(artifact)?;
     bytes.push(b'\n');
+    write_output(log_path, "json", &bytes)
+}
+
+fn write_markdown_artifact(log_path: &Path, markdown: &[u8]) -> Result<PathBuf, AnalysisError> {
+    write_output(log_path, "md", markdown)
+}
+
+fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBuf, AnalysisError> {
     let directory = log_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(directory)?;
     let temp_path = loop {
@@ -442,7 +712,7 @@ fn write_artifact(
         ));
         match create_new_private_file(&candidate) {
             Ok(mut file) => {
-                write_complete(&mut file, &bytes)?;
+                write_complete(&mut file, bytes)?;
                 break candidate;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -451,7 +721,7 @@ fn write_artifact(
     };
 
     loop {
-        let destination = collision_safe_output_path(log_path);
+        let destination = collision_safe_output_path(log_path, extension);
         match std::fs::hard_link(&temp_path, &destination) {
             Ok(()) => {
                 std::fs::remove_file(&temp_path)?;
@@ -548,6 +818,10 @@ mod tests {
         let output = std::fs::read_to_string(&outcome.path).unwrap();
         assert!(output.contains("llm-capability-doctor.self-analysis.v2"));
         assert!(!output.contains("secret-key"));
+        let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
+        assert!(markdown.contains("## 大分类结论"));
+        assert_eq!(markdown.matches("| PASS |").count(), 46);
+        assert!(!markdown.contains("secret-key"));
         drop(directory);
     }
 
@@ -613,16 +887,19 @@ mod tests {
             output.contains("\"evidenceSchemaVersion\": \"llm-capability-doctor.evidence.v4\"")
         );
         assert!(output.contains("\"analysisState\": \"ANALYSIS_UNAVAILABLE\""));
+        let markdown = std::fs::read_to_string(outcome.markdown_path).unwrap();
+        assert!(markdown.contains("| 接口与协议 | 不满足 |"));
+        assert!(markdown.contains("分析不可用"));
     }
 
     #[test]
     fn output_collision_never_overwrites_existing_analysis() {
         let directory = tempfile::tempdir().unwrap();
         let log = directory.path().join("doctor.log");
-        let first = collision_safe_output_path(&log);
+        let first = collision_safe_output_path(&log, "json");
         std::fs::write(&first, "existing").unwrap();
 
-        let second = collision_safe_output_path(&log);
+        let second = collision_safe_output_path(&log, "json");
 
         assert_ne!(first, second);
         assert_eq!(std::fs::read_to_string(first).unwrap(), "existing");
@@ -644,12 +921,10 @@ mod tests {
             .await
             .unwrap();
 
-        let mode = std::fs::metadata(outcome.path)
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
+        for path in [outcome.path, outcome.markdown_path] {
+            let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     #[tokio::test]
@@ -665,9 +940,11 @@ mod tests {
             .await
             .unwrap();
 
-        let output = std::fs::read_to_string(outcome.path).unwrap();
-        assert!(!output.contains("secret-key"));
-        assert!(output.contains("[REDACTED]-doctor.log"));
+        let json = std::fs::read_to_string(&outcome.path).unwrap();
+        let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
+        assert!(!json.contains("secret-key"));
+        assert!(!markdown.contains("secret-key"));
+        assert!(json.contains("[REDACTED]-doctor.log"));
     }
 
     #[test]
@@ -686,6 +963,155 @@ mod tests {
         assert!(!endpoint.contains("us-east-1"));
         assert!(endpoint.contains("X-Amz-Signature=%5BREDACTED%5D"));
         assert!(endpoint.contains("region=%5BREDACTED%5D"));
+    }
+
+    #[test]
+    fn markdown_all_pass_has_eight_satisfied_categories_and_46_rows() {
+        let artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+
+        let markdown = render_markdown(&artifact);
+
+        assert_eq!(markdown.matches("| 满足 |").count(), 8);
+        assert_eq!(markdown.matches("| PASS |").count(), 46);
+        assert!(!markdown.contains("## 非通过项详情"));
+    }
+
+    #[test]
+    fn markdown_fail_explains_each_non_pass_item() {
+        let mut results = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        let failed = results
+            .iter_mut()
+            .find(|result| result.test_id == "046")
+            .unwrap();
+        failed.candidate_status = Some(CandidateStatus::Fail);
+        failed.validated_status = Some(ValidatedStatus::Fail);
+        failed.failure_cause = Some("tool envelope incomplete".into());
+
+        let markdown = render_markdown(&markdown_fixture(results));
+
+        assert!(markdown.contains("| 工具调用 | 不满足 |"));
+        assert!(markdown.contains("046 官方工具协议结构合规：tool envelope incomplete"));
+        assert!(markdown.contains("### 046 官方工具协议结构合规"));
+        assert!(markdown.contains("tool envelope incomplete"));
+    }
+
+    #[test]
+    fn markdown_unavailable_is_not_presented_as_model_fail() {
+        let mut results = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        let unavailable = results
+            .iter_mut()
+            .find(|result| result.test_id == "049")
+            .unwrap();
+        unavailable.analysis_state = AnalysisState::AnalysisUnavailable;
+        unavailable.candidate_status = None;
+        unavailable.validated_status = None;
+        unavailable.decision_source = None;
+        unavailable.limitations = vec!["offline".into()];
+
+        let markdown = render_markdown(&markdown_fixture(results));
+
+        assert!(markdown.contains("| 工具调用 | 不满足 |"));
+        assert!(markdown.contains("049 工具失败恢复：分析不可用：offline"));
+        assert!(markdown.contains("| ANALYSIS_UNAVAILABLE |"));
+        assert!(markdown.contains("分析不可用：offline"));
+        assert!(!markdown.contains("049 工具失败恢复：模型失败"));
+    }
+
+    #[test]
+    fn markdown_escapes_table_content() {
+        let mut result =
+            available_markdown_result("046", CandidateStatus::Fail, Some("first | line\nsecond"));
+        result.observations = vec!["left | right\nnext".into()];
+
+        let markdown = render_markdown(&markdown_fixture(vec![result]));
+
+        assert!(markdown.contains("first \\| line second"));
+        assert!(markdown.contains("left \\| right next"));
+        assert!(!markdown.contains("first | line\nsecond"));
+    }
+
+    #[test]
+    fn markdown_and_json_use_distinct_collision_safe_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("doctor.log");
+        let json = collision_safe_output_path(&log, "json");
+        let markdown = collision_safe_output_path(&log, "md");
+        std::fs::write(&json, "existing json").unwrap();
+        std::fs::write(&markdown, "existing markdown").unwrap();
+
+        let next_json = collision_safe_output_path(&log, "json");
+        let next_markdown = collision_safe_output_path(&log, "md");
+
+        assert_ne!(json, next_json);
+        assert_ne!(markdown, next_markdown);
+        assert_eq!(std::fs::read_to_string(json).unwrap(), "existing json");
+        assert_eq!(
+            std::fs::read_to_string(markdown).unwrap(),
+            "existing markdown"
+        );
+    }
+
+    fn markdown_fixture(tests: Vec<AnalysisTestResult>) -> SelfAnalysisArtifact {
+        SelfAnalysisArtifact {
+            schema_version: SELF_ANALYSIS_SCHEMA_VERSION,
+            collector_version: "0.12.0".into(),
+            evidence_schema_version: "llm-capability-doctor.evidence.v4".into(),
+            generated_at: "2026-08-24T00:00:00+08:00".into(),
+            source: EvidenceSource {
+                path: PathBuf::from("doctor.log"),
+                file_name: "doctor.log".into(),
+                size_bytes: 0,
+                sha256: "fixture-sha256".into(),
+            },
+            target: AnalysisTargetMetadata {
+                endpoint: "https://example.test/v1/chat/completions".into(),
+                requested_model: "test-model".into(),
+                detected_protocol: "openai-chat".into(),
+                authentication_mode: "bearer".into(),
+            },
+            prompt_version: PROMPT_VERSION,
+            provenance: SELF_ANALYSIS_PROVENANCE,
+            tests,
+            batches: Vec::new(),
+            counts: AnalysisCounts {
+                pass: 0,
+                fail: 0,
+                unavailable: 0,
+            },
+        }
+    }
+
+    fn available_markdown_result(
+        test_id: &str,
+        status: CandidateStatus,
+        failure_cause: Option<&str>,
+    ) -> AnalysisTestResult {
+        AnalysisTestResult {
+            test_id: test_id.into(),
+            analysis_state: AnalysisState::Available,
+            candidate_status: Some(status),
+            validated_status: Some(match status {
+                CandidateStatus::Pass => ValidatedStatus::Pass,
+                CandidateStatus::Fail => ValidatedStatus::Fail,
+            }),
+            decision_source: Some(DecisionSource::TargetModel),
+            observations: vec!["observable fact".into()],
+            failure_cause: failure_cause.map(str::to_owned),
+            evidence_refs: vec![format!("request:test-{test_id}")],
+            limitations: Vec::new(),
+            validation_notes: Vec::new(),
+        }
     }
 
     async fn fixture() -> (

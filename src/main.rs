@@ -106,6 +106,7 @@ async fn main() -> ExitCode {
 
 fn print_analysis_outcome(outcome: &AnalysisOutcome) {
     println!("分析文件：{}", outcome.path.display());
+    println!("Markdown 结果文件：{}", outcome.markdown_path.display());
     println!(
         "分析结果：可用 {}（PASS {} / FAIL {}），不可用 {}",
         outcome.available_count, outcome.pass_count, outcome.fail_count, outcome.unavailable_count
