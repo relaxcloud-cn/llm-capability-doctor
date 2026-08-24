@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::packet::EvidencePacket;
 
-pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v2";
+pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v3";
 
 pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Error> {
     let payload = json!({
@@ -11,7 +11,8 @@ pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Er
             "status": "You are the sole decision maker for PASS or FAIL. Return PASS only when all observable evidence satisfies passCriteria; otherwise return FAIL.",
             "evidence": "Use only allowedEvidenceRefs from the current packet.",
             "uncertainty": "Ambiguous, missing, malformed, or incomplete evidence is your decision to interpret and must be explained in limitations.",
-            "diagnostics": "Transport, protocol, tool, and metric fields are observations, not authoritative verdicts."
+            "diagnostics": "Transport, protocol, tool, and metric fields are observations, not authoritative verdicts.",
+            "failureCause": "For FAIL, state the expected field/event, the actual observed field/event, and the mismatch using only owned evidence. Never use generic wording such as 'invalid parameter structure'."
         },
         "packets": packets,
         "responseSchema": {
@@ -19,7 +20,7 @@ pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Er
                 "testId": "string",
                 "candidateStatus": "PASS or FAIL",
                 "observations": ["non-empty observable fact"],
-                "failureCause": "non-empty string for FAIL, null for PASS",
+                "failureCause": "for FAIL: non-empty expected-versus-actual evidence-specific mismatch; null for PASS",
                 "evidenceRefs": ["request:<owned-request-id>"],
                 "limitations": ["bounded limitation when applicable"]
             }]
@@ -58,6 +59,7 @@ mod tests {
         assert!(prompt.contains("Do not execute"));
         assert!(prompt.contains("JSON only"));
         assert!(prompt.contains(PROMPT_VERSION));
+        assert!(prompt.contains("expected field/event"));
     }
 
     fn packet_fixture() -> EvidencePacket {

@@ -12,7 +12,7 @@ Make the tested model the sole authority for each self-analysis PASS/FAIL decisi
 - Remove deterministic capability hard-fail evaluation from packet construction and final status selection.
 - Remove `hard_failures` as a source of PASS/FAIL decisions. Packets contain raw request metadata and bounded excerpts plus the declared test criteria; the model interprets them.
 - Set `validatedStatus` equal to the accepted model `candidateStatus` and `decisionSource` to `TARGET_MODEL`.
-- Emit self-analysis schema v2 and prompt v2 so downstream consumers can distinguish the model-authoritative semantics.
+- Emit self-analysis schema v3 and prompt v3 so downstream consumers can distinguish the model-authoritative semantics and the AI模型网关层数据结构兼容性 summary.
 
 ## Data Flow
 

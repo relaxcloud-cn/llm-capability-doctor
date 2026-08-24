@@ -23,9 +23,11 @@ use crate::private_file::create_new_private_file;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
-pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v2";
+pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v3";
 pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
 const MAX_ANALYSIS_TRANSPORT_ATTEMPTS: usize = 3;
+const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
+    ["002", "004", "005", "006", "040", "041", "043", "047"];
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -106,6 +108,7 @@ struct SelfAnalysisArtifact {
     tests: Vec<AnalysisTestResult>,
     batches: Vec<BatchResult>,
     counts: AnalysisCounts,
+    gateway_compatibility: GatewayCompatibility,
     #[serde(skip)]
     concurrency_waves: Vec<ConcurrencyWave>,
 }
@@ -155,6 +158,21 @@ struct AnalysisCounts {
     pass: usize,
     fail: usize,
     unavailable: usize,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GatewayCompatibilityStatus {
+    Pass,
+    Fail,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GatewayCompatibility {
+    status: GatewayCompatibilityStatus,
+    statement: String,
+    reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +282,8 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
     let collector_version = evidence.run["script_version"].clone();
     let evidence_schema_version = evidence.run["log_schema"].clone();
     let concurrency_waves = summarize_concurrency(&evidence);
+    let detected_protocol = settings.protocol.to_string();
+    let gateway_compatibility = derive_gateway_compatibility(&detected_protocol, &tests);
     let mut source = evidence.source;
     source.path = PathBuf::from(redactor.redact_text(&source.path.to_string_lossy()));
     source.file_name = redactor.redact_text(&source.file_name);
@@ -276,7 +296,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
         target: AnalysisTargetMetadata {
             endpoint: redact_endpoint_metadata(&settings.url, &redactor),
             requested_model: redactor.redact_text(&settings.model),
-            detected_protocol: settings.protocol.to_string(),
+            detected_protocol,
             authentication_mode: settings.auth_mode.to_string(),
         },
         prompt_version: PROMPT_VERSION,
@@ -284,6 +304,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
         tests,
         batches: batch_results,
         counts,
+        gateway_compatibility,
         concurrency_waves,
     };
     let pass_count = artifact.counts.pass;
@@ -641,6 +662,103 @@ fn non_pass_reason(test: &crate::catalog::TestCase, result: Option<&AnalysisTest
     }
 }
 
+fn derive_gateway_compatibility(
+    detected_protocol: &str,
+    tests: &[AnalysisTestResult],
+) -> GatewayCompatibility {
+    let mut reasons = Vec::new();
+    if !matches!(
+        detected_protocol,
+        "openai_chat" | "openai_responses" | "anthropic_messages" | "gemini_generate_content"
+    ) {
+        reasons.push(format!(
+            "当前接口识别为 {detected_protocol}，不属于 AI模型网关层支持的数据结构协议。"
+        ));
+    }
+    for test_id in GATEWAY_COMPATIBILITY_TEST_IDS {
+        let Some(result) = result_for_tests(tests, test_id) else {
+            reasons.push(format!(
+                "{}未能完成兼容性判断：本轮未生成该项分析结果。",
+                gateway_check_name(test_id)
+            ));
+            continue;
+        };
+        match result_status(result) {
+            "PASS" => {}
+            "FAIL" => reasons.push(format!(
+                "{}：{}",
+                gateway_check_name(test_id),
+                concrete_failure_reason(result)
+            )),
+            _ => reasons.push(format!(
+                "{}未能完成兼容性判断：{}",
+                gateway_check_name(test_id),
+                unavailable_reason(result)
+            )),
+        }
+    }
+    if reasons.is_empty() {
+        GatewayCompatibility {
+            status: GatewayCompatibilityStatus::Pass,
+            statement: "本轮检测表明，该模型接口的同步响应、流式响应、流结束信号、工具调用参数及连续工具调用的结果关联，均符合 AI模型网关层所需的数据结构。".into(),
+            reasons,
+        }
+    } else {
+        GatewayCompatibility {
+            status: GatewayCompatibilityStatus::Fail,
+            statement: "本轮检测发现 AI模型网关层所需的数据结构存在未通过项。".into(),
+            reasons,
+        }
+    }
+}
+
+fn result_for_tests<'a>(
+    tests: &'a [AnalysisTestResult],
+    test_id: &str,
+) -> Option<&'a AnalysisTestResult> {
+    tests.iter().find(|result| result.test_id == test_id)
+}
+
+fn gateway_check_name(test_id: &str) -> &'static str {
+    match test_id {
+        "002" => "接口响应结构",
+        "004" => "同步响应",
+        "005" => "流式响应",
+        "006" => "流结束信号",
+        "040" => "单工具调用",
+        "041" => "工具选择",
+        "043" => "工具调用参数校验",
+        "047" => "连续工具调用",
+        _ => "数据结构检查",
+    }
+}
+
+fn concrete_failure_reason(result: &AnalysisTestResult) -> String {
+    result
+        .failure_cause
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            (!result.observations.is_empty()).then(|| {
+                format!(
+                    "模型未提供具体失败原因；可观察到{}。",
+                    result.observations.join("；")
+                )
+            })
+        })
+        .unwrap_or_else(|| "模型未提供可用于定位的失败原因。".into())
+}
+
+fn unavailable_reason(result: &AnalysisTestResult) -> String {
+    result
+        .limitations
+        .iter()
+        .find(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| "未返回分析结果。".into())
+}
+
 fn verified_category_conclusion(category: &str) -> &'static str {
     match category {
         "接口与协议" => {
@@ -718,11 +836,31 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     .unwrap();
     output.push('\n');
 
+    render_gateway_compatibility(&artifact.gateway_compatibility, &mut output);
     render_category_summary(artifact, &mut output);
     render_concurrency_summary(artifact, &mut output);
     render_test_table(artifact, &mut output);
     render_non_pass_details(artifact, &mut output);
     output
+}
+
+fn render_gateway_compatibility(compatibility: &GatewayCompatibility, output: &mut String) {
+    let status = match compatibility.status {
+        GatewayCompatibilityStatus::Pass => "通过",
+        GatewayCompatibilityStatus::Fail => "不通过",
+    };
+    output.push_str("## 总体结论\n\n");
+    writeln!(output, "**AI模型网关层数据结构兼容性：{status}**\n").unwrap();
+    writeln!(output, "{}", markdown_cell(&compatibility.statement)).unwrap();
+    if compatibility.reasons.is_empty() {
+        output.push('\n');
+        return;
+    }
+    output.push_str("\n原因：\n\n");
+    for reason in &compatibility.reasons {
+        writeln!(output, "- {}", markdown_cell(reason)).unwrap();
+    }
+    output.push('\n');
 }
 
 fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
@@ -1061,7 +1199,9 @@ mod tests {
         assert_eq!(client.call_count(), batches.len() + 1);
         assert!(client.prompts()[1].contains("missing reviews"));
         let output = std::fs::read_to_string(&outcome.path).unwrap();
-        assert!(output.contains("llm-capability-doctor.self-analysis.v2"));
+        assert!(output.contains("llm-capability-doctor.self-analysis.v3"));
+        assert!(output.contains("\"gatewayCompatibility\""));
+        assert!(!output.contains("openCodexCompatibility"));
         assert!(!output.contains("secret-key"));
         let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
         assert!(markdown.contains("## 大分类结论"));
@@ -1264,6 +1404,78 @@ mod tests {
     }
 
     #[test]
+    fn markdown_gateway_compatibility_passes_without_internal_test_ids() {
+        let artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+
+        let markdown = render_markdown(&artifact);
+
+        assert!(markdown.contains("## 总体结论"));
+        assert!(markdown.contains("**AI模型网关层数据结构兼容性：通过**"));
+        assert!(markdown.contains(
+            "该模型接口的同步响应、流式响应、流结束信号、工具调用参数及连续工具调用的结果关联，均符合 AI模型网关层所需的数据结构。"
+        ));
+        assert!(!markdown.contains("OpenCodex"));
+        assert!(!markdown.contains("002、004、005、006"));
+    }
+
+    #[test]
+    fn markdown_gateway_compatibility_explains_actual_failure_without_test_id() {
+        let mut tests = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        let result = tests
+            .iter_mut()
+            .find(|result| result.test_id == "043")
+            .unwrap();
+        result.candidate_status = Some(CandidateStatus::Fail);
+        result.validated_status = Some(ValidatedStatus::Fail);
+        result.failure_cause = Some(
+            "期望 get_weather 同时包含 city、unit、days 三个字段；实际调用缺少 days 字段。".into(),
+        );
+
+        let markdown = render_markdown(&markdown_fixture(tests));
+        let overall = markdown.split("## 大分类结论").next().unwrap();
+
+        assert!(overall.contains("**AI模型网关层数据结构兼容性：不通过**"));
+        assert!(overall.contains("工具调用参数校验：期望 get_weather 同时包含 city、unit、days 三个字段；实际调用缺少 days 字段。"));
+        assert!(!overall.contains("043 必填参数与类型枚举"));
+    }
+
+    #[test]
+    fn markdown_gateway_compatibility_explains_analysis_unavailable() {
+        let mut tests = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        let result = tests
+            .iter_mut()
+            .find(|result| result.test_id == "041")
+            .unwrap();
+        result.analysis_state = AnalysisState::AnalysisUnavailable;
+        result.candidate_status = None;
+        result.validated_status = None;
+        result.decision_source = None;
+        result.limitations = vec!["自分析请求在 300 秒内超时，重试后未返回结果。".into()];
+
+        let markdown = render_markdown(&markdown_fixture(tests));
+        let overall = markdown.split("## 大分类结论").next().unwrap();
+
+        assert!(overall.contains("**AI模型网关层数据结构兼容性：不通过**"));
+        assert!(
+            overall.contains(
+                "工具选择未能完成兼容性判断：自分析请求在 300 秒内超时，重试后未返回结果。"
+            )
+        );
+        assert!(!overall.contains("041 工具选择"));
+    }
+
+    #[test]
     fn markdown_category_conclusions_describe_verified_capabilities() {
         let artifact = markdown_fixture(
             crate::catalog::CATALOG
@@ -1431,6 +1643,7 @@ mod tests {
     }
 
     fn markdown_fixture(tests: Vec<AnalysisTestResult>) -> SelfAnalysisArtifact {
+        let gateway_compatibility = derive_gateway_compatibility("openai_chat", &tests);
         SelfAnalysisArtifact {
             schema_version: SELF_ANALYSIS_SCHEMA_VERSION,
             collector_version: "0.12.0".into(),
@@ -1457,6 +1670,7 @@ mod tests {
                 fail: 0,
                 unavailable: 0,
             },
+            gateway_compatibility,
             concurrency_waves: Vec::new(),
         }
     }
