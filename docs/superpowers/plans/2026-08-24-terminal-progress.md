@@ -226,6 +226,6 @@ Run `cargo fmt --check`, `git diff --check`, `cargo test --all-targets`, `cargo 
 
 Confirm the diff has no ANSI escape construction, no credentials/evidence-body printing, preserves 46 catalog manifests and 057's four waves, and preserves silent test helper behavior.
 
-- [ ] **Step 3: Commit and build macOS ARM64 CLI**
+- [x] **Step 3: Commit and build macOS ARM64 CLI**
 
 Force-add the ignored plan file; commit with `feat: improve terminal progress output`. Run `cargo build --release --target aarch64-apple-darwin`, copy the binary to `dist/model-capability-doctor-v0.12.0-macos-arm64`, then verify `file`, SHA-256, and `--help`.
