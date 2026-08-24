@@ -40,6 +40,20 @@ pub fn tool_prompt(id: &str) -> Option<&'static str> {
     }
 }
 
+pub(crate) fn expected_weather_call_name(protocol: Protocol, check_id: &str) -> &'static str {
+    if matches!(check_id, "041" | "047") {
+        match protocol {
+            Protocol::OpenAiResponses => "doctor/get_weather",
+            Protocol::OpenAiChat
+            | Protocol::AnthropicMessages
+            | Protocol::GeminiGenerateContent => "doctor__get_weather",
+            Protocol::OllamaChat | Protocol::Unknown => "get_weather",
+        }
+    } else {
+        "get_weather"
+    }
+}
+
 pub fn tool_request(protocol: Protocol, model: &str, id: &str, prompt: &str) -> RequestSpec {
     let tools = tool_definitions(protocol, id);
     let parallel = id == "045";
@@ -1815,17 +1829,7 @@ fn tool_definitions(protocol: Protocol, id: &str) -> Vec<Value> {
             )]
         })]
     } else {
-        let name = if matches!(id, "041" | "047")
-            && matches!(
-                protocol,
-                Protocol::OpenAiChat
-                    | Protocol::AnthropicMessages
-                    | Protocol::GeminiGenerateContent
-            ) {
-            "doctor__get_weather"
-        } else {
-            "get_weather"
-        };
+        let name = expected_weather_call_name(protocol, id);
         vec![definition(
             protocol,
             name,

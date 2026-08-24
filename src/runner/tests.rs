@@ -14,6 +14,42 @@ use crate::test_support::{
     RawTcpServer, ScriptedAssistantTurn, ServerAction, encode_official_stream,
 };
 
+#[test]
+fn run_outcome_exposes_detected_connection_metadata() {
+    let outcome = RunOutcome {
+        duration: Duration::ZERO,
+        request_count: 46,
+        manifest_count: 46,
+        log_path: std::path::PathBuf::from("doctor.log"),
+        detected_protocol: Protocol::OpenAiChat,
+        detected_auth_mode: AuthMode::Bearer,
+    };
+
+    assert_eq!(outcome.detected_protocol, Protocol::OpenAiChat);
+    assert_eq!(outcome.detected_auth_mode, AuthMode::Bearer);
+}
+
+#[test]
+fn collection_progress_includes_category_purpose_and_concurrency_wave() {
+    let context = crate::catalog::CATALOG
+        .iter()
+        .find(|test| test.id == "014")
+        .unwrap();
+    let concurrency = crate::catalog::CATALOG
+        .iter()
+        .find(|test| test.id == "057")
+        .unwrap();
+
+    assert_eq!(
+        collection_progress_line(14, 46, context, None),
+        "[采集 14/46] 上下文能力 | 测试模型是否支持 8K 上下文长度"
+    );
+    assert_eq!(
+        collection_progress_line(44, 46, concurrency, Some((4, 4, 32))),
+        "[采集 44/46 | 并发 4/4] 性能与稳定性 | 测试模型在 32 并发下能否正常响应"
+    );
+}
+
 #[tokio::test]
 async fn ordinary_stream_request_records_official_terminal() {
     let body = openai_chat_final_stream("MODEL_DOCTOR_CASE_006_OK", true);
@@ -217,7 +253,7 @@ async fn official_tool_loop_matrix_completes_all_protocols_and_checks() {
         Protocol::OllamaChat,
     ] {
         for check_id in ["046", "047", "048", "049"] {
-            let turns = successful_turns(check_id);
+            let turns = successful_turns(protocol, check_id);
             let scripts = turns
                 .iter()
                 .map(|turn| {
@@ -922,7 +958,7 @@ async fn unknown_protocol_reuses_probe_evidence_without_sending_tool_seed() {
 
 #[tokio::test]
 async fn execute_check_manifests_every_completed_tool_turn_in_order() {
-    let turns = successful_turns("047");
+    let turns = successful_turns(Protocol::OpenAiChat, "047");
     let scripts = turns
         .iter()
         .map(|turn| {
@@ -975,11 +1011,12 @@ async fn protocol_detection_requires_a_successful_http_status() {
     );
 }
 
-fn successful_turns(check_id: &str) -> Vec<ScriptedAssistantTurn> {
+fn successful_turns(protocol: Protocol, check_id: &str) -> Vec<ScriptedAssistantTurn> {
+    let weather_name = crate::protocol::tools::expected_weather_call_name(protocol, check_id);
     let mut turns = vec![scripted_tool(
         check_id,
         1,
-        "get_weather",
+        weather_name,
         serde_json::json!({"city": "Beijing"}),
     )];
     if check_id == "047" {
@@ -1113,6 +1150,7 @@ fn test_config(url: url::Url, log_path: &std::path::Path, timeout: Duration) -> 
         timeout: timeout.as_secs().max(1),
         list_tests: false,
         insecure: false,
+        self_analyze: false,
     }
     .into_config(None)
     .expect("test config")

@@ -1,5 +1,7 @@
 # Customer-Side Target-Model Self-Analysis
 
+> **Superseded:** The 2026-08-24 design makes the target model authoritative for PASS/FAIL and removes analysis-layer capability hard overrides. See `2026-08-24-model-authoritative-self-analysis-design.md`.
+
 ## Goal
 
 Add an optional second phase to the Rust CLI that asks the tested model to analyze the completed Model Doctor evidence while all evidence remains inside the customer's environment.

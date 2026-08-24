@@ -89,6 +89,12 @@ mod tests {
         };
 
         let plan = plan("057", &context).expect("057 plan");
+        assert_eq!(plan.groups.len(), 4);
+        for (group, expected_concurrency) in plan.groups.iter().zip([4, 8, 16, 32]) {
+            assert!(
+                matches!(group, RequestGroup::Concurrent(requests) if requests.len() == expected_concurrency)
+            );
+        }
         let requests = plan
             .groups
             .iter()

@@ -150,6 +150,36 @@ pub fn basic_request(protocol: Protocol, model: &str, prompt: &str, stream: bool
     RequestSpec { body, stream }
 }
 
+pub fn analysis_request(protocol: Protocol, model: &str, prompt: &str) -> RequestSpec {
+    let mut request = basic_request(protocol, model, prompt, false);
+    let object = request
+        .body
+        .as_object_mut()
+        .expect("analysis request bodies are JSON objects");
+    match protocol {
+        Protocol::OpenAiChat | Protocol::OpenAiResponses => {
+            object.insert("temperature".into(), Value::from(0));
+        }
+        Protocol::AnthropicMessages => {
+            object.insert("max_tokens".into(), Value::from(8192));
+            object.insert("temperature".into(), Value::from(0));
+        }
+        Protocol::GeminiGenerateContent => {
+            let generation = object
+                .get_mut("generationConfig")
+                .and_then(Value::as_object_mut)
+                .expect("Gemini requests always contain generationConfig");
+            generation.insert("maxOutputTokens".into(), Value::from(8192));
+            generation.insert("temperature".into(), Value::from(0));
+        }
+        Protocol::OllamaChat => {
+            object.insert("options".into(), json!({"temperature": 0}));
+        }
+        Protocol::Unknown => {}
+    }
+    request
+}
+
 pub fn multi_turn_request(protocol: Protocol, model: &str) -> RequestSpec {
     const FIRST: &str = "Current state is OLD_STATE.";
     const ACKNOWLEDGED: &str = "Acknowledged OLD_STATE.";
@@ -330,7 +360,42 @@ fn non_empty_string(value: Option<&Value>) -> bool {
 mod tests {
     use url::Url;
 
-    use super::{Protocol, normalize_request_url};
+    use super::{Protocol, analysis_request, normalize_request_url};
+
+    #[test]
+    fn analysis_requests_are_non_streaming_without_tools() {
+        for protocol in [
+            Protocol::OpenAiChat,
+            Protocol::OpenAiResponses,
+            Protocol::AnthropicMessages,
+            Protocol::GeminiGenerateContent,
+            Protocol::OllamaChat,
+        ] {
+            let request = analysis_request(protocol, "model", "analysis prompt");
+            let serialized = serde_json::to_string(&request.body).unwrap();
+
+            assert!(!request.stream, "{protocol:?}");
+            assert!(serialized.contains("analysis prompt"), "{protocol:?}");
+            assert!(!request.body.as_object().unwrap().contains_key("tools"));
+            match protocol {
+                Protocol::AnthropicMessages => {
+                    assert_eq!(request.body["max_tokens"], 8192);
+                    assert_eq!(request.body["temperature"], 0);
+                }
+                Protocol::GeminiGenerateContent => {
+                    assert_eq!(request.body["generationConfig"]["maxOutputTokens"], 8192);
+                    assert_eq!(request.body["generationConfig"]["temperature"], 0);
+                }
+                Protocol::OllamaChat => {
+                    assert_eq!(request.body["options"]["temperature"], 0);
+                }
+                Protocol::OpenAiChat | Protocol::OpenAiResponses => {
+                    assert_eq!(request.body["temperature"], 0);
+                }
+                Protocol::Unknown => unreachable!(),
+            }
+        }
+    }
 
     #[test]
     fn gemini_stream_url_is_normalized() {
