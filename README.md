@@ -36,7 +36,7 @@ New-Item -ItemType Directory -Force .\model-doctor-output | Out-Null; .\model-ca
 ./model-capability-doctor-v0.12.0-linux-x86_64 --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file './model-doctor-output/model-doctor.log' --self-analyze
 ```
 
-分析结果写入同目录的 `model-doctor-self-analysis.json`。日志和分析文件均保留在客户环境；CLI 不提供日志上传或独立分析地址。单批分析失败会在 JSON 中标记为 `ANALYSIS_UNAVAILABLE`，不会改变检测日志已成功生成的状态。
+分析结果写入同目录的 `model-doctor-self-analysis.json`。日志和分析文件均保留在客户环境；CLI 不提供日志上传或独立分析地址。每项 PASS/FAIL 由被测模型根据本地证据和通过标准决定，CLI 只校验返回结构与证据引用，不覆盖模型结论。单批分析失败会在 JSON 中标记为 `ANALYSIS_UNAVAILABLE`，不会改变检测日志已成功生成的状态。
 
 ## 查看本地结果
 

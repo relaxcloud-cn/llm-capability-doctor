@@ -21,7 +21,7 @@ use crate::private_file::create_new_private_file;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 
-pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v1";
+pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v2";
 pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -546,7 +546,7 @@ mod tests {
         assert_eq!(client.call_count(), batches.len() + 1);
         assert!(client.prompts()[1].contains("missing reviews"));
         let output = std::fs::read_to_string(&outcome.path).unwrap();
-        assert!(output.contains("llm-capability-doctor.self-analysis.v1"));
+        assert!(output.contains("llm-capability-doctor.self-analysis.v2"));
         assert!(!output.contains("secret-key"));
         drop(directory);
     }

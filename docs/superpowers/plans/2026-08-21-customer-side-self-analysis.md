@@ -1,5 +1,7 @@
 # Customer-Side Target-Model Self-Analysis Implementation Plan
 
+> **Superseded:** The 2026-08-24 design and implementation use model-authoritative PASS/FAIL decisions and no analysis-layer hard-failure override.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an opt-in Rust CLI phase that sends bounded evidence packets to the tested model through the same configured endpoint and writes validated self-analysis JSON without moving the audit log outside the customer environment.

@@ -39,7 +39,6 @@ pub enum ValidatedStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DecisionSource {
     TargetModel,
-    RuleEngine,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,7 +96,7 @@ pub fn validate_candidates(
             let candidate = candidates
                 .remove(&packet.test_id)
                 .expect("candidate completeness checked above");
-            apply_hard_failures(packet, candidate)
+            accept_candidate(candidate)
         })
         .collect())
 }
@@ -171,45 +170,28 @@ fn validate_candidate(
     }
 }
 
-fn apply_hard_failures(packet: &EvidencePacket, candidate: CandidateReview) -> ValidatedReview {
-    let has_hard_failure = !packet.deterministic_facts.hard_failures.is_empty();
-    let mut validation_notes = packet.deterministic_facts.hard_failures.clone();
-    if has_hard_failure && candidate.candidate_status == CandidateStatus::Pass {
-        validation_notes.push("rule engine overrode target-model PASS".into());
-    }
-    let failure_cause = if has_hard_failure {
-        Some(packet.deterministic_facts.hard_failures.join("; "))
-    } else {
-        candidate.failure_cause
+fn accept_candidate(candidate: CandidateReview) -> ValidatedReview {
+    let validated_status = match candidate.candidate_status {
+        CandidateStatus::Pass => ValidatedStatus::Pass,
+        CandidateStatus::Fail => ValidatedStatus::Fail,
     };
     ValidatedReview {
         test_id: candidate.test_id,
         candidate_status: candidate.candidate_status,
-        validated_status: if has_hard_failure {
-            ValidatedStatus::Fail
-        } else {
-            match candidate.candidate_status {
-                CandidateStatus::Pass => ValidatedStatus::Pass,
-                CandidateStatus::Fail => ValidatedStatus::Fail,
-            }
-        },
-        decision_source: if has_hard_failure {
-            DecisionSource::RuleEngine
-        } else {
-            DecisionSource::TargetModel
-        },
+        validated_status,
+        decision_source: DecisionSource::TargetModel,
         observations: candidate.observations,
-        failure_cause,
+        failure_cause: candidate.failure_cause,
         evidence_refs: candidate.evidence_refs,
         limitations: candidate.limitations,
-        validation_notes,
+        validation_notes: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::analysis::packet::{DeterministicFacts, EvidencePacket};
+    use crate::analysis::packet::EvidencePacket;
 
     #[test]
     fn rejects_candidate_with_foreign_reference() {
@@ -232,9 +214,8 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_failure_overrides_self_reported_pass() {
-        let mut packet = packet_fixture();
-        packet.deterministic_facts.hard_failures = vec!["stream is incomplete".into()];
+    fn target_model_pass_remains_authoritative() {
+        let packet = packet_fixture();
         let candidate = candidate_fixture(CandidateStatus::Pass, &["request:test-006"]);
 
         let validated = validate_candidates(
@@ -246,9 +227,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(validated[0].candidate_status, CandidateStatus::Pass);
+        assert_eq!(validated[0].validated_status, ValidatedStatus::Pass);
+        assert_eq!(validated[0].decision_source, DecisionSource::TargetModel);
+    }
+
+    #[test]
+    fn target_model_fail_remains_authoritative() {
+        let packet = packet_fixture();
+        let mut candidate = candidate_fixture(CandidateStatus::Fail, &["request:test-006"]);
+        candidate.failure_cause = Some("model reported an incomplete answer".into());
+
+        let validated = validate_candidates(
+            &[packet],
+            CandidateEnvelope {
+                reviews: vec![candidate],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(validated[0].candidate_status, CandidateStatus::Fail);
         assert_eq!(validated[0].validated_status, ValidatedStatus::Fail);
-        assert_eq!(validated[0].decision_source, DecisionSource::RuleEngine);
-        assert!(validated[0].validation_notes[0].contains("stream is incomplete"));
+        assert_eq!(validated[0].decision_source, DecisionSource::TargetModel);
     }
 
     fn packet_fixture() -> EvidencePacket {
@@ -259,10 +258,6 @@ mod tests {
             pass_criteria: "流完整结束".into(),
             allowed_evidence_refs: vec!["request:test-006".into()],
             requests: Vec::new(),
-            deterministic_facts: DeterministicFacts {
-                request_count: 1,
-                hard_failures: Vec::new(),
-            },
         }
     }
 

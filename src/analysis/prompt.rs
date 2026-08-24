@@ -2,15 +2,16 @@ use serde_json::json;
 
 use super::packet::EvidencePacket;
 
-pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v1";
+pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v2";
 
 pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Error> {
     let payload = json!({
         "analysisProtocolVersion": PROMPT_VERSION,
         "rules": {
-            "status": "Return PASS only when all observable evidence satisfies passCriteria; otherwise return FAIL.",
+            "status": "You are the sole decision maker for PASS or FAIL. Return PASS only when all observable evidence satisfies passCriteria; otherwise return FAIL.",
             "evidence": "Use only allowedEvidenceRefs from the current packet.",
-            "uncertainty": "Ambiguous, missing, malformed, or incomplete evidence is FAIL and must be explained in limitations."
+            "uncertainty": "Ambiguous, missing, malformed, or incomplete evidence is your decision to interpret and must be explained in limitations.",
+            "diagnostics": "Transport, protocol, tool, and metric fields are observations, not authoritative verdicts."
         },
         "packets": packets,
         "responseSchema": {
@@ -45,7 +46,7 @@ pub fn build_repair_prompt(original: &str, errors: &[String]) -> Result<String, 
 
 #[cfg(test)]
 mod tests {
-    use crate::analysis::packet::{DeterministicFacts, EvidencePacket};
+    use crate::analysis::packet::EvidencePacket;
 
     use super::*;
 
@@ -67,10 +68,6 @@ mod tests {
             pass_criteria: "流完整结束".into(),
             allowed_evidence_refs: vec!["request:test-006".into()],
             requests: Vec::new(),
-            deterministic_facts: DeterministicFacts {
-                request_count: 1,
-                hard_failures: Vec::new(),
-            },
         }
     }
 }
