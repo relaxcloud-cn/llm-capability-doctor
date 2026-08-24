@@ -476,6 +476,36 @@ fn non_pass_reason(test: &crate::catalog::TestCase, result: Option<&AnalysisTest
     }
 }
 
+fn verified_category_conclusion(category: &str) -> &'static str {
+    match category {
+        "接口与协议" => {
+            "接口可正常访问，鉴权和模型名均被接受；同时支持同步、流式响应、完整流结束、Token usage 和结构化错误返回。"
+        }
+        "结构化结果" => {
+            "能按要求输出严格 JSON，字段类型、嵌套对象、数组顺序、空值和额外字段控制均符合要求，并能正确返回调查阶段和证据引用。"
+        }
+        "上下文" => {
+            "本轮 8K、16K、32K、64K、128K 字符级请求均返回非空响应，多轮修正状态也能保持；本轮最高验证到 128K 字符近似档位，不等同于真实 Token 上限。"
+        }
+        "指令与文本" => {
+            "能执行精确文本、组合格式、多字段抽取和限长摘要要求，输出内容完整且没有额外干扰文本。"
+        }
+        "Thinking 与推理" => {
+            "支持 low/high reasoning 档位，能够分离 reasoning 与最终答案，并完成流式思考事件和时间顺序推理测试。"
+        }
+        "工具调用" => {
+            "支持单工具、工具选择、参数校验、嵌套参数、并行调用、串行调用、工具结果关联、失败重试和大工具目录。"
+        }
+        "性能与稳定性" => {
+            "本轮首字节时间、完整响应耗时和并发响应指标均有有效观测；重复请求均成功，P50/P95 可计算，4-32 并发样本均返回有效响应，具体数值见检测明细。"
+        }
+        "护栏与词汇" => {
+            "中文和英文安全业务词场景均能按要求返回指定业务字段和值；该结论只覆盖本轮词汇与业务字段测试，不代表完整安全能力。"
+        }
+        _ => "该分类本轮所有检测项通过。",
+    }
+}
+
 fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     let mut output = String::new();
     writeln!(output, "# 模型能力检测结果").unwrap();
@@ -531,7 +561,7 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
 
 fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
     output.push_str("## 大分类结论\n\n");
-    output.push_str("| 能力分类 | 结论 | 具体原因 |\n|---|---|---|\n");
+    output.push_str("| 能力分类 | 结论 | 检测结论 |\n|---|---|---|\n");
     let mut categories = Vec::new();
     for test in crate::catalog::CATALOG {
         if !categories.contains(&test.category) {
@@ -557,7 +587,7 @@ fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String)
             "不满足"
         };
         let reason = if non_pass.is_empty() {
-            format!("{}/{} 项检测通过", members.len(), members.len())
+            verified_category_conclusion(category).into()
         } else {
             non_pass
                 .iter()
@@ -979,6 +1009,32 @@ mod tests {
         assert_eq!(markdown.matches("| 满足 |").count(), 8);
         assert_eq!(markdown.matches("| PASS |").count(), 46);
         assert!(!markdown.contains("## 非通过项详情"));
+    }
+
+    #[test]
+    fn markdown_category_conclusions_describe_verified_capabilities() {
+        let artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+
+        let markdown = render_markdown(&artifact);
+
+        assert!(markdown.contains(
+            "接口可正常访问，鉴权和模型名均被接受；同时支持同步、流式响应、完整流结束、Token usage 和结构化错误返回。"
+        ));
+        assert!(markdown.contains(
+            "本轮 8K、16K、32K、64K、128K 字符级请求均返回非空响应，多轮修正状态也能保持；本轮最高验证到 128K 字符近似档位，不等同于真实 Token 上限。"
+        ));
+        assert!(markdown.contains(
+            "支持单工具、工具选择、参数校验、嵌套参数、并行调用、串行调用、工具结果关联、失败重试和大工具目录。"
+        ));
+        assert!(markdown.contains(
+            "中文和英文安全业务词场景均能按要求返回指定业务字段和值；该结论只覆盖本轮词汇与业务字段测试，不代表完整安全能力。"
+        ));
+        assert!(!markdown.contains("8/8 项检测通过"));
     }
 
     #[test]
