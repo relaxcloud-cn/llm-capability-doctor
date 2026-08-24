@@ -45,6 +45,7 @@ pub enum DecisionSource {
 #[serde(rename_all = "camelCase")]
 pub struct ValidatedReview {
     pub test_id: String,
+    pub report_test_id: String,
     pub candidate_status: CandidateStatus,
     pub validated_status: ValidatedStatus,
     pub decision_source: DecisionSource,
@@ -96,7 +97,7 @@ pub fn validate_candidates(
             let candidate = candidates
                 .remove(&packet.test_id)
                 .expect("candidate completeness checked above");
-            accept_candidate(candidate)
+            accept_candidate(packet, candidate)
         })
         .collect())
 }
@@ -170,13 +171,14 @@ fn validate_candidate(
     }
 }
 
-fn accept_candidate(candidate: CandidateReview) -> ValidatedReview {
+fn accept_candidate(packet: &EvidencePacket, candidate: CandidateReview) -> ValidatedReview {
     let validated_status = match candidate.candidate_status {
         CandidateStatus::Pass => ValidatedStatus::Pass,
         CandidateStatus::Fail => ValidatedStatus::Fail,
     };
     ValidatedReview {
         test_id: candidate.test_id,
+        report_test_id: packet.report_test_id.clone(),
         candidate_status: candidate.candidate_status,
         validated_status,
         decision_source: DecisionSource::TargetModel,
@@ -253,6 +255,7 @@ mod tests {
     fn packet_fixture() -> EvidencePacket {
         EvidencePacket {
             test_id: "006".into(),
+            report_test_id: "006".into(),
             name: "流结束完整性".into(),
             category: "接口与协议".into(),
             pass_criteria: "流完整结束".into(),

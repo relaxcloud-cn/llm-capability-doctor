@@ -4,16 +4,17 @@ use thiserror::Error;
 use super::evidence_reader::{ParsedEvidence, ParsedRequest};
 use super::rules::rule_for;
 
-pub const MAX_EXCERPT_BYTES: usize = 10 * 1024;
+pub const MAX_EXCERPT_BYTES: usize = 16 * 1024;
 pub const MAX_CHECKS_PER_BATCH: usize = 4;
-pub const MAX_BATCH_BYTES: usize = 65_536;
+pub const MAX_BATCH_BYTES: usize = 256 * 1024;
 const OMISSION_MARKER: &str = "\n...[bytes omitted]...\n";
-const MAX_PACKET_EXCERPT_BYTES: usize = 32_768;
+const MAX_PACKET_EXCERPT_BYTES: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidencePacket {
     pub test_id: String,
+    pub report_test_id: String,
     pub name: String,
     pub category: String,
     pub pass_criteria: String,
@@ -83,6 +84,7 @@ pub async fn build_packet(
     loop {
         let packet = EvidencePacket {
             test_id: test.id.clone(),
+            report_test_id: test.id.clone(),
             name: test.name.clone(),
             category: test.category.clone(),
             pass_criteria: rule.pass_criteria.to_owned(),
@@ -114,9 +116,113 @@ pub async fn build_all_packets(
 ) -> Result<Vec<EvidencePacket>, PacketError> {
     let mut packets = Vec::with_capacity(crate::catalog::CATALOG.len());
     for test in crate::catalog::CATALOG {
-        packets.push(build_packet(evidence, test.id).await?);
+        if test.id == "057" {
+            packets.extend(build_concurrency_packets(evidence).await?);
+        } else {
+            packets.push(build_packet(evidence, test.id).await?);
+        }
     }
     Ok(packets)
+}
+
+async fn build_concurrency_packets(
+    evidence: &ParsedEvidence,
+) -> Result<Vec<EvidencePacket>, PacketError> {
+    let test = evidence
+        .tests
+        .get("057")
+        .ok_or_else(|| PacketError::UnknownTest("057".into()))?;
+    let mut packets = Vec::new();
+    for concurrency in [4, 8, 16, 32] {
+        let request_refs = test
+            .request_refs
+            .iter()
+            .filter(|request_id| concurrency_level(request_id) == Some(concurrency))
+            .cloned()
+            .collect::<Vec<_>>();
+        let packet_id = format!("057-wave-{concurrency}");
+        packets.push(
+            build_packet_with_refs(
+                evidence,
+                "057",
+                &packet_id,
+                format!("{}（{concurrency} 并发）", test.name),
+                request_refs,
+            )
+            .await?,
+        );
+    }
+    if packets
+        .iter()
+        .any(|packet| packet.allowed_evidence_refs.is_empty())
+    {
+        return Ok(vec![build_packet(evidence, "057").await?]);
+    }
+    Ok(packets)
+}
+
+async fn build_packet_with_refs(
+    evidence: &ParsedEvidence,
+    report_test_id: &str,
+    packet_test_id: &str,
+    name: String,
+    request_refs: Vec<String>,
+) -> Result<EvidencePacket, PacketError> {
+    let test = evidence
+        .tests
+        .get(report_test_id)
+        .ok_or_else(|| PacketError::UnknownTest(report_test_id.to_owned()))?;
+    let rule = rule_for(report_test_id)
+        .ok_or_else(|| PacketError::UnknownTest(report_test_id.to_owned()))?;
+    let requests: Vec<&ParsedRequest> = request_refs
+        .iter()
+        .map(|request_id| {
+            evidence
+                .requests
+                .get(request_id)
+                .ok_or_else(|| PacketError::MissingRequest {
+                    test_id: report_test_id.to_owned(),
+                    request_id: request_id.clone(),
+                })
+        })
+        .collect::<Result<_, _>>()?;
+    let mut excerpt_limit =
+        (MAX_PACKET_EXCERPT_BYTES / requests.len().max(1) / 3).clamp(128, MAX_EXCERPT_BYTES);
+    loop {
+        let packet = EvidencePacket {
+            test_id: packet_test_id.to_owned(),
+            report_test_id: report_test_id.to_owned(),
+            name: name.clone(),
+            category: test.category.clone(),
+            pass_criteria: rule.pass_criteria.to_owned(),
+            allowed_evidence_refs: request_refs
+                .iter()
+                .map(|request_id| format!("request:{request_id}"))
+                .collect(),
+            requests: requests
+                .iter()
+                .map(|request| packet_request(request, excerpt_limit))
+                .collect(),
+        };
+        if serde_json::to_vec(&[&packet])?.len() <= MAX_BATCH_BYTES {
+            return Ok(packet);
+        }
+        if excerpt_limit == 0 {
+            return Err(PacketError::PacketTooLarge {
+                test_id: packet_test_id.to_owned(),
+                max_bytes: MAX_BATCH_BYTES,
+            });
+        }
+        excerpt_limit /= 2;
+    }
+}
+
+fn concurrency_level(request_id: &str) -> Option<usize> {
+    let suffix = request_id.strip_prefix("test-057-c")?;
+    let (concurrency, index) = suffix.split_once('-')?;
+    let concurrency = concurrency.parse::<usize>().ok()?;
+    let index = index.parse::<usize>().ok()?;
+    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0).then_some(concurrency)
 }
 
 pub fn batch_packets(
@@ -372,6 +478,102 @@ mod tests {
         assert!(serde_json::to_vec(&[packet]).unwrap().len() <= MAX_BATCH_BYTES);
     }
 
+    #[tokio::test]
+    async fn concurrency_check_is_split_into_four_wave_packets() {
+        let mut parsed = parsed_fixture_with_two_requests();
+        parsed.requests.clear();
+        let mut request_refs = Vec::new();
+        for concurrency in [4, 8, 16, 32] {
+            for index in 1..=concurrency {
+                let request_id = format!("test-057-c{concurrency}-{index}");
+                parsed.requests.insert(
+                    request_id.clone(),
+                    parsed_request(&request_id, &"response".repeat(100)),
+                );
+                request_refs.push(request_id);
+            }
+        }
+        parsed.tests = BTreeMap::from([(
+            "057".into(),
+            ParsedTest {
+                id: "057".into(),
+                name: "4-32 并发响应时间".into(),
+                category: "性能与稳定性".into(),
+                request_refs,
+            },
+        )]);
+
+        let packets = build_concurrency_packets(&parsed).await.unwrap();
+        let waves = packets
+            .iter()
+            .filter(|packet| packet.report_test_id == "057")
+            .collect::<Vec<_>>();
+
+        assert_eq!(waves.len(), 4);
+        assert_eq!(
+            waves
+                .iter()
+                .map(|packet| packet.requests.len())
+                .collect::<Vec<_>>(),
+            [4, 8, 16, 32]
+        );
+        assert_eq!(
+            waves
+                .iter()
+                .map(|packet| packet.test_id.as_str())
+                .collect::<Vec<_>>(),
+            ["057-wave-4", "057-wave-8", "057-wave-16", "057-wave-32"]
+        );
+        assert!(waves.iter().all(|packet| {
+            packet
+                .requests
+                .iter()
+                .all(|request| !request.response_body_excerpt.contains("bytes omitted"))
+        }));
+    }
+
+    #[tokio::test]
+    async fn concurrency_check_builds_one_packet_per_wave() {
+        let mut parsed = parsed_fixture_with_two_requests();
+        parsed.requests.clear();
+        let mut request_refs = Vec::new();
+        for concurrency in [4, 8, 16, 32] {
+            for index in 1..=concurrency {
+                let request_id = format!("test-057-c{concurrency}-{index}");
+                parsed
+                    .requests
+                    .insert(request_id.clone(), parsed_request(&request_id, "response"));
+                request_refs.push(request_id);
+            }
+        }
+        parsed.tests = BTreeMap::from([(
+            "057".into(),
+            ParsedTest {
+                id: "057".into(),
+                name: "4-32 并发响应时间".into(),
+                category: "性能与稳定性".into(),
+                request_refs,
+            },
+        )]);
+
+        let packets = build_concurrency_packets(&parsed).await.unwrap();
+
+        assert_eq!(packets.len(), 4);
+        assert_eq!(
+            packets
+                .iter()
+                .map(|packet| (packet.test_id.as_str(), packet.requests.len()))
+                .collect::<Vec<_>>(),
+            [
+                ("057-wave-4", 4),
+                ("057-wave-8", 8),
+                ("057-wave-16", 16),
+                ("057-wave-32", 32),
+            ]
+        );
+        assert!(packets.iter().all(|packet| packet.report_test_id == "057"));
+    }
+
     fn parsed_fixture_with_two_requests() -> ParsedEvidence {
         ParsedEvidence {
             source: EvidenceSource {
@@ -450,6 +652,7 @@ mod tests {
     fn packet_fixture(test_id: &str, response_size: usize) -> EvidencePacket {
         EvidencePacket {
             test_id: test_id.into(),
+            report_test_id: test_id.into(),
             name: "check".into(),
             category: "category".into(),
             pass_criteria: "pass".into(),

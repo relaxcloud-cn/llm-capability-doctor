@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::Write as IoWrite;
@@ -134,6 +135,8 @@ enum AnalysisState {
 #[serde(rename_all = "camelCase")]
 struct AnalysisTestResult {
     test_id: String,
+    #[serde(skip)]
+    report_test_id: String,
     analysis_state: AnalysisState,
     candidate_status: Option<CandidateStatus>,
     validated_status: Option<ValidatedStatus>,
@@ -342,6 +345,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
         });
     }
 
+    let tests = consolidate_report_results(tests);
     let counts = AnalysisCounts {
         pass: tests
             .iter()
@@ -552,6 +556,7 @@ fn repairable_candidate_response(error: &ClientError) -> bool {
 fn available_result(review: ValidatedReview, redactor: &Redactor) -> AnalysisTestResult {
     AnalysisTestResult {
         test_id: review.test_id,
+        report_test_id: review.report_test_id,
         analysis_state: AnalysisState::Available,
         candidate_status: Some(review.candidate_status),
         validated_status: Some(review.validated_status),
@@ -602,6 +607,7 @@ fn unavailable_results(batch: &[EvidencePacket], error: &str) -> Vec<AnalysisTes
         .iter()
         .map(|packet| AnalysisTestResult {
             test_id: packet.test_id.clone(),
+            report_test_id: packet.report_test_id.clone(),
             analysis_state: AnalysisState::AnalysisUnavailable,
             candidate_status: None,
             validated_status: None,
@@ -613,6 +619,106 @@ fn unavailable_results(batch: &[EvidencePacket], error: &str) -> Vec<AnalysisTes
             validation_notes: vec!["no validated self-analysis candidate was produced".into()],
         })
         .collect()
+}
+
+fn consolidate_report_results(results: Vec<AnalysisTestResult>) -> Vec<AnalysisTestResult> {
+    let mut grouped: BTreeMap<String, Vec<AnalysisTestResult>> = BTreeMap::new();
+    for result in results {
+        grouped
+            .entry(result.report_test_id.clone())
+            .or_default()
+            .push(result);
+    }
+    crate::catalog::CATALOG
+        .iter()
+        .filter_map(|test| grouped.remove(test.id).map(merge_report_results))
+        .collect()
+}
+
+fn merge_report_results(mut results: Vec<AnalysisTestResult>) -> AnalysisTestResult {
+    if results.len() == 1 {
+        let mut result = results.pop().expect("one result exists");
+        result.test_id = result.report_test_id.clone();
+        return result;
+    }
+
+    let report_test_id = results[0].report_test_id.clone();
+    let failed: Vec<_> = results
+        .iter()
+        .filter(|result| result.validated_status == Some(ValidatedStatus::Fail))
+        .collect();
+    let unavailable: Vec<_> = results
+        .iter()
+        .filter(|result| matches!(result.analysis_state, AnalysisState::AnalysisUnavailable))
+        .collect();
+    let (analysis_state, candidate_status, validated_status, decision_source, failure_cause) =
+        if !failed.is_empty() {
+            (
+                AnalysisState::Available,
+                Some(CandidateStatus::Fail),
+                Some(ValidatedStatus::Fail),
+                Some(DecisionSource::TargetModel),
+                Some(join_wave_values(&failed, |result| {
+                    result
+                        .failure_cause
+                        .clone()
+                        .unwrap_or_else(|| "模型未提供失败原因".into())
+                })),
+            )
+        } else if !unavailable.is_empty() {
+            (AnalysisState::AnalysisUnavailable, None, None, None, None)
+        } else {
+            (
+                AnalysisState::Available,
+                Some(CandidateStatus::Pass),
+                Some(ValidatedStatus::Pass),
+                Some(DecisionSource::TargetModel),
+                None,
+            )
+        };
+    AnalysisTestResult {
+        test_id: report_test_id.clone(),
+        report_test_id,
+        analysis_state,
+        candidate_status,
+        validated_status,
+        decision_source,
+        observations: results
+            .iter()
+            .flat_map(|result| result.observations.clone())
+            .collect(),
+        failure_cause,
+        evidence_refs: results
+            .iter()
+            .flat_map(|result| result.evidence_refs.clone())
+            .collect(),
+        limitations: results
+            .iter()
+            .flat_map(|result| result.limitations.clone())
+            .collect(),
+        validation_notes: results
+            .iter()
+            .flat_map(|result| result.validation_notes.clone())
+            .collect(),
+    }
+}
+
+fn join_wave_values(
+    results: &[&AnalysisTestResult],
+    value: impl Fn(&AnalysisTestResult) -> String,
+) -> String {
+    results
+        .iter()
+        .map(|result| format!("{}：{}", wave_label(&result.test_id), value(result)))
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
+fn wave_label(test_id: &str) -> String {
+    test_id.strip_prefix("057-wave-").map_or_else(
+        || test_id.to_owned(),
+        |concurrency| format!("{concurrency} 并发"),
+    )
 }
 
 fn summarize_concurrency(evidence: &ParsedEvidence) -> Vec<ConcurrencyWave> {
@@ -1132,33 +1238,6 @@ fn render_non_pass_details(artifact: &SelfAnalysisArtifact, output: &mut String)
             markdown_cell(&result_reason(result))
         )
         .unwrap();
-        if !result.observations.is_empty() {
-            output.push_str("**模型观察**\n\n");
-            for observation in &result.observations {
-                writeln!(output, "- {}", markdown_cell(observation)).unwrap();
-            }
-            output.push('\n');
-        }
-        if !result.evidence_refs.is_empty() {
-            writeln!(
-                output,
-                "**证据引用**：{}\n",
-                result
-                    .evidence_refs
-                    .iter()
-                    .map(|reference| format!("`{}`", markdown_cell(reference)))
-                    .collect::<Vec<_>>()
-                    .join("、")
-            )
-            .unwrap();
-        }
-        if !result.limitations.is_empty() {
-            output.push_str("**限制说明**\n\n");
-            for limitation in &result.limitations {
-                writeln!(output, "- {}", markdown_cell(limitation)).unwrap();
-            }
-            output.push('\n');
-        }
         if !result.validation_notes.is_empty() {
             output.push_str("**校验说明**\n\n");
             for note in &result.validation_notes {
@@ -1795,15 +1874,67 @@ mod tests {
     }
 
     #[test]
-    fn markdown_escapes_table_content() {
-        let mut result =
-            available_markdown_result("046", CandidateStatus::Fail, Some("first | line\nsecond"));
-        result.observations = vec!["left | right\nnext".into()];
+    fn markdown_non_pass_details_omit_observations_references_and_limitations() {
+        let mut result = available_markdown_result(
+            "046",
+            CandidateStatus::Fail,
+            Some("tool envelope incomplete"),
+        );
+        result.observations = vec!["model observation".into()];
+        result.evidence_refs = vec!["request:test-046".into()];
+        result.limitations = vec!["limited evidence".into()];
 
         let markdown = render_markdown(&markdown_fixture(vec![result]));
 
+        assert!(markdown.contains("- 原因：tool envelope incomplete"));
+        assert!(!markdown.contains("**模型观察**"));
+        assert!(!markdown.contains("**证据引用**"));
+        assert!(!markdown.contains("**限制说明**"));
+        assert!(!markdown.contains("model observation"));
+        assert!(!markdown.contains("request:test-046"));
+        assert!(!markdown.contains("limited evidence"));
+    }
+
+    #[test]
+    fn concurrency_wave_results_merge_into_one_report_item() {
+        let mut wave_results = [4, 8, 16, 32]
+            .into_iter()
+            .map(|concurrency| {
+                let mut result = available_markdown_result(
+                    &format!("057-wave-{concurrency}"),
+                    CandidateStatus::Pass,
+                    None,
+                );
+                result.report_test_id = "057".into();
+                result
+            })
+            .collect::<Vec<_>>();
+        let failed = wave_results
+            .iter_mut()
+            .find(|result| result.test_id == "057-wave-16")
+            .unwrap();
+        failed.candidate_status = Some(CandidateStatus::Fail);
+        failed.validated_status = Some(ValidatedStatus::Fail);
+        failed.failure_cause = Some("16 个并发请求中有 1 个请求超时。".into());
+
+        let merged = consolidate_report_results(wave_results);
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].test_id, "057");
+        assert_eq!(merged[0].validated_status, Some(ValidatedStatus::Fail));
+        assert_eq!(
+            merged[0].failure_cause.as_deref(),
+            Some("16 并发：16 个并发请求中有 1 个请求超时。")
+        );
+    }
+
+    #[test]
+    fn markdown_escapes_table_content() {
+        let result =
+            available_markdown_result("046", CandidateStatus::Fail, Some("first | line\nsecond"));
+        let markdown = render_markdown(&markdown_fixture(vec![result]));
+
         assert!(markdown.contains("first \\| line second"));
-        assert!(markdown.contains("left \\| right next"));
         assert!(!markdown.contains("first | line\nsecond"));
     }
 
@@ -1868,6 +1999,7 @@ mod tests {
     ) -> AnalysisTestResult {
         AnalysisTestResult {
             test_id: test_id.into(),
+            report_test_id: test_id.into(),
             analysis_state: AnalysisState::Available,
             candidate_status: Some(status),
             validated_status: Some(match status {

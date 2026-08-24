@@ -65,6 +65,7 @@ mod tests {
     fn packet_fixture() -> EvidencePacket {
         EvidencePacket {
             test_id: "006".into(),
+            report_test_id: "006".into(),
             name: "流结束完整性".into(),
             category: "接口与协议".into(),
             pass_criteria: "流完整结束".into(),
