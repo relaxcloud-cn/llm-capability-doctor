@@ -12,8 +12,8 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::client::{AnalysisClient, AnalysisTarget, ClientError, ModelAnalysisClient};
-use super::evidence_reader::{EvidenceError, EvidenceSource, read};
-use super::packet::{EvidencePacket, PacketError, default_batches};
+use super::evidence_reader::{EvidenceError, EvidenceSource, ParsedEvidence, ParsedRequest, read};
+use super::packet::{EvidencePacket, PacketError, bounded_excerpt, default_batches};
 use super::prompt::{PROMPT_VERSION, build_prompt, build_repair_prompt};
 use super::validator::{
     CandidateStatus, DecisionSource, ValidatedReview, ValidatedStatus, validate_candidates,
@@ -104,6 +104,8 @@ struct SelfAnalysisArtifact {
     tests: Vec<AnalysisTestResult>,
     batches: Vec<BatchResult>,
     counts: AnalysisCounts,
+    #[serde(skip)]
+    concurrency_waves: Vec<ConcurrencyWave>,
 }
 
 #[derive(Serialize)]
@@ -151,6 +153,22 @@ struct AnalysisCounts {
     pass: usize,
     fail: usize,
     unavailable: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ConcurrencyWave {
+    concurrency: usize,
+    total_requests: usize,
+    succeeded: usize,
+    failed: usize,
+    average_response_time_seconds: Option<f64>,
+    failures: Vec<ConcurrencyFailure>,
+}
+
+#[derive(Clone, Debug)]
+struct ConcurrencyFailure {
+    request_id: String,
+    error: String,
 }
 
 struct ProcessedBatch {
@@ -243,6 +261,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
     };
     let collector_version = evidence.run["script_version"].clone();
     let evidence_schema_version = evidence.run["log_schema"].clone();
+    let concurrency_waves = summarize_concurrency(&evidence);
     let mut source = evidence.source;
     source.path = PathBuf::from(redactor.redact_text(&source.path.to_string_lossy()));
     source.file_name = redactor.redact_text(&source.file_name);
@@ -263,6 +282,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
         tests,
         batches: batch_results,
         counts,
+        concurrency_waves,
     };
     let pass_count = artifact.counts.pass;
     let fail_count = artifact.counts.fail;
@@ -404,6 +424,107 @@ fn unavailable_results(batch: &[EvidencePacket], error: &str) -> Vec<AnalysisTes
             validation_notes: vec!["no validated self-analysis candidate was produced".into()],
         })
         .collect()
+}
+
+fn summarize_concurrency(evidence: &ParsedEvidence) -> Vec<ConcurrencyWave> {
+    let mut requests_by_wave: std::collections::BTreeMap<usize, Vec<&ParsedRequest>> =
+        std::collections::BTreeMap::new();
+    for request in evidence.requests.values() {
+        if let Some(concurrency) = concurrency_level(&request.request_id) {
+            requests_by_wave
+                .entry(concurrency)
+                .or_default()
+                .push(request);
+        }
+    }
+
+    [4, 8, 16, 32]
+        .into_iter()
+        .map(|concurrency| {
+            let requests = requests_by_wave.remove(&concurrency).unwrap_or_default();
+            let succeeded = requests
+                .iter()
+                .filter(|request| concurrency_request_succeeded(request))
+                .count();
+            let times: Vec<f64> = requests
+                .iter()
+                .filter_map(|request| request.metrics.get("time_total"))
+                .filter_map(|value| value.parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .collect();
+            let failures = requests
+                .iter()
+                .filter(|request| !concurrency_request_succeeded(request))
+                .map(|request| ConcurrencyFailure {
+                    request_id: request.request_id.clone(),
+                    error: concurrency_failure_reason(request),
+                })
+                .collect();
+            ConcurrencyWave {
+                concurrency,
+                total_requests: requests.len(),
+                succeeded,
+                failed: requests.len().saturating_sub(succeeded),
+                average_response_time_seconds: (!times.is_empty())
+                    .then(|| times.iter().sum::<f64>() / times.len() as f64),
+                failures,
+            }
+        })
+        .collect()
+}
+
+fn concurrency_level(request_id: &str) -> Option<usize> {
+    let suffix = request_id.strip_prefix("test-057-c")?;
+    let (concurrency, index) = suffix.split_once('-')?;
+    let concurrency = concurrency.parse::<usize>().ok()?;
+    let index = index.parse::<usize>().ok()?;
+    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0).then_some(concurrency)
+}
+
+fn concurrency_request_succeeded(request: &ParsedRequest) -> bool {
+    let http_success = request
+        .metrics
+        .get("http_status")
+        .and_then(|value| value.parse::<u16>().ok())
+        .is_some_and(|status| (200..300).contains(&status));
+    let transport_success = request
+        .metadata
+        .get("transport_outcome")
+        .is_some_and(|outcome| matches!(outcome.as_str(), "completed_eof" | "protocol_terminated"));
+    http_success && transport_success && !request.response_body.trim().is_empty()
+}
+
+fn concurrency_failure_reason(request: &ParsedRequest) -> String {
+    let mut reasons = Vec::new();
+    let http_status = request
+        .metrics
+        .get("http_status")
+        .and_then(|value| value.parse::<u16>().ok());
+    if !http_status.is_some_and(|status| (200..300).contains(&status)) {
+        reasons.push(match http_status {
+            Some(status) => format!("HTTP {status}"),
+            None => "HTTP status unavailable".into(),
+        });
+    }
+    if let Some(outcome) = request.metadata.get("transport_outcome")
+        && !matches!(outcome.as_str(), "completed_eof" | "protocol_terminated")
+    {
+        reasons.push(format!("transport_outcome={outcome}"));
+    }
+    if request.response_body.trim().is_empty() {
+        reasons.push("response body empty".into());
+    }
+    if !request.stderr.trim().is_empty() {
+        reasons.push(format!(
+            "stderr: {}",
+            bounded_excerpt(request.stderr.trim(), 512)
+        ));
+    }
+    if reasons.is_empty() {
+        "request did not meet success criteria".into()
+    } else {
+        reasons.join("; ")
+    }
 }
 
 fn markdown_cell(value: &str) -> String {
@@ -554,6 +675,7 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     output.push('\n');
 
     render_category_summary(artifact, &mut output);
+    render_concurrency_summary(artifact, &mut output);
     render_test_table(artifact, &mut output);
     render_non_pass_details(artifact, &mut output);
     output
@@ -601,6 +723,55 @@ fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String)
             markdown_cell(category),
             status,
             markdown_cell(&reason)
+        )
+        .unwrap();
+    }
+    output.push('\n');
+}
+
+fn render_concurrency_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    if artifact.concurrency_waves.is_empty() {
+        return;
+    }
+    output.push_str("## 并发响应明细\n\n");
+    output.push_str(
+        "| 并发档位 | 总请求 | 成功 | 失败 | 平均响应时间（全部请求） |\n|---:|---:|---:|---:|---:|\n",
+    );
+    for wave in &artifact.concurrency_waves {
+        let average = wave
+            .average_response_time_seconds
+            .map(|seconds| format!("{:.1} ms", seconds * 1000.0))
+            .unwrap_or_else(|| "-".into());
+        writeln!(
+            output,
+            "| {} | {} | {} | {} | {} |",
+            wave.concurrency, wave.total_requests, wave.succeeded, wave.failed, average
+        )
+        .unwrap();
+    }
+    output.push('\n');
+
+    let failures: Vec<_> = artifact
+        .concurrency_waves
+        .iter()
+        .flat_map(|wave| {
+            wave.failures
+                .iter()
+                .map(move |failure| (wave.concurrency, failure))
+        })
+        .collect();
+    if failures.is_empty() {
+        output.push_str("失败请求：无。\n\n");
+        return;
+    }
+    output.push_str("失败请求：\n\n");
+    for (concurrency, failure) in failures {
+        writeln!(
+            output,
+            "- {} 并发，request_id={}：{}",
+            concurrency,
+            markdown_cell(&failure.request_id),
+            markdown_cell(&failure.error)
         )
         .unwrap();
     }
@@ -1038,6 +1209,66 @@ mod tests {
     }
 
     #[test]
+    fn markdown_concurrency_summary_reports_each_wave_and_failures() {
+        let mut artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+        artifact.concurrency_waves = vec![
+            ConcurrencyWave {
+                concurrency: 4,
+                total_requests: 4,
+                succeeded: 4,
+                failed: 0,
+                average_response_time_seconds: Some(0.42),
+                failures: Vec::new(),
+            },
+            ConcurrencyWave {
+                concurrency: 8,
+                total_requests: 8,
+                succeeded: 7,
+                failed: 1,
+                average_response_time_seconds: Some(0.88),
+                failures: vec![ConcurrencyFailure {
+                    request_id: "test-057-c8-3".into(),
+                    error: "HTTP 500: upstream unavailable".into(),
+                }],
+            },
+            ConcurrencyWave {
+                concurrency: 16,
+                total_requests: 16,
+                succeeded: 16,
+                failed: 0,
+                average_response_time_seconds: Some(1.24),
+                failures: Vec::new(),
+            },
+            ConcurrencyWave {
+                concurrency: 32,
+                total_requests: 32,
+                succeeded: 31,
+                failed: 1,
+                average_response_time_seconds: None,
+                failures: vec![ConcurrencyFailure {
+                    request_id: "test-057-c32-9".into(),
+                    error: "timeout".into(),
+                }],
+            },
+        ];
+
+        let markdown = render_markdown(&artifact);
+
+        assert!(markdown.contains("## 并发响应明细"));
+        assert!(markdown.contains("| 4 | 4 | 4 | 0 | 420.0 ms |"));
+        assert!(markdown.contains("| 8 | 8 | 7 | 1 | 880.0 ms |"));
+        assert!(markdown.contains("| 16 | 16 | 16 | 0 | 1240.0 ms |"));
+        assert!(markdown.contains("| 32 | 32 | 31 | 1 | - |"));
+        assert!(markdown.contains("request_id=test-057-c8-3：HTTP 500: upstream unavailable"));
+        assert!(markdown.contains("request_id=test-057-c32-9：timeout"));
+    }
+
+    #[test]
     fn markdown_fail_explains_each_non_pass_item() {
         let mut results = crate::catalog::CATALOG
             .iter()
@@ -1145,6 +1376,7 @@ mod tests {
                 fail: 0,
                 unavailable: 0,
             },
+            concurrency_waves: Vec::new(),
         }
     }
 
