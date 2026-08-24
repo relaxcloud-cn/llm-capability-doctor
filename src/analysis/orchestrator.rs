@@ -16,7 +16,8 @@ use super::evidence_reader::{EvidenceError, EvidenceSource, ParsedEvidence, Pars
 use super::packet::{EvidencePacket, PacketError, bounded_excerpt, default_batches};
 use super::prompt::{PROMPT_VERSION, build_prompt, build_repair_prompt};
 use super::validator::{
-    CandidateStatus, DecisionSource, ValidatedReview, ValidatedStatus, validate_candidates,
+    CandidateEnvelope, CandidateStatus, DecisionSource, ValidatedReview, ValidatedStatus,
+    validate_candidates,
 };
 use crate::private_file::create_new_private_file;
 use crate::protocol::{AuthMode, Protocol};
@@ -24,6 +25,7 @@ use crate::redaction::Redactor;
 
 pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v2";
 pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
+const MAX_ANALYSIS_TRANSPORT_ATTEMPTS: usize = 3;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -308,15 +310,20 @@ async fn process_batch<C: AnalysisClient>(
 ) -> Result<ProcessedBatch, AnalysisError> {
     let original_prompt = build_prompt(batch)?;
     let mut prompt = original_prompt.clone();
-    for attempts in 1..=2 {
+    let mut attempts = 0;
+    let mut repair_used = false;
+    loop {
         if cancellation.is_cancelled() {
             return Ok(ProcessedBatch {
-                attempts: attempts - 1,
+                attempts,
                 reviews: None,
                 error: Some("analysis cancelled".into()),
             });
         }
-        match client.analyze(&prompt, cancellation.child_token()).await {
+        let (response, transport_attempts) =
+            analyze_with_transport_retries(client, &prompt, cancellation.child_token()).await;
+        attempts += transport_attempts;
+        match response {
             Ok(envelope) => match validate_candidates(batch, envelope) {
                 Ok(reviews) => {
                     return Ok(ProcessedBatch {
@@ -325,8 +332,9 @@ async fn process_batch<C: AnalysisClient>(
                         error: None,
                     });
                 }
-                Err(errors) if attempts == 1 => {
+                Err(errors) if !repair_used => {
                     prompt = build_repair_prompt(&original_prompt, &errors)?;
+                    repair_used = true;
                 }
                 Err(errors) => {
                     return Ok(ProcessedBatch {
@@ -336,8 +344,9 @@ async fn process_batch<C: AnalysisClient>(
                     });
                 }
             },
-            Err(error) if attempts == 1 && repairable_candidate_response(&error) => {
+            Err(error) if !repair_used && repairable_candidate_response(&error) => {
                 prompt = build_repair_prompt(&original_prompt, &[error.to_string()])?;
+                repair_used = true;
             }
             Err(error) => {
                 return Ok(ProcessedBatch {
@@ -348,7 +357,42 @@ async fn process_batch<C: AnalysisClient>(
             }
         }
     }
-    unreachable!("batch loop always returns")
+}
+
+async fn analyze_with_transport_retries<C: AnalysisClient>(
+    client: &C,
+    prompt: &str,
+    cancellation: CancellationToken,
+) -> (Result<CandidateEnvelope, ClientError>, usize) {
+    for attempt in 1..=MAX_ANALYSIS_TRANSPORT_ATTEMPTS {
+        if cancellation.is_cancelled() {
+            return (
+                Err(ClientError::Transport("analysis cancelled".into())),
+                attempt - 1,
+            );
+        }
+        let response = client.analyze(prompt, cancellation.child_token()).await;
+        if !retryable_transport_error(&response) || attempt == MAX_ANALYSIS_TRANSPORT_ATTEMPTS {
+            return (response, attempt);
+        }
+        let delay = Duration::from_secs(attempt as u64);
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            _ = cancellation.cancelled() => {
+                return (Err(ClientError::Transport("analysis cancelled".into())), attempt);
+            }
+        }
+    }
+    unreachable!("bounded retry loop always returns")
+}
+
+fn retryable_transport_error(response: &Result<CandidateEnvelope, ClientError>) -> bool {
+    matches!(
+        response,
+        Err(ClientError::Transport(_))
+            | Err(ClientError::HttpStatus(429))
+            | Err(ClientError::HttpStatus(500..=599))
+    )
 }
 
 fn repairable_candidate_response(error: &ClientError) -> bool {
@@ -1048,9 +1092,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retries_a_transient_analysis_transport_error_then_succeeds() {
+        let (_directory, settings, batches) = fixture().await;
+        let mut responses = vec![Err(ClientError::Transport("timeout".into()))];
+        responses.push(Ok(valid_envelope_for(&batches[0])));
+        responses.extend(
+            batches[1..]
+                .iter()
+                .map(|batch| Ok(valid_envelope_for(batch))),
+        );
+        let client = FakeClient::new(responses);
+
+        let outcome = analyze_with_client(settings, &client, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(outcome.available_count, 46);
+        assert_eq!(client.call_count(), batches.len() + 1);
+    }
+
+    #[test]
+    fn analysis_retries_only_transient_transport_and_http_errors() {
+        let transient = [
+            Err(ClientError::Transport("timeout".into())),
+            Err(ClientError::HttpStatus(429)),
+            Err(ClientError::HttpStatus(500)),
+        ];
+
+        assert!(transient.iter().all(retryable_transport_error));
+        assert!(!retryable_transport_error(&Err(ClientError::HttpStatus(
+            400
+        ))));
+    }
+
+    #[tokio::test]
     async fn failed_batch_is_explicit_and_later_batches_continue() {
         let (_directory, settings, batches) = fixture().await;
-        let mut responses = vec![Err(ClientError::Transport("offline".into()))];
+        let mut responses = (0..3)
+            .map(|_| Err(ClientError::Transport("offline".into())))
+            .collect::<Vec<_>>();
         responses.extend(
             batches[1..]
                 .iter()
@@ -1064,7 +1145,7 @@ mod tests {
 
         assert_eq!(outcome.unavailable_count, batches[0].len());
         assert_eq!(outcome.available_count, 46 - batches[0].len());
-        assert_eq!(client.call_count(), batches.len());
+        assert_eq!(client.call_count(), batches.len() + 2);
     }
 
     #[tokio::test]

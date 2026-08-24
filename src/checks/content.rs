@@ -92,7 +92,7 @@ fn structured_prompt(id: &str) -> String {
 
 fn text_prompt(id: &str) -> String {
     match id {
-        "019" => "MODEL_DOCTOR_CASE_019. Reply only MODEL_DOCTOR_CASE_019_OK.",
+        "019" => "MODEL_DOCTOR_CASE_019. Output exactly the token between the markers below. Do not output the markers, punctuation, whitespace, or any other text.\n<token>MODEL_DOCTOR_CASE_019_OK</token>",
         "020" => "MODEL_DOCTOR_CASE_020. Return exactly these three lines and nothing else:\n[BEGIN]\nALPHA|BETA|GAMMA\n[END]\nThe two ASCII vertical bar characters \"|\" are literal output characters and must both be present. Do not output the word FORBIDDEN.",
         "022" => r#"MODEL_DOCTOR_CASE_022. From time=10:32 source=203.0.113.7 action=allow labels=URGENT,DATABASE excluded_label=NETWORK, return exactly this compact JSON shape: {"time":"10:32","source":"203.0.113.7","action":"allow","labels":["URGENT","DATABASE"]}. Copy labels only from the comma-separated labels field, preserve their order, never copy excluded_label, and never infer labels from any other field."#,
         "024" => "MODEL_DOCTOR_CASE_024. In at most 12 English words preserve: deployment failed at 14:20, rollback succeeded, no data loss.",
@@ -161,6 +161,15 @@ mod tests {
         assert!(prompt.contains("ASCII vertical bar characters"));
         assert!(prompt.contains("literal output characters"));
         assert!(prompt.contains("ALPHA|BETA|GAMMA"));
+    }
+
+    #[test]
+    fn check_019_delimits_the_exact_token_without_punctuation_ambiguity() {
+        let prompt = text_prompt("019");
+
+        assert!(prompt.contains("<token>MODEL_DOCTOR_CASE_019_OK</token>"));
+        assert!(prompt.contains("Do not output the markers, punctuation, whitespace"));
+        assert!(!prompt.ends_with("MODEL_DOCTOR_CASE_019_OK."));
     }
 
     #[test]

@@ -36,7 +36,7 @@ New-Item -ItemType Directory -Force .\model-doctor-output | Out-Null; .\model-ca
 ./model-capability-doctor-v0.12.0-linux-x86_64 --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file './model-doctor-output/model-doctor.log' --self-analyze
 ```
 
-分析结果写入同目录的 `model-doctor-self-analysis.json` 和 `model-doctor-self-analysis.md`。Markdown 顶部按能力大分类给出“满足/不满足”结论，并单独列出 4、8、16、32 并发档位的成功数、失败数、平均响应时间和失败请求错误；中间列出 46 项检测结果，底部展开失败和分析不可用项的具体原因、观察与证据引用。并发平均响应时间按该档位全部请求（含失败请求）的 `time_total` 计算。日志和分析文件均保留在客户环境；CLI 不提供日志上传或独立分析地址。每项 PASS/FAIL 由被测模型根据本地证据和通过标准决定，CLI 只校验返回结构与证据引用，不覆盖模型结论。单批分析失败会在 JSON 和 Markdown 中标记为 `ANALYSIS_UNAVAILABLE`，不会改变检测日志已成功生成的状态。
+分析结果写入同目录的 `model-doctor-self-analysis.json` 和 `model-doctor-self-analysis.md`。Markdown 顶部按能力大分类给出“满足/不满足”结论，并单独列出 4、8、16、32 并发档位的成功数、失败数、平均响应时间和失败请求错误；中间列出 46 项检测结果，底部展开失败和分析不可用项的具体原因、观察与证据引用。并发平均响应时间按该档位全部请求（含失败请求）的 `time_total` 计算。所有检测和自分析请求默认超时为 300 秒，可用 `--timeout` 覆盖；自分析遇到超时、网络错误、HTTP 429 或 HTTP 5xx 会自动重试，最多 3 次。日志和分析文件均保留在客户环境；CLI 不提供日志上传或独立分析地址。每项 PASS/FAIL 由被测模型根据本地证据和通过标准决定，CLI 只校验返回结构与证据引用，不覆盖模型结论。单批分析失败会在 JSON 和 Markdown 中标记为 `ANALYSIS_UNAVAILABLE`，不会改变检测日志已成功生成的状态。
 
 ## 查看本地结果
 

@@ -4,7 +4,7 @@ use thiserror::Error;
 use super::evidence_reader::{ParsedEvidence, ParsedRequest};
 use super::rules::rule_for;
 
-pub const MAX_EXCERPT_BYTES: usize = 4_096;
+pub const MAX_EXCERPT_BYTES: usize = 10 * 1024;
 pub const MAX_CHECKS_PER_BATCH: usize = 4;
 pub const MAX_BATCH_BYTES: usize = 65_536;
 const OMISSION_MARKER: &str = "\n...[bytes omitted]...\n";
@@ -288,6 +288,18 @@ mod tests {
         assert_eq!(packet.requests[0].tool_contract_status, "non_conformant");
         assert_eq!(packet.requests[0].http_status, Some(500));
         assert_eq!(packet.requests[0].response_body_excerpt, "response body");
+    }
+
+    #[tokio::test]
+    async fn packet_preserves_a_045_sized_single_response_body() {
+        let response_body = "tool-stream-event".repeat(392);
+        assert!(response_body.len() > 4_096);
+        assert!(response_body.len() < 10 * 1024);
+        let evidence = single_test_evidence("019", parsed_request("test-019", &response_body));
+
+        let packet = build_packet(&evidence, "019").await.unwrap();
+
+        assert_eq!(packet.requests[0].response_body_excerpt, response_body);
     }
 
     #[test]

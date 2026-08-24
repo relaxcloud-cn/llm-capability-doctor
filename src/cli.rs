@@ -29,8 +29,8 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub log_file: Option<PathBuf>,
 
-    /// Per-request timeout in seconds. Defaults to 120.
-    #[arg(long, default_value_t = 120, value_parser = parse_positive_integer)]
+    /// Per-request timeout in seconds. Defaults to 300.
+    #[arg(long, default_value_t = 300, value_parser = parse_positive_integer)]
     pub timeout: u64,
 
     /// Print the 46-item catalog and exit.
@@ -130,7 +130,7 @@ mod tests {
             model: Some("test-model".to_owned()),
             api_key: Some("secret".to_owned()),
             log_file: None,
-            timeout: 120,
+            timeout: 300,
             list_tests: false,
             insecure: false,
             self_analyze: false,
@@ -150,6 +150,7 @@ mod tests {
         ])
         .unwrap();
         assert!(!disabled.self_analyze);
+        assert_eq!(disabled.timeout, 300);
 
         let enabled = Cli::try_parse_from([
             "doctor",
