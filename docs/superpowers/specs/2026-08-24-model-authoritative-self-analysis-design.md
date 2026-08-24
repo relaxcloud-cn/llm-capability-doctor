@@ -9,6 +9,7 @@ Make the tested model the sole authority for each self-analysis PASS/FAIL decisi
 - Keep the collection phase, request plans, protocol parsers, tool-loop execution, and `evidence.v4` log unchanged.
 - Keep strict input-contract checks before analysis: complete run, supported schema/version, exact 46-test catalog, valid request references, Base64 sections, and required log structure.
 - Keep analysis packet size limits, redaction, batch boundaries, cancellation, collision-safe output, and response JSON/schema/reference validation.
+- Split check 057 evidence into four analysis packets for the 4, 8, 16, and 32 concurrency waves; use a 16KiB excerpt cap and 256KiB packet cap, then merge the four model reviews back into one report item.
 - Remove deterministic capability hard-fail evaluation from packet construction and final status selection.
 - Remove `hard_failures` as a source of PASS/FAIL decisions. Packets contain raw request metadata and bounded excerpts plus the declared test criteria; the model interprets them.
 - Set `validatedStatus` equal to the accepted model `candidateStatus` and `decisionSource` to `TARGET_MODEL`.
