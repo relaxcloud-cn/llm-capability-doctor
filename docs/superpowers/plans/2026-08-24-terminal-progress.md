@@ -16,7 +16,7 @@
 - Create: `src/terminal.rs`
 - Modify: `src/lib.rs`
 
-- [ ] **Step 1: Write failing unit tests for labels and safe text output**
+- [x] **Step 1: Write failing unit tests for labels and safe text output**
 
 Add tests that assert:
 
@@ -30,13 +30,13 @@ assert_eq!(collection_line(14, 46, "上下文能力", "测试模型是否支持 
 
 Assert every formatted line has no `\x1b` escape byte.
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `cargo test terminal::tests --lib`
 
 Expected: compilation failure because the `terminal` module and formatting functions do not exist.
 
-- [ ] **Step 3: Implement terminal labels and formatter functions**
+- [x] **Step 3: Implement terminal labels and formatter functions**
 
 Add `pub mod terminal;` to `src/lib.rs`. In `src/terminal.rs`, implement these pure functions:
 
@@ -103,7 +103,7 @@ Use the following terminal-only titles. They never replace `TestCase.name` in au
 
 Use `X` only when `concurrency` is `Some(4 | 8 | 16 | 32)`; otherwise use `4/8/16/32 并发响应表现`. `display_path` returns `./relative/path` when the path is below the current directory and returns the original absolute path otherwise.
 
-- [ ] **Step 4: Run focused tests and commit**
+- [x] **Step 4: Run focused tests and commit**
 
 Run: `cargo test terminal::tests --lib`
 
@@ -115,23 +115,23 @@ Expected: PASS.
 - Modify: `src/runner.rs`
 - Test: `src/runner/tests.rs`
 
-- [ ] **Step 1: Write failing collection-progress tests**
+- [x] **Step 1: Write failing collection-progress tests**
 
 Add a pure `collection_progress_line` helper test for position 14/context and position 44/wave 4 of 4. Add a plan-level assertion that test 057 still contains four `RequestGroup::Concurrent` groups of lengths 4, 8, 16, 32.
 
-- [ ] **Step 2: Run the focused test and confirm it fails**
+- [x] **Step 2: Run the focused test and confirm it fails**
 
 Run: `cargo test runner::tests::collection_progress --lib`
 
 Expected: failure because `Runner` has no collection position/wave rendering seam.
 
-- [ ] **Step 3: Add collection progress rendering before real work**
+- [x] **Step 3: Add collection progress rendering before real work**
 
 Change `Runner::execute` to enumerate `self.selected.clone()` and print one line using `terminal::collection_line` before each non-057 check. Change `execute_check` and `execute_groups` to receive `collection_position` and the `TestCase` reference. For test 057, print a line before each `RequestGroup::Concurrent` with `wave = Some((group_index + 1, 4))` and `display_title("057", Some(requests.len()))`; do not print an additional generic 057 line.
 
 Do not print request bodies, model output, credentials, or per-request network details. Do not alter `TestManifest`, request IDs, group execution ordering, or evidence logging.
 
-- [ ] **Step 4: Run runner and performance tests**
+- [x] **Step 4: Run runner and performance tests**
 
 Run: `cargo test runner::tests checks::performance::tests::check_057_requests_any_short_non_empty_response --lib`
 
@@ -144,7 +144,7 @@ Expected: PASS.
 - Modify: `src/main.rs`
 - Test: `src/analysis/orchestrator.rs`
 
-- [ ] **Step 1: Write failing event-order tests**
+- [x] **Step 1: Write failing event-order tests**
 
 Introduce test-only collection of progress messages for one batch that first returns `ClientError::Transport("timeout")` then a valid envelope. Assert this exact event order:
 
@@ -156,17 +156,17 @@ Introduce test-only collection of progress messages for one batch that first ret
 
 Add a separate unrecoverable batch assertion ending in `分析不可用`.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 Run: `cargo test analysis::orchestrator::tests::analysis_progress --lib`
 
 Expected: failure because progress events are not emitted.
 
-- [ ] **Step 3: Add a callback-based progress seam**
+- [x] **Step 3: Add a callback-based progress seam**
 
 Define a private `AnalysisProgressEvent` enum for batch start, retry, and finish. Add `analyze_with_client_and_progress` that accepts `&mut dyn FnMut(AnalysisProgressEvent)`. Keep `analyze_with_client` as a no-op-wrapper for existing tests. Make public `analyze` use a terminal callback that prints formatter lines. Pass the callback into `process_batch` and `analyze_with_transport_retries`; emit retry before each bounded backoff. Calculate batch categories in catalog order from the `EvidencePacket` category values and render test IDs as compressed ranges such as `001-004` or joined values where IDs are not contiguous.
 
-- [ ] **Step 4: Run orchestrator tests**
+- [x] **Step 4: Run orchestrator tests**
 
 Run: `cargo test analysis::orchestrator::tests --lib`
 
@@ -179,17 +179,17 @@ Expected: PASS.
 - Modify: `README.md`
 - Test: `src/terminal.rs`
 
-- [ ] **Step 1: Write failing path and summary tests**
+- [x] **Step 1: Write failing path and summary tests**
 
 Test `display_path` with a child path under `current_dir` and an unrelated absolute path. Assert the child result starts with `./` and the unrelated path remains absolute.
 
-- [ ] **Step 2: Run the focused test and confirm failure**
+- [x] **Step 2: Run the focused test and confirm failure**
 
 Run: `cargo test terminal::tests::display_path --lib`
 
 Expected: failure until the formatter is added in Task 1; this step remains documented as the path regression guard.
 
-- [ ] **Step 3: Replace main completion printing**
+- [x] **Step 3: Replace main completion printing**
 
 Use plain separators and these sections:
 
@@ -207,7 +207,7 @@ JSON：model-doctor-self-analysis.json
 
 Derive the output directory from `outcome.log_path.parent()` and use `display_path` for it. Keep cancellation wording and error behavior intact.
 
-- [ ] **Step 4: Update README and run CLI integration test**
+- [x] **Step 4: Update README and run CLI integration test**
 
 Document the two-stage terminal progress. Run: `cargo test --test cli_self_analysis`
 
@@ -218,11 +218,11 @@ Expected: PASS; default non-self-analysis runs must still not print self-analysi
 **Files:**
 - Modify: `docs/superpowers/plans/2026-08-24-terminal-progress.md`
 
-- [ ] **Step 1: Run complete verification**
+- [x] **Step 1: Run complete verification**
 
 Run `cargo fmt --check`, `git diff --check`, `cargo test --all-targets`, `cargo clippy --all-targets -- -D warnings`, `cargo build --release`, and `python3 -m unittest discover -s skills/creating-model-doctor-reports/tests -p 'test_*.py'`.
 
-- [ ] **Step 2: Inspect output-oriented diff and mark plan complete**
+- [x] **Step 2: Inspect output-oriented diff and mark plan complete**
 
 Confirm the diff has no ANSI escape construction, no credentials/evidence-body printing, preserves 46 catalog manifests and 057's four waves, and preserves silent test helper behavior.
 

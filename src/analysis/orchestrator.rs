@@ -22,6 +22,7 @@ use super::validator::{
 use crate::private_file::create_new_private_file;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
+use crate::terminal;
 
 pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v3";
 pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
@@ -197,6 +198,31 @@ struct ProcessedBatch {
     error: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+enum AnalysisProgressEvent {
+    Started {
+        total_batches: usize,
+    },
+    BatchStarted {
+        index: usize,
+        total: usize,
+        categories: Vec<String>,
+        test_ids: Vec<String>,
+    },
+    BatchRetry {
+        index: usize,
+        total: usize,
+        categories: Vec<String>,
+        retry: usize,
+    },
+    BatchFinished {
+        index: usize,
+        total: usize,
+        categories: Vec<String>,
+        unavailable: bool,
+    },
+}
+
 pub async fn analyze(
     settings: AnalysisSettings,
     cancellation: CancellationToken,
@@ -210,13 +236,25 @@ pub async fn analyze(
         protocol: settings.protocol,
         auth_mode: settings.auth_mode,
     })?;
-    analyze_with_client(settings, &client, cancellation).await
+    let mut print_progress = |event| println!("{}", analysis_progress_line(&event));
+    analyze_with_client_and_progress(settings, &client, cancellation, &mut print_progress).await
 }
 
+#[cfg(test)]
 pub(crate) async fn analyze_with_client<C: AnalysisClient>(
     settings: AnalysisSettings,
     client: &C,
     cancellation: CancellationToken,
+) -> Result<AnalysisOutcome, AnalysisError> {
+    let mut ignore_progress = |_| {};
+    analyze_with_client_and_progress(settings, client, cancellation, &mut ignore_progress).await
+}
+
+async fn analyze_with_client_and_progress<C: AnalysisClient>(
+    settings: AnalysisSettings,
+    client: &C,
+    cancellation: CancellationToken,
+    progress: &mut dyn FnMut(AnalysisProgressEvent),
 ) -> Result<AnalysisOutcome, AnalysisError> {
     let redactor = Redactor::new(&settings.api_key, &settings.url);
     let evidence = read(&settings.log_path, &redactor)?;
@@ -224,9 +262,13 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
     let mut tests = Vec::with_capacity(crate::catalog::CATALOG.len());
     let mut batch_results = Vec::with_capacity(batches.len());
     let mut cancelled = false;
+    let total_batches = batches.len();
+    progress(AnalysisProgressEvent::Started { total_batches });
 
-    for batch in batches {
+    for (batch_index, batch) in batches.into_iter().enumerate() {
+        let index = batch_index + 1;
         let test_ids: Vec<String> = batch.iter().map(|packet| packet.test_id.clone()).collect();
+        let categories = batch_categories(&batch);
         if cancellation.is_cancelled() {
             cancelled = true;
             let error = "analysis cancelled before batch started".to_owned();
@@ -236,10 +278,38 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
                 attempts: 0,
                 error: Some(error),
             });
+            progress(AnalysisProgressEvent::BatchFinished {
+                index,
+                total: total_batches,
+                categories,
+                unavailable: true,
+            });
             continue;
         }
 
-        let processed = process_batch(client, &batch, cancellation.child_token()).await?;
+        progress(AnalysisProgressEvent::BatchStarted {
+            index,
+            total: total_batches,
+            categories: categories.clone(),
+            test_ids: test_ids.clone(),
+        });
+        let processed = {
+            let mut report_retry = |retry| {
+                progress(AnalysisProgressEvent::BatchRetry {
+                    index,
+                    total: total_batches,
+                    categories: categories.clone(),
+                    retry,
+                });
+            };
+            process_batch(
+                client,
+                &batch,
+                cancellation.child_token(),
+                &mut report_retry,
+            )
+            .await?
+        };
         if cancellation.is_cancelled() {
             cancelled = true;
         }
@@ -247,6 +317,7 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
             .error
             .as_deref()
             .map(|error| redactor.redact_text(error));
+        let unavailable = processed.reviews.is_none();
         match processed.reviews {
             Some(reviews) => tests.extend(
                 reviews
@@ -262,6 +333,12 @@ pub(crate) async fn analyze_with_client<C: AnalysisClient>(
             test_ids,
             attempts: processed.attempts,
             error: safe_error,
+        });
+        progress(AnalysisProgressEvent::BatchFinished {
+            index,
+            total: total_batches,
+            categories,
+            unavailable,
         });
     }
 
@@ -328,6 +405,7 @@ async fn process_batch<C: AnalysisClient>(
     client: &C,
     batch: &[EvidencePacket],
     cancellation: CancellationToken,
+    on_retry: &mut dyn FnMut(usize),
 ) -> Result<ProcessedBatch, AnalysisError> {
     let original_prompt = build_prompt(batch)?;
     let mut prompt = original_prompt.clone();
@@ -342,7 +420,8 @@ async fn process_batch<C: AnalysisClient>(
             });
         }
         let (response, transport_attempts) =
-            analyze_with_transport_retries(client, &prompt, cancellation.child_token()).await;
+            analyze_with_transport_retries(client, &prompt, cancellation.child_token(), on_retry)
+                .await;
         attempts += transport_attempts;
         match response {
             Ok(envelope) => match validate_candidates(batch, envelope) {
@@ -384,6 +463,7 @@ async fn analyze_with_transport_retries<C: AnalysisClient>(
     client: &C,
     prompt: &str,
     cancellation: CancellationToken,
+    on_retry: &mut dyn FnMut(usize),
 ) -> (Result<CandidateEnvelope, ClientError>, usize) {
     for attempt in 1..=MAX_ANALYSIS_TRANSPORT_ATTEMPTS {
         if cancellation.is_cancelled() {
@@ -396,6 +476,7 @@ async fn analyze_with_transport_retries<C: AnalysisClient>(
         if !retryable_transport_error(&response) || attempt == MAX_ANALYSIS_TRANSPORT_ATTEMPTS {
             return (response, attempt);
         }
+        on_retry(attempt);
         let delay = Duration::from_secs(attempt as u64);
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
@@ -405,6 +486,49 @@ async fn analyze_with_transport_retries<C: AnalysisClient>(
         }
     }
     unreachable!("bounded retry loop always returns")
+}
+
+fn batch_categories(batch: &[EvidencePacket]) -> Vec<String> {
+    let mut categories = Vec::new();
+    for packet in batch {
+        let category = terminal::display_category(&packet.category).to_owned();
+        if !categories.contains(&category) {
+            categories.push(category);
+        }
+    }
+    categories
+}
+
+fn analysis_progress_line(event: &AnalysisProgressEvent) -> String {
+    match event {
+        AnalysisProgressEvent::Started { total_batches } => {
+            format!("========== 阶段 2/2 被测模型分析本地证据 | 共 {total_batches} 批 ==========")
+        }
+        AnalysisProgressEvent::BatchStarted {
+            index,
+            total,
+            categories,
+            test_ids,
+        } => terminal::analysis_start_line(*index, *total, categories, test_ids),
+        AnalysisProgressEvent::BatchRetry {
+            index,
+            total,
+            categories,
+            retry,
+        } => terminal::analysis_retry_line(
+            *index,
+            *total,
+            categories,
+            *retry,
+            MAX_ANALYSIS_TRANSPORT_ATTEMPTS,
+        ),
+        AnalysisProgressEvent::BatchFinished {
+            index,
+            total,
+            categories,
+            unavailable,
+        } => terminal::analysis_finish_line(*index, *total, categories, *unavailable),
+    }
 }
 
 fn retryable_transport_error(response: &Result<CandidateEnvelope, ClientError>) -> bool {
@@ -1250,6 +1374,68 @@ mod tests {
         assert_eq!(outcome.unavailable_count, 0);
         assert_eq!(outcome.available_count, 46);
         assert_eq!(client.call_count(), batches.len() + 1);
+    }
+
+    #[tokio::test]
+    async fn analysis_progress_reports_batch_start_retry_and_completion() {
+        let (_directory, settings, batches) = fixture().await;
+        let mut responses = vec![Err(ClientError::Transport("timeout".into()))];
+        responses.push(Ok(valid_envelope_for(&batches[0])));
+        responses.extend(
+            batches[1..]
+                .iter()
+                .map(|batch| Ok(valid_envelope_for(batch))),
+        );
+        let client = FakeClient::new(responses);
+        let mut lines = Vec::new();
+
+        let outcome = analyze_with_client_and_progress(
+            settings,
+            &client,
+            CancellationToken::new(),
+            &mut |event| lines.push(analysis_progress_line(&event)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(
+            lines[0],
+            format!(
+                "========== 阶段 2/2 被测模型分析本地证据 | 共 {} 批 ==========",
+                batches.len()
+            )
+        );
+        assert_eq!(lines[1], "[自分析 01/12] 接口与协议 | 001-004 | 正在分析");
+        assert_eq!(lines[2], "[自分析 01/12] 接口与协议 | 重试 1/3");
+        assert_eq!(lines[3], "[自分析 01/12] 接口与协议 | 已完成");
+    }
+
+    #[tokio::test]
+    async fn analysis_progress_marks_unavailable_batch() {
+        let (_directory, settings, batches) = fixture().await;
+        let mut responses = (0..3)
+            .map(|_| Err(ClientError::Transport("offline".into())))
+            .collect::<Vec<_>>();
+        responses.extend(
+            batches[1..]
+                .iter()
+                .map(|batch| Ok(valid_envelope_for(batch))),
+        );
+        let client = FakeClient::new(responses);
+        let mut lines = Vec::new();
+
+        let outcome = analyze_with_client_and_progress(
+            settings,
+            &client,
+            CancellationToken::new(),
+            &mut |event| lines.push(analysis_progress_line(&event)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.unavailable_count, batches[0].len());
+        assert!(lines.contains(&"[自分析 01/12] 接口与协议 | 分析不可用".into()));
     }
 
     #[test]

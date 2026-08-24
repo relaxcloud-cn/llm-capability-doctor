@@ -29,6 +29,27 @@ fn run_outcome_exposes_detected_connection_metadata() {
     assert_eq!(outcome.detected_auth_mode, AuthMode::Bearer);
 }
 
+#[test]
+fn collection_progress_includes_category_purpose_and_concurrency_wave() {
+    let context = crate::catalog::CATALOG
+        .iter()
+        .find(|test| test.id == "014")
+        .unwrap();
+    let concurrency = crate::catalog::CATALOG
+        .iter()
+        .find(|test| test.id == "057")
+        .unwrap();
+
+    assert_eq!(
+        collection_progress_line(14, 46, context, None),
+        "[采集 14/46] 上下文能力 | 测试模型是否支持 8K 上下文长度"
+    );
+    assert_eq!(
+        collection_progress_line(44, 46, concurrency, Some((4, 4, 32))),
+        "[采集 44/46 | 并发 4/4] 性能与稳定性 | 测试模型在 32 并发下能否正常响应"
+    );
+}
+
 #[tokio::test]
 async fn ordinary_stream_request_records_official_terminal() {
     let body = openai_chat_final_stream("MODEL_DOCTOR_CASE_006_OK", true);

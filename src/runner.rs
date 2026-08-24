@@ -25,6 +25,7 @@ use crate::protocol::{
     AuthMode, PROBE_CANDIDATES, Protocol, basic_request, matches_response, normalize_request_url,
 };
 use crate::redaction::{Redactor, mask_api_key};
+use crate::terminal;
 
 pub struct RunOutcome {
     pub duration: Duration,
@@ -279,14 +280,28 @@ impl Runner {
     }
 
     async fn execute(&mut self) -> Result<(), RunnerError> {
-        for test in self.selected.clone() {
+        let total = self.selected.len();
+        println!("========== 阶段 1/2 采集模型响应 ==========");
+        for (index, test) in self.selected.clone().into_iter().enumerate() {
             self.ensure_not_cancelled()?;
-            println!("正在执行检测项 {}：{}", test.id, test.name);
+            let collection_progress = (index + 1, total);
+            if test.id != "057" {
+                println!(
+                    "{}",
+                    collection_progress_line(
+                        collection_progress.0,
+                        collection_progress.1,
+                        test,
+                        None
+                    )
+                );
+            }
             if test.id != "001" && !self.protocol_checked {
                 self.protocol_checked = true;
                 self.detect_protocol().await?;
             }
-            self.execute_check(test).await?;
+            self.execute_check_with_progress(test, Some(collection_progress))
+                .await?;
         }
         Ok(())
     }
@@ -325,7 +340,16 @@ impl Runner {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn execute_check(&mut self, test: &'static TestCase) -> Result<(), RunnerError> {
+        self.execute_check_with_progress(test, None).await
+    }
+
+    async fn execute_check_with_progress(
+        &mut self,
+        test: &'static TestCase,
+        collection_progress: Option<(usize, usize)>,
+    ) -> Result<(), RunnerError> {
         let is_tool_loop = matches!(test.id, "046" | "047" | "048" | "049");
         if is_tool_loop && self.detected_protocol == Protocol::Unknown {
             self.audit.append_manifest(&TestManifest {
@@ -361,7 +385,8 @@ impl Runner {
         {
             Vec::new()
         } else {
-            self.execute_groups(check_plan.groups).await?
+            self.execute_groups(check_plan.groups, test, collection_progress)
+                .await?
         };
 
         let executed_refs: Vec<String> = evidence
@@ -395,9 +420,11 @@ impl Runner {
     async fn execute_groups(
         &mut self,
         groups: Vec<RequestGroup>,
+        test: &'static TestCase,
+        collection_progress: Option<(usize, usize)>,
     ) -> Result<Vec<RequestEvidence>, RunnerError> {
         let mut evidence = Vec::new();
-        for group in groups {
+        for (group_index, group) in groups.into_iter().enumerate() {
             match group {
                 RequestGroup::Sequential(requests) => {
                     for request in requests {
@@ -406,6 +433,19 @@ impl Runner {
                     }
                 }
                 RequestGroup::Concurrent(requests) => {
+                    if test.id == "057"
+                        && let Some((position, total)) = collection_progress
+                    {
+                        println!(
+                            "{}",
+                            collection_progress_line(
+                                position,
+                                total,
+                                test,
+                                Some((group_index + 1, 4, requests.len()))
+                            )
+                        );
+                    }
                     evidence.extend(self.execute_concurrent(requests).await?);
                     self.ensure_not_cancelled()?;
                 }
@@ -522,6 +562,27 @@ impl Runner {
 
     #[cfg(not(test))]
     fn maybe_invalidate_follow_up(&mut self, _spec: &mut crate::protocol::RequestSpec) {}
+}
+
+fn collection_progress_line(
+    position: usize,
+    total: usize,
+    test: &TestCase,
+    wave: Option<(usize, usize, usize)>,
+) -> String {
+    let (wave_progress, concurrency) = match wave {
+        Some((current, wave_total, concurrency)) => {
+            (Some((current, wave_total)), Some(concurrency))
+        }
+        None => (None, None),
+    };
+    terminal::collection_line(
+        position,
+        total,
+        test.category,
+        &terminal::display_title(test.id, concurrency),
+        wave_progress,
+    )
 }
 
 async fn parse_stream_evidence(evidence: &mut RequestEvidence) -> Option<StreamParseResult> {
