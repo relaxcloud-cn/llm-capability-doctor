@@ -1403,6 +1403,7 @@ mod tests {
         assert!(client.prompts()[1].contains("missing reviews"));
         let output = std::fs::read_to_string(&outcome.path).unwrap();
         assert!(output.contains("llm-capability-doctor.self-analysis.v3"));
+        assert!(output.contains("model-doctor-self-analysis-prompt.v4"));
         assert!(output.contains("\"gatewayCompatibility\""));
         assert!(!output.contains("openCodexCompatibility"));
         assert!(!output.contains("secret-key"));

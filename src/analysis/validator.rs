@@ -134,6 +134,17 @@ fn validate_candidate(
                 candidate.test_id
             ));
         }
+        CandidateStatus::Fail
+            if candidate
+                .failure_cause
+                .as_deref()
+                .is_some_and(|value| !contains_simplified_chinese(value)) =>
+        {
+            errors.push(format!(
+                "candidate {} failureCause must use Simplified Chinese",
+                candidate.test_id
+            ));
+        }
         _ => {}
     }
     if candidate
@@ -169,6 +180,13 @@ fn validate_candidate(
             ));
         }
     }
+}
+
+fn contains_simplified_chinese(value: &str) -> bool {
+    value.chars().any(|character| {
+        ('\u{3400}'..='\u{4dbf}').contains(&character)
+            || ('\u{4e00}'..='\u{9fff}').contains(&character)
+    })
 }
 
 fn accept_candidate(packet: &EvidencePacket, candidate: CandidateReview) -> ValidatedReview {
@@ -237,7 +255,7 @@ mod tests {
     fn target_model_fail_remains_authoritative() {
         let packet = packet_fixture();
         let mut candidate = candidate_fixture(CandidateStatus::Fail, &["request:test-006"]);
-        candidate.failure_cause = Some("model reported an incomplete answer".into());
+        candidate.failure_cause = Some("模型报告答案不完整。".into());
 
         let validated = validate_candidates(
             &[packet],
@@ -250,6 +268,27 @@ mod tests {
         assert_eq!(validated[0].candidate_status, CandidateStatus::Fail);
         assert_eq!(validated[0].validated_status, ValidatedStatus::Fail);
         assert_eq!(validated[0].decision_source, DecisionSource::TargetModel);
+    }
+
+    #[test]
+    fn rejects_non_chinese_failure_cause() {
+        let packet = packet_fixture();
+        let mut candidate = candidate_fixture(CandidateStatus::Fail, &["request:test-006"]);
+        candidate.failure_cause = Some("model reported an incomplete answer".into());
+
+        let errors = validate_candidates(
+            &[packet],
+            CandidateEnvelope {
+                reviews: vec![candidate],
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("failureCause must use Simplified Chinese"))
+        );
     }
 
     fn packet_fixture() -> EvidencePacket {
