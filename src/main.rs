@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -6,6 +7,7 @@ use model_capability_doctor::analysis::orchestrator::{
 };
 use model_capability_doctor::catalog;
 use model_capability_doctor::cli::Cli;
+use model_capability_doctor::terminal;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
@@ -53,15 +55,10 @@ async fn main() -> ExitCode {
             };
             match result.expect("runner branch always returns a result") {
                 Ok(outcome) => {
-                    println!("================ 检测完成 ================");
-                    println!("总耗时：{}秒", outcome.duration.as_secs());
-                    println!("总请求数：{}", outcome.request_count);
-                    println!("测试清单数：{}", outcome.manifest_count);
-                    println!();
-                    println!("日志文件：{}", outcome.log_path.display());
+                    print_collection_outcome(&outcome);
                     if let Some(connection) = analysis_connection {
                         println!();
-                        println!("正在使用被测模型分析本地日志……");
+                        println!("正在准备本地证据分析……");
                         let analysis = model_capability_doctor::analysis::orchestrator::analyze(
                             connection.for_run(
                                 outcome.log_path.clone(),
@@ -104,16 +101,43 @@ async fn main() -> ExitCode {
     }
 }
 
-fn print_analysis_outcome(outcome: &AnalysisOutcome) {
-    println!("分析文件：{}", outcome.path.display());
-    println!("Markdown 结果文件：{}", outcome.markdown_path.display());
+fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcome) {
+    println!("========== 检测完成 / 采集阶段 ==========");
     println!(
-        "分析结果：可用 {}（PASS {} / FAIL {}），不可用 {}",
+        "耗时：{} 秒 | 请求：{} | 检测项：{}",
+        outcome.duration.as_secs(),
+        outcome.request_count,
+        outcome.manifest_count
+    );
+    print_output_location("日志", &outcome.log_path);
+}
+
+fn print_analysis_outcome(outcome: &AnalysisOutcome) {
+    println!("========== 自分析完成 ==========");
+    println!(
+        "可用：{}（PASS {} / FAIL {}）| 不可用：{}",
         outcome.available_count, outcome.pass_count, outcome.fail_count, outcome.unavailable_count
     );
+    let directory = outcome.path.parent().unwrap_or_else(|| Path::new("."));
+    println!("输出目录：{}", terminal::display_path(directory));
+    println!("JSON：{}", file_name(&outcome.path));
+    println!("结果：{}", file_name(&outcome.markdown_path));
     if outcome.cancelled {
         println!("分析状态：已取消；未完成批次已标记为 ANALYSIS_UNAVAILABLE");
     }
+}
+
+fn print_output_location(label: &str, path: &Path) {
+    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    println!("输出目录：{}", terminal::display_path(directory));
+    println!("{label}：{}", file_name(path));
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || terminal::display_path(path),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 fn missing_value_option(arguments: &[std::ffi::OsString]) -> Option<&str> {
