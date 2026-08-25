@@ -8,6 +8,7 @@ use model_capability_doctor::analysis::orchestrator::{
 };
 use model_capability_doctor::catalog;
 use model_capability_doctor::cli::Cli;
+use model_capability_doctor::opencodex::contract::Adapter;
 use model_capability_doctor::opencodex::report::ReportPaths;
 use model_capability_doctor::opencodex::runner::{OpenCodexOutcome, OpenCodexSettings};
 use model_capability_doctor::terminal;
@@ -108,7 +109,11 @@ async fn main() -> ExitCode {
                                     return ExitCode::FAILURE;
                                 }
                             };
-                        print_opencodex_outcome(&compatibility_outcome, &report_paths);
+                        print_opencodex_outcome(
+                            &compatibility_outcome,
+                            &report_paths,
+                            &outcome.detected_protocol.to_string(),
+                        );
                         opencodex_outcome = Some(compatibility_outcome);
                     }
                     if let Some(connection) = analysis_connection {
@@ -173,14 +178,33 @@ async fn main() -> ExitCode {
     }
 }
 
-fn print_opencodex_outcome(outcome: &OpenCodexOutcome, paths: &ReportPaths) {
+fn print_opencodex_outcome(
+    outcome: &OpenCodexOutcome,
+    paths: &ReportPaths,
+    detected_protocol: &str,
+) {
     println!("========== OpenCodex v2.7.42 模型输出兼容性 ==========");
-    for result in &outcome.results {
-        let status = if result.passed { "通过" } else { "不通过" };
-        println!("{}：{status}", result.adapter.id());
+    if let Some(adapter) = adapter_for_protocol(detected_protocol) {
+        if let Some(result) = outcome
+            .results
+            .iter()
+            .find(|result| result.adapter == adapter)
+        {
+            let status = if result.passed { "通过" } else { "不通过" };
+            println!("检测协议：`{detected_protocol}` | 检测结果：{status}");
+        }
     }
     println!("JSON：{}", file_name(&paths.json));
     println!("结果已合并到主报告：model-doctor-self-analysis.md");
+}
+
+fn adapter_for_protocol(protocol: &str) -> Option<Adapter> {
+    match protocol {
+        "openai_chat" => Some(Adapter::OpenAiChat),
+        "anthropic_messages" => Some(Adapter::Anthropic),
+        "gemini_generate_content" => Some(Adapter::Google),
+        _ => None,
+    }
 }
 
 fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcome) {

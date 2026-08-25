@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::opencodex::contract::{CONTRACT, SOURCE_FILES, contract_digest, rule};
+use crate::opencodex::contract::{Adapter, CONTRACT, SOURCE_FILES, contract_digest, rule};
 use crate::opencodex::runner::OpenCodexOutcome;
 use crate::private_file::create_new_private_file;
 
@@ -40,13 +40,18 @@ pub fn render_markdown_section(outcome: &OpenCodexOutcome, detected_protocol: &s
     let mut output = String::new();
     output.push_str("## 协议兼容性\n\n");
     writeln!(output, "检测协议：`{detected_protocol}`\n").unwrap();
-    output.push_str("| 协议适配器 | 检测结果 | 说明 |\n|---|---|---|\n");
-    for result in &outcome.results {
-        let status = if result.passed { "通过" } else { "不通过" };
-        let detail = if result.passed {
-            "响应结构、流结束和工具调用闭环符合要求。".to_owned()
-        } else {
-            result
+    let adapter = adapter_for_protocol(detected_protocol);
+    let result = adapter.and_then(|adapter| {
+        outcome
+            .results
+            .iter()
+            .find(|result| result.adapter == adapter)
+    });
+    match result {
+        Some(result) if result.passed => output.push_str("检测结果：通过\n\n"),
+        Some(result) => {
+            output.push_str("检测结果：不通过\n\n");
+            let reason = result
                 .failures
                 .iter()
                 .map(|failure| {
@@ -56,19 +61,25 @@ pub fn render_markdown_section(outcome: &OpenCodexOutcome, detected_protocol: &s
                     )
                 })
                 .collect::<Vec<_>>()
-                .join("；")
-        };
-        writeln!(
-            output,
-            "| {} | {} | {} |",
-            result.adapter.id(),
-            status,
-            markdown_cell(&detail)
-        )
-        .unwrap();
+                .join("；");
+            writeln!(output, "不通过原因：{}\n", markdown_cell(&reason)).unwrap();
+        }
+        None => {
+            output.push_str("检测结果：不通过\n\n");
+            output.push_str("不通过原因：未找到该协议对应的兼容性检测结果。\n\n");
+        }
     }
     output.push('\n');
     output
+}
+
+fn adapter_for_protocol(protocol: &str) -> Option<Adapter> {
+    match protocol {
+        "openai_chat" => Some(Adapter::OpenAiChat),
+        "anthropic_messages" => Some(Adapter::Anthropic),
+        "gemini_generate_content" => Some(Adapter::Google),
+        _ => None,
+    }
 }
 
 fn markdown_cell(value: &str) -> String {
@@ -205,12 +216,32 @@ mod tests {
 
     #[test]
     fn markdown_section_summarizes_protocol_results_for_the_main_report() {
-        let section = super::render_markdown_section(&fixture_outcome(), "openai_chat");
+        let mut outcome = fixture_outcome();
+        outcome.results.push(AdapterResult {
+            adapter: Adapter::Anthropic,
+            passed: true,
+            failures: Vec::new(),
+        });
+        outcome.results.push(AdapterResult {
+            adapter: Adapter::Google,
+            passed: false,
+            failures: vec![RuleFailure {
+                rule_id: "OCX-GOOGLE-SHAPE-001",
+                requirement: "Google 响应必须包含可读取的 candidates 内容。",
+                observed_path: "http_status".into(),
+                actual: "401".into(),
+                effect: "OpenCodex 无法读取模型响应。".into(),
+            }],
+        });
+        let section = super::render_markdown_section(&outcome, "openai_chat");
 
         assert!(section.contains("## 协议兼容性"));
         assert!(section.contains("检测协议：`openai_chat`"));
-        assert!(section.contains("| openai-chat | 不通过 |"));
+        assert!(section.contains("检测结果：不通过"));
+        assert!(section.contains("不通过原因："));
         assert!(section.contains("function.name 为 object"));
+        assert!(!section.contains("anthropic"));
+        assert!(!section.contains("google"));
         assert!(!section.contains("# OpenCodex v2.7.42 模型输出兼容性"));
     }
 
