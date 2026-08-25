@@ -28,6 +28,7 @@ use crate::terminal;
 pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v3";
 pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
 const MAX_ANALYSIS_TRANSPORT_ATTEMPTS: usize = 3;
+const MAX_ANALYSIS_SCHEMA_REPAIRS: usize = 5;
 const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
     ["002", "004", "005", "006", "040", "041", "043", "047"];
 const MINIMUM_CONCURRENCY: usize = 4;
@@ -420,7 +421,7 @@ async fn process_batch<C: AnalysisClient>(
     let original_prompt = build_prompt(batch)?;
     let mut prompt = original_prompt.clone();
     let mut attempts = 0;
-    let mut repair_used = false;
+    let mut schema_repair_attempts = 0;
     loop {
         if cancellation.is_cancelled() {
             return Ok(ProcessedBatch {
@@ -442,9 +443,9 @@ async fn process_batch<C: AnalysisClient>(
                         error: None,
                     });
                 }
-                Err(errors) if !repair_used => {
+                Err(errors) if schema_repair_attempts < MAX_ANALYSIS_SCHEMA_REPAIRS => {
                     prompt = build_repair_prompt(&original_prompt, &errors)?;
-                    repair_used = true;
+                    schema_repair_attempts += 1;
                 }
                 Err(errors) => {
                     return Ok(ProcessedBatch {
@@ -454,9 +455,12 @@ async fn process_batch<C: AnalysisClient>(
                     });
                 }
             },
-            Err(error) if !repair_used && repairable_candidate_response(&error) => {
+            Err(error)
+                if schema_repair_attempts < MAX_ANALYSIS_SCHEMA_REPAIRS
+                    && repairable_candidate_response(&error) =>
+            {
                 prompt = build_repair_prompt(&original_prompt, &[error.to_string()])?;
-                repair_used = true;
+                schema_repair_attempts += 1;
             }
             Err(error) => {
                 return Ok(ProcessedBatch {
@@ -1653,6 +1657,30 @@ mod tests {
         assert_eq!(markdown.matches("| PASS |").count(), 46);
         assert!(!markdown.contains("secret-key"));
         drop(directory);
+    }
+
+    #[tokio::test]
+    async fn repairs_invalid_batch_up_to_five_times_then_succeeds() {
+        let (_directory, settings, batches) = fixture().await;
+        let mut responses = (0..5)
+            .map(|_| Err(ClientError::InvalidJson("missing testId".into())))
+            .collect::<Vec<_>>();
+        responses.push(Ok(valid_envelope_for(&batches[0])));
+        responses.extend(
+            batches[1..]
+                .iter()
+                .map(|batch| Ok(valid_envelope_for(batch))),
+        );
+        let client = FakeClient::new(responses);
+
+        let outcome = analyze_with_client(settings, &client, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(outcome.available_count, 46);
+        assert_eq!(client.call_count(), batches.len() + 5);
+        assert!(client.prompts()[5].contains("missing testId"));
     }
 
     #[tokio::test]
