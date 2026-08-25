@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use serde_json::json;
 
 #[test]
-fn opencodex_flag_writes_a_separate_rule_level_report() {
+fn default_run_writes_a_separate_opencodex_rule_level_report() {
     let server = MockServer::start();
     let endpoint = server.url("/v1/chat/completions");
     let response = server.mock(|when, then| {
@@ -40,7 +40,6 @@ fn opencodex_flag_writes_a_separate_rule_level_report() {
             log_path.to_str().unwrap(),
             "--timeout",
             "5",
-            "--opencodex-compatibility",
         ])
         .assert()
         .success()

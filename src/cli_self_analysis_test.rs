@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use serde_json::json;
 
 #[test]
-fn default_cli_run_creates_no_self_analysis_artifact() {
+fn default_cli_run_creates_self_analysis_artifacts() {
     let server = MockServer::start();
     let endpoint = server.url("/v1/chat/completions");
     let response = server.mock(|when, then| {
@@ -44,9 +44,10 @@ fn default_cli_run_creates_no_self_analysis_artifact() {
         .assert()
         .success()
         .stdout(predicate::str::contains("检测完成"))
-        .stdout(predicate::str::contains("分析文件：").not());
+        .stdout(predicate::str::contains("自分析完成"));
 
     assert!(log_path.exists());
-    assert!(!directory.path().join("doctor-self-analysis.json").exists());
+    assert!(directory.path().join("doctor-self-analysis.json").exists());
+    assert!(directory.path().join("doctor-self-analysis.md").exists());
     assert!(response.calls() > 0);
 }

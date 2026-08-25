@@ -41,12 +41,12 @@ pub struct Cli {
     #[arg(long)]
     pub insecure: bool,
 
-    /// Analyze completed evidence by calling the tested model through the same endpoint.
-    #[arg(long)]
+    /// Analyze completed evidence by calling the tested model through the same endpoint. Enabled by default.
+    #[arg(long, default_value_t = true)]
     pub self_analyze: bool,
 
-    /// Test whether model responses satisfy OpenCodex v2.7.42 output contracts.
-    #[arg(long)]
+    /// Test whether model responses satisfy OpenCodex v2.7.42 output contracts. Enabled by default.
+    #[arg(long, default_value_t = true)]
     pub opencodex_compatibility: bool,
 }
 
@@ -145,8 +145,8 @@ mod tests {
     }
 
     #[test]
-    fn self_analysis_is_opt_in() {
-        let disabled = Cli::try_parse_from([
+    fn self_analysis_is_enabled_by_default() {
+        let default = Cli::try_parse_from([
             "doctor",
             "--url",
             "https://example.test/v1/chat/completions",
@@ -156,8 +156,8 @@ mod tests {
             "k",
         ])
         .unwrap();
-        assert!(!disabled.self_analyze);
-        assert_eq!(disabled.timeout, 300);
+        assert!(default.self_analyze);
+        assert_eq!(default.timeout, 300);
 
         let enabled = Cli::try_parse_from([
             "doctor",
@@ -174,8 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn opencodex_compatibility_is_opt_in() {
-        let disabled = Cli::try_parse_from([
+    fn opencodex_compatibility_is_enabled_by_default() {
+        let default = Cli::try_parse_from([
             "doctor",
             "--url",
             "https://example.test/v1/chat/completions",
@@ -185,7 +185,7 @@ mod tests {
             "k",
         ])
         .unwrap();
-        assert!(!disabled.opencodex_compatibility);
+        assert!(default.opencodex_compatibility);
 
         let enabled = Cli::try_parse_from([
             "doctor",
