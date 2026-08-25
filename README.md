@@ -53,7 +53,7 @@ mkdir -p ./model-doctor-output
 
 2.以.md为后缀的文件：本次检测的自分析报告，用来直接查看检测结论，适合给客户看。
 
-3.主 Markdown 的“总体结论”中：说明检测到的协议是否通过，以及未通过的具体原因。
+3.主 Markdown 的“关键检测项结论”中：说明检测到的协议是否通过，以及未通过的具体原因。
 
 ## OpenCodex v2.7.42 模型输出兼容性
 
@@ -75,6 +75,6 @@ mkdir -p ./model-doctor-output
 model-doctor-opencodex-v2742.json
 ```
 
-OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“总体结论”表格中。
+OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“关键检测项结论”表格中。
 
 该阶段的规则固定为 OpenCodex `v2.7.42`，客户环境不需要安装 OpenCodex、Node.js、Bun、Docker，也不会联网下载规则。
