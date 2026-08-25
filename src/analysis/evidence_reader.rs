@@ -48,6 +48,7 @@ pub struct ParsedRequest {
     pub request_id: String,
     pub metadata: BTreeMap<String, String>,
     pub metrics: BTreeMap<String, String>,
+    pub curl_command: String,
     pub request_body: String,
     pub response_headers: String,
     pub stderr: String,
@@ -201,6 +202,7 @@ fn parse_requests(
                 request_id,
                 metadata: redact_map(metadata, redactor),
                 metrics: key_values(section(&block, "RESPONSE METRICS")?),
+                curl_command: redactor.redact_text(section(&block, "CURL COMMAND")?),
                 request_body: decode_section(&block, "REQUEST BODY", redactor)?,
                 response_headers: redactor.redact_text(section(&block, "RESPONSE HEADERS")?),
                 stderr: decode_section(&block, "CURL STDERR", redactor)?,
@@ -437,6 +439,10 @@ mod tests {
         assert_eq!(parsed.tests.len(), 46);
         assert_eq!(parsed.requests.len(), 1);
         assert_eq!(parsed.tests["001"].request_refs, vec!["test-shared"]);
+        assert_eq!(
+            parsed.requests["test-shared"].curl_command,
+            "curl 'https://example.test/v1/chat/completions'"
+        );
         assert_eq!(parsed.source.sha256.len(), 64);
     }
 
@@ -471,6 +477,30 @@ mod tests {
         let parsed = read(&path, &redactor).unwrap();
 
         assert_eq!(parsed.requests["test-shared"].response_body, "[REDACTED]");
+    }
+
+    #[test]
+    fn redacts_known_credentials_from_curl_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(
+            &path,
+            complete_test_log().replace(
+                "curl 'https://example.test/v1/chat/completions'",
+                "curl -H 'Authorization: Bearer secret-token' 'https://example.test/v1/chat/completions?api_key=query-secret'",
+            ),
+        )
+        .unwrap();
+        let redactor = Redactor::new(
+            "secret-token",
+            &Url::parse("https://example.test/v1/chat/completions?api_key=query-secret").unwrap(),
+        );
+
+        let curl_command = &read(&path, &redactor).unwrap().requests["test-shared"].curl_command;
+
+        assert!(curl_command.contains("[REDACTED]"));
+        assert!(!curl_command.contains("secret-token"));
+        assert!(!curl_command.contains("query-secret"));
     }
 
     pub(crate) fn complete_test_log() -> String {

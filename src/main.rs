@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -113,18 +114,36 @@ fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcom
 }
 
 fn print_analysis_outcome(outcome: &AnalysisOutcome) {
-    println!("========== 自分析完成 ==========");
-    println!(
+    print!("{}", format_analysis_outcome(outcome));
+}
+
+fn format_analysis_outcome(outcome: &AnalysisOutcome) -> String {
+    let mut output = String::new();
+    writeln!(output, "========== 自分析完成 ==========").unwrap();
+    writeln!(
+        output,
         "可用：{}（PASS {} / FAIL {}）| 不可用：{}",
         outcome.available_count, outcome.pass_count, outcome.fail_count, outcome.unavailable_count
-    );
+    )
+    .unwrap();
     let directory = outcome.path.parent().unwrap_or_else(|| Path::new("."));
-    println!("输出目录：{}", terminal::display_path(directory));
-    println!("JSON：{}", file_name(&outcome.path));
-    println!("结果：{}", file_name(&outcome.markdown_path));
+    writeln!(output, "输出目录：{}", terminal::display_path(directory)).unwrap();
+    writeln!(output, "JSON：{}", file_name(&outcome.path)).unwrap();
+    writeln!(output, "结果：{}", file_name(&outcome.markdown_path)).unwrap();
+    writeln!(
+        output,
+        "失败 cURL 日志：{}",
+        file_name(&outcome.failed_curl_log_path)
+    )
+    .unwrap();
     if outcome.cancelled {
-        println!("分析状态：已取消；未完成批次已标记为 ANALYSIS_UNAVAILABLE");
+        writeln!(
+            output,
+            "分析状态：已取消；未完成批次已标记为 ANALYSIS_UNAVAILABLE"
+        )
+        .unwrap();
     }
+    output
 }
 
 fn print_output_location(label: &str, path: &Path) {
@@ -174,5 +193,30 @@ fn shutdown_signal() -> impl std::future::Future<Output = u8> {
     async {
         let _ = tokio::signal::ctrl_c().await;
         130
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{AnalysisOutcome, format_analysis_outcome};
+
+    #[test]
+    fn analysis_summary_lists_the_failed_curl_log() {
+        let outcome = AnalysisOutcome {
+            path: PathBuf::from("result.json"),
+            markdown_path: PathBuf::from("result.md"),
+            failed_curl_log_path: PathBuf::from("doctor-failed-curls.log"),
+            available_count: 45,
+            pass_count: 44,
+            fail_count: 1,
+            unavailable_count: 1,
+            cancelled: false,
+        };
+
+        assert!(
+            format_analysis_outcome(&outcome).contains("失败 cURL 日志：doctor-failed-curls.log")
+        );
     }
 }

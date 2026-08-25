@@ -642,6 +642,7 @@ mod tests {
                 ("time_total".into(), "1.0".into()),
                 ("time_starttransfer".into(), "0.5".into()),
             ]),
+            curl_command: String::new(),
             request_body: "prompt".into(),
             response_headers: "content-type: application/json".into(),
             stderr: String::new(),
