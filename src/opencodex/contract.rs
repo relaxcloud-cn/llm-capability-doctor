@@ -64,6 +64,22 @@ pub static SOURCE_FILES: [SourceFile; 4] = [
 
 pub static RULES: &[Rule] = &[
     Rule {
+        id: "OCX-CHAT-SHAPE-001",
+        adapter: Adapter::OpenAiChat,
+        requirement: "OpenAI Chat 响应必须包含可读取的 choices[0] 结构。",
+        source_file: "src/adapters/openai-chat.ts",
+        source_test: "tests/openai-chat-hardening.test.ts",
+        effect: "OpenCodex 无法读取模型响应。",
+    },
+    Rule {
+        id: "OCX-CHAT-STREAM-001",
+        adapter: Adapter::OpenAiChat,
+        requirement: "OpenAI Chat 流中的 SSE 数据必须是完整 JSON。",
+        source_file: "src/adapters/openai-chat.ts",
+        source_test: "tests/openai-chat-hardening.test.ts",
+        effect: "OpenCodex 无法继续读取模型流。",
+    },
+    Rule {
         id: "OCX-CHAT-STREAM-006",
         adapter: Adapter::OpenAiChat,
         requirement: "OpenAI Chat 流必须以 [DONE] 正常结束。",
@@ -72,12 +88,36 @@ pub static RULES: &[Rule] = &[
         effect: "OpenCodex 无法确认这轮响应已完成。",
     },
     Rule {
+        id: "OCX-CHAT-TOOL-003",
+        adapter: Adapter::OpenAiChat,
+        requirement: "流式工具调用的 ID 必须稳定且可关联。",
+        source_file: "src/adapters/openai-chat.ts",
+        source_test: "tests/openai-chat-parallel-stream.test.ts",
+        effect: "OpenCodex 无法把工具结果回传给正确的调用。",
+    },
+    Rule {
         id: "OCX-CHAT-TOOL-004",
         adapter: Adapter::OpenAiChat,
         requirement: "流式工具调用的 function.name 必须是非空字符串。",
         source_file: "src/adapters/openai-chat.ts",
         source_test: "tests/openai-chat-dangling-toolcalls.test.ts",
         effect: "OpenCodex 无法生成 Codex 工具调用事件。",
+    },
+    Rule {
+        id: "OCX-ANTH-SHAPE-001",
+        adapter: Adapter::Anthropic,
+        requirement: "Anthropic 流必须使用可读取的消息和内容块结构。",
+        source_file: "src/adapters/anthropic.ts",
+        source_test: "tests/anthropic-empty-content.test.ts",
+        effect: "OpenCodex 无法读取模型响应。",
+    },
+    Rule {
+        id: "OCX-ANTH-STREAM-001",
+        adapter: Adapter::Anthropic,
+        requirement: "Anthropic 流中的 SSE 数据必须是完整 JSON。",
+        source_file: "src/adapters/anthropic.ts",
+        source_test: "tests/anthropic-compatible-stream.test.ts",
+        effect: "OpenCodex 无法继续读取模型流。",
     },
     Rule {
         id: "OCX-ANTH-STREAM-006",
@@ -96,6 +136,22 @@ pub static RULES: &[Rule] = &[
         effect: "OpenCodex 无法把工具结果回传给正确的调用。",
     },
     Rule {
+        id: "OCX-GOOGLE-SHAPE-001",
+        adapter: Adapter::Google,
+        requirement: "Google 响应必须包含可读取的 candidates 内容。",
+        source_file: "src/adapters/google.ts",
+        source_test: "tests/google-empty-content.test.ts",
+        effect: "OpenCodex 无法读取模型响应。",
+    },
+    Rule {
+        id: "OCX-GOOGLE-STREAM-001",
+        adapter: Adapter::Google,
+        requirement: "Google 流中的数据必须是完整 JSON。",
+        source_file: "src/adapters/google.ts",
+        source_test: "tests/google-hardening.test.ts",
+        effect: "OpenCodex 无法继续读取模型流。",
+    },
+    Rule {
         id: "OCX-GOOGLE-STREAM-006",
         adapter: Adapter::Google,
         requirement: "Google 流必须返回有效的候选结束状态。",
@@ -112,6 +168,13 @@ pub static RULES: &[Rule] = &[
         effect: "OpenCodex 无法生成有效的函数调用。",
     },
 ];
+
+pub fn rule(id: &str) -> &'static Rule {
+    RULES
+        .iter()
+        .find(|rule| rule.id == id)
+        .expect("OpenCodex evaluator only references declared rules")
+}
 
 pub fn contract_digest() -> String {
     let mut hasher = Sha256::new();
