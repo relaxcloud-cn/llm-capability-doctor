@@ -52,3 +52,27 @@ mkdir -p ./model-doctor-output
 1.以.log为后缀的文件：该文件记录了检测项的所有curl请求的输入和输出，用来给技术人员分析使用的。
 
 2.以.md为后缀的文件：本次检测的报告，用来直接查看检测结论的，适合给客户看。
+
+## OpenCodex v2.7.42 模型输出兼容性
+
+在原命令末尾增加 `--opencodex-compatibility`，即可额外检测同一个模型地址返回的数据能否被 OpenCodex v2.7.42 的 `openai-chat`、`anthropic` 和 `google` adapter 读取并转交给 Codex。
+
+```bash
+./model-capability-doctor-v0.12.0-macos-arm64 \
+  --url 'https://model.example/v1/chat/completions' \
+  --model 'your-model-name' \
+  --api-key 'your-api-key' \
+  --log-file './model-doctor-output/model-doctor.log' \
+  --opencodex-compatibility
+```
+
+检测会自动依次发送三种原生请求格式，不需要指定 adapter。每种格式的结果只有“通过”或“不通过”；不通过时，报告会列出 OpenCodex 规则编号、要求的返回字段、实际返回路径和值、以及对工具调用或完成事件的影响。
+
+输出目录会新增：
+
+```text
+model-doctor-opencodex-v2742.json
+model-doctor-opencodex-v2742.md
+```
+
+该阶段的规则固定为 OpenCodex `v2.7.42`，客户环境不需要安装 OpenCodex、Node.js、Bun、Docker，也不会联网下载规则。

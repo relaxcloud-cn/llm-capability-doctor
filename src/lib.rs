@@ -5,12 +5,29 @@ pub mod checks;
 pub mod cli;
 pub mod evidence;
 pub mod http;
+pub mod opencodex;
 pub mod protocol;
 pub mod redaction;
 pub mod runner;
 pub mod terminal;
 
 pub(crate) mod private_file;
+
+#[cfg(test)]
+mod opencodex_contract_tests {
+    use crate::opencodex::contract::{Adapter, CONTRACT, contract_digest};
+
+    #[test]
+    fn contract_is_pinned_to_opencodex_v2742_and_has_three_adapters() {
+        assert_eq!(CONTRACT.version, "v2.7.42");
+        assert_eq!(CONTRACT.commit, "34493b12666a5fd69d69d730b13eabb5ec9d7235");
+        assert_eq!(
+            CONTRACT.adapters,
+            [Adapter::OpenAiChat, Adapter::Anthropic, Adapter::Google]
+        );
+        assert_eq!(contract_digest().len(), 64);
+    }
+}
 
 #[cfg(test)]
 pub(crate) mod test_support;

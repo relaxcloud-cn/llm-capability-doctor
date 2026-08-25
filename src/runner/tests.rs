@@ -1151,6 +1151,7 @@ fn test_config(url: url::Url, log_path: &std::path::Path, timeout: Duration) -> 
         list_tests: false,
         insecure: false,
         self_analyze: false,
+        opencodex_compatibility: false,
     }
     .into_config(None)
     .expect("test config")
