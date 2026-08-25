@@ -45,6 +45,15 @@ pub fn evaluate_stream(adapter: Adapter, parsed: &StreamParseResult) -> AdapterR
     }
 }
 
+pub fn evaluate_http_failure(adapter: Adapter, status: Option<u16>, detail: &str) -> AdapterResult {
+    let actual = status.map_or_else(|| detail.to_owned(), |status| status.to_string());
+    AdapterResult {
+        adapter,
+        passed: false,
+        failures: vec![failure(rule(shape_rule(adapter)), "http_status", actual)],
+    }
+}
+
 fn terminal_rule(adapter: Adapter, termination: &StreamTermination) -> Option<&'static str> {
     match termination {
         StreamTermination::Completed | StreamTermination::NotApplicable => None,
