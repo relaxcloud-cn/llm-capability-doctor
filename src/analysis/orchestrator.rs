@@ -78,6 +78,7 @@ pub struct AnalysisSettings {
 pub struct AnalysisOutcome {
     pub path: PathBuf,
     pub markdown_path: PathBuf,
+    pub failed_curl_log_path: PathBuf,
     pub available_count: usize,
     pub pass_count: usize,
     pub fail_count: usize,
@@ -368,7 +369,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
     let concurrency_waves = summarize_concurrency(&evidence);
     let detected_protocol = settings.protocol.to_string();
     let gateway_compatibility = derive_gateway_compatibility(&detected_protocol, &tests);
-    let mut source = evidence.source;
+    let mut source = evidence.source.clone();
     source.path = PathBuf::from(redactor.redact_text(&source.path.to_string_lossy()));
     source.file_name = redactor.redact_text(&source.file_name);
     let artifact = SelfAnalysisArtifact {
@@ -394,12 +395,14 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
     let pass_count = artifact.counts.pass;
     let fail_count = artifact.counts.fail;
     let unavailable_count = artifact.counts.unavailable;
+    let failed_curl_log_path = write_failed_curl_log(&settings.log_path, &artifact, &evidence)?;
     let path = write_artifact(&settings.log_path, &artifact)?;
     let markdown = render_markdown(&artifact);
     let markdown_path = write_markdown_artifact(&settings.log_path, markdown.as_bytes())?;
     Ok(AnalysisOutcome {
         path,
         markdown_path,
+        failed_curl_log_path,
         available_count: pass_count + fail_count,
         pass_count,
         fail_count,
@@ -1373,17 +1376,157 @@ fn write_markdown_artifact(log_path: &Path, markdown: &[u8]) -> Result<PathBuf, 
 }
 
 fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBuf, AnalysisError> {
+    write_private_output(log_path, bytes, "self-analysis", |path| {
+        Ok(collision_safe_output_path(path, extension))
+    })
+}
+
+fn failed_curl_log_path(log_path: &Path) -> std::io::Result<PathBuf> {
+    let stem = log_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("model-doctor");
+    let initial = log_path.with_file_name(format!("{stem}-failed-curls.log"));
+    if output_path_is_available(&initial)? {
+        return Ok(initial);
+    }
+
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S");
+    for sequence in 1.. {
+        let suffix = if sequence == 1 {
+            timestamp.to_string()
+        } else {
+            format!("{timestamp}-{sequence}")
+        };
+        let candidate = log_path.with_file_name(format!("{stem}-failed-curls-{suffix}.log"));
+        if output_path_is_available(&candidate)? {
+            return Ok(candidate);
+        }
+    }
+    unreachable!()
+}
+
+fn output_path_is_available(path: &Path) -> std::io::Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn render_failed_curl_log(
+    artifact: &SelfAnalysisArtifact,
+    evidence: &ParsedEvidence,
+) -> Result<String, AnalysisError> {
+    let failed: Vec<_> = artifact
+        .tests
+        .iter()
+        .filter(|result| result.validated_status == Some(ValidatedStatus::Fail))
+        .collect();
+    let mut output = String::new();
+    output.push_str("MODEL DOCTOR FAILED CURL COMMANDS\n");
+    writeln!(output, "failed_test_count: {}", failed.len()).unwrap();
+
+    for result in failed {
+        let test_id = &result.report_test_id;
+        if !evidence.tests.contains_key(test_id) {
+            return Err(EvidenceError::Malformed(format!(
+                "failed test {test_id} is missing from evidence"
+            ))
+            .into());
+        }
+        let catalog_test = crate::catalog::CATALOG
+            .iter()
+            .find(|test| test.id == test_id)
+            .ok_or_else(|| {
+                EvidenceError::Malformed(format!("failed test {test_id} is missing from catalog"))
+            })?;
+        if result.evidence_refs.is_empty() {
+            return Err(EvidenceError::Malformed(format!(
+                "failed test {test_id} has no request evidence references"
+            ))
+            .into());
+        }
+
+        output.push('\n');
+        writeln!(output, "========== FAILED TEST {test_id} BEGIN ==========").unwrap();
+        writeln!(output, "test_id: {test_id}").unwrap();
+        writeln!(output, "name: {}", catalog_test.name).unwrap();
+        writeln!(output, "category: {}", catalog_test.category).unwrap();
+        writeln!(
+            output,
+            "failure_cause: {}",
+            result
+                .failure_cause
+                .as_deref()
+                .unwrap_or("模型未提供失败原因")
+        )
+        .unwrap();
+
+        for reference in &result.evidence_refs {
+            let request_id = reference
+                .strip_prefix("request:")
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| {
+                    EvidenceError::Malformed(format!(
+                        "failed test {test_id} has malformed request evidence reference {reference}"
+                    ))
+                })?;
+            let request = evidence.requests.get(request_id).ok_or_else(|| {
+                EvidenceError::Malformed(format!(
+                    "failed test {test_id} references missing request {request_id}"
+                ))
+            })?;
+
+            writeln!(output, "evidence_ref: {reference}").unwrap();
+            output.push_str("----- CURL COMMAND BEGIN -----\n");
+            output.push_str(&request.curl_command);
+            if !request.curl_command.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str("----- CURL COMMAND END -----\n");
+        }
+        writeln!(output, "========== FAILED TEST {test_id} END ==========").unwrap();
+    }
+
+    Ok(output)
+}
+
+fn write_failed_curl_log(
+    log_path: &Path,
+    artifact: &SelfAnalysisArtifact,
+    evidence: &ParsedEvidence,
+) -> Result<PathBuf, AnalysisError> {
+    let rendered = render_failed_curl_log(artifact, evidence)?;
+    write_private_output(
+        log_path,
+        rendered.as_bytes(),
+        "failed-curls",
+        failed_curl_log_path,
+    )
+}
+
+fn write_private_output(
+    log_path: &Path,
+    bytes: &[u8],
+    temporary_name: &str,
+    output_path: impl Fn(&Path) -> std::io::Result<PathBuf>,
+) -> Result<PathBuf, AnalysisError> {
     let directory = log_path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(directory)?;
     let temp_path = loop {
         let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = directory.join(format!(
-            ".model-doctor-self-analysis-{}-{sequence}.tmp",
-            std::process::id()
+            ".model-doctor-{temporary_name}-{}-{sequence}.tmp",
+            std::process::id(),
         ));
         match create_new_private_file(&candidate) {
             Ok(mut file) => {
-                write_complete(&mut file, bytes)?;
+                if let Err(error) = write_complete(&mut file, bytes) {
+                    drop(file);
+                    let _ = std::fs::remove_file(&candidate);
+                    return Err(error.into());
+                }
                 break candidate;
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -1391,16 +1534,40 @@ fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBu
         }
     };
 
+    let result = publish_private_output(
+        &temp_path,
+        log_path,
+        output_path,
+        |source, destination| std::fs::hard_link(source, destination),
+        |path| std::fs::remove_file(path),
+    );
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+fn publish_private_output(
+    temp_path: &Path,
+    log_path: &Path,
+    output_path: impl Fn(&Path) -> std::io::Result<PathBuf>,
+    hard_link: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    remove_file: impl Fn(&Path) -> std::io::Result<()>,
+) -> Result<PathBuf, AnalysisError> {
     loop {
-        let destination = collision_safe_output_path(log_path, extension);
-        match std::fs::hard_link(&temp_path, &destination) {
-            Ok(()) => {
-                std::fs::remove_file(&temp_path)?;
-                return Ok(destination);
-            }
+        let destination = output_path(log_path)?;
+        match hard_link(temp_path, &destination) {
+            Ok(()) => match remove_file(temp_path) {
+                Ok(()) => return Ok(destination),
+                Err(error) => {
+                    let _ = remove_file(&destination);
+                    let _ = remove_file(temp_path);
+                    return Err(error.into());
+                }
+            },
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => {
-                let _ = std::fs::remove_file(&temp_path);
+                let _ = remove_file(temp_path);
                 return Err(error.into());
             }
         }
@@ -1492,6 +1659,9 @@ mod tests {
         assert!(output.contains("\"gatewayCompatibility\""));
         assert!(!output.contains("openCodexCompatibility"));
         assert!(!output.contains("secret-key"));
+        let failed_curls = std::fs::read_to_string(&outcome.failed_curl_log_path).unwrap();
+        assert!(failed_curls.contains("failed_test_count: 0"));
+        assert!(!failed_curls.contains("========== FAILED TEST"));
         let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
         assert!(markdown.contains("## 大分类结论"));
         assert_eq!(markdown.matches("| PASS |").count(), 46);
@@ -1678,6 +1848,257 @@ mod tests {
         assert_eq!(std::fs::read_to_string(first).unwrap(), "existing");
     }
 
+    #[test]
+    fn failed_curl_log_path_uses_source_stem() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("doctor.log");
+
+        assert_eq!(
+            failed_curl_log_path(&log).unwrap(),
+            directory.path().join("doctor-failed-curls.log")
+        );
+    }
+
+    #[test]
+    fn failed_curl_log_path_avoids_collisions_without_overwriting() {
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("doctor.log");
+        let first = failed_curl_log_path(&log).unwrap();
+        std::fs::write(&first, "existing failed curls").unwrap();
+
+        let second = failed_curl_log_path(&log).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read_to_string(first).unwrap(),
+            "existing failed curls"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_curl_log_path_skips_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let log = directory.path().join("doctor.log");
+        let occupied = directory.path().join("doctor-failed-curls.log");
+        symlink(directory.path().join("missing-target"), &occupied).unwrap();
+
+        let candidate = failed_curl_log_path(&log).unwrap();
+
+        assert_ne!(candidate, occupied);
+    }
+
+    #[test]
+    fn published_output_is_removed_when_temp_cleanup_fails() {
+        use std::cell::Cell;
+        use std::io::ErrorKind;
+
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        let temp_path = directory.path().join(".temporary-output");
+        let destination = directory.path().join("doctor-failed-curls.log");
+        std::fs::write(&temp_path, "output").unwrap();
+        let fail_first_temp_removal = Cell::new(true);
+
+        let error = publish_private_output(
+            &temp_path,
+            &log_path,
+            |_| Ok(destination.clone()),
+            |source, destination| std::fs::hard_link(source, destination),
+            |path| {
+                if path == temp_path && fail_first_temp_removal.replace(false) {
+                    return Err(std::io::Error::new(
+                        ErrorKind::PermissionDenied,
+                        "injected temporary cleanup failure",
+                    ));
+                }
+                std::fs::remove_file(path)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            AnalysisError::Output(error)
+                if error.kind() == ErrorKind::PermissionDenied
+                    && error.to_string() == "injected temporary cleanup failure"
+        ));
+        assert!(!destination.exists());
+        assert!(!temp_path.exists());
+    }
+
+    #[test]
+    fn failed_curl_log_writes_only_validated_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let mut failed =
+            available_markdown_result("001", CandidateStatus::Fail, Some("服务端拒绝了请求。"));
+        failed.evidence_refs = vec!["request:test-shared".into()];
+        let artifact = markdown_fixture(vec![
+            failed,
+            available_markdown_result("002", CandidateStatus::Pass, None),
+            AnalysisTestResult {
+                test_id: "003".into(),
+                report_test_id: "003".into(),
+                analysis_state: AnalysisState::AnalysisUnavailable,
+                candidate_status: None,
+                validated_status: None,
+                decision_source: None,
+                observations: Vec::new(),
+                failure_cause: None,
+                evidence_refs: Vec::new(),
+                limitations: vec!["offline".into()],
+                validation_notes: Vec::new(),
+            },
+        ]);
+
+        let output_path = write_failed_curl_log(&log_path, &artifact, &evidence).unwrap();
+        let output = std::fs::read_to_string(output_path).unwrap();
+
+        assert!(output.contains("failed_test_count: 1"));
+        assert!(output.contains("test_id: 001"));
+        assert!(output.contains("name: URL 可达性"));
+        assert!(output.contains("category: 接口与协议"));
+        assert!(output.contains("failure_cause: 服务端拒绝了请求。"));
+        assert!(output.contains("evidence_ref: request:test-shared"));
+        assert!(output.contains("curl 'https://example.test/v1/chat/completions'"));
+        assert!(!output.contains("test_id: 002"));
+        assert!(!output.contains("name: 协议识别"));
+        assert!(!output.contains("test_id: 003"));
+        assert!(!output.contains("name: 鉴权与模型接受"));
+    }
+
+    #[test]
+    fn failed_curl_log_uses_catalog_metadata_instead_of_evidence_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let mut evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let test = evidence.tests.get_mut("001").unwrap();
+        test.name = "secret-forged-name".into();
+        test.category = "secret-forged-category".into();
+        let mut failed =
+            available_markdown_result("001", CandidateStatus::Fail, Some("服务端拒绝了请求。"));
+        failed.evidence_refs = vec!["request:test-shared".into()];
+        let artifact = markdown_fixture(vec![failed]);
+
+        let output = render_failed_curl_log(&artifact, &evidence).unwrap();
+
+        assert!(output.contains("name: URL 可达性"));
+        assert!(output.contains("category: 接口与协议"));
+        assert!(!output.contains("secret-forged-name"));
+        assert!(!output.contains("secret-forged-category"));
+    }
+
+    #[test]
+    fn failed_curl_log_repeats_shared_request_for_each_failed_test() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let mut first =
+            available_markdown_result("001", CandidateStatus::Fail, Some("首次检测失败。"));
+        first.evidence_refs = vec!["request:test-shared".into()];
+        let mut second =
+            available_markdown_result("002", CandidateStatus::Fail, Some("第二次检测失败。"));
+        second.evidence_refs = vec!["request:test-shared".into()];
+        let artifact = markdown_fixture(vec![first, second]);
+
+        let output_path = write_failed_curl_log(&log_path, &artifact, &evidence).unwrap();
+        let output = std::fs::read_to_string(output_path).unwrap();
+
+        for test_id in ["001", "002"] {
+            let start = output
+                .find(&format!(
+                    "========== FAILED TEST {test_id} BEGIN =========="
+                ))
+                .unwrap();
+            let end = output[start..]
+                .find(&format!("========== FAILED TEST {test_id} END =========="))
+                .unwrap();
+            let block = &output[start..start + end];
+            assert!(block.contains("evidence_ref: request:test-shared"));
+            assert!(block.contains("curl 'https://example.test/v1/chat/completions'"));
+        }
+        assert_eq!(
+            output
+                .matches("curl 'https://example.test/v1/chat/completions'")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn failed_curl_log_writes_empty_file_for_all_pass() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let artifact = markdown_fixture(vec![available_markdown_result(
+            "001",
+            CandidateStatus::Pass,
+            None,
+        )]);
+
+        let output_path = write_failed_curl_log(&log_path, &artifact, &evidence).unwrap();
+        let output = std::fs::read_to_string(output_path).unwrap();
+
+        assert!(output.contains("failed_test_count: 0"));
+        assert!(!output.contains("========== FAILED TEST"));
+    }
+
+    #[test]
+    fn failed_curl_log_rejects_malformed_request_reference_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let mut failed =
+            available_markdown_result("001", CandidateStatus::Fail, Some("服务端拒绝了请求。"));
+        failed.evidence_refs = vec!["response:test-shared".into()];
+        let artifact = markdown_fixture(vec![failed]);
+
+        let error = write_failed_curl_log(&log_path, &artifact, &evidence).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AnalysisError::Evidence(EvidenceError::Malformed(message))
+                if message == "failed test 001 has malformed request evidence reference response:test-shared"
+        ));
+        assert!(!failed_curl_log_path(&log_path).unwrap().exists());
+    }
+
+    #[test]
+    fn failed_curl_log_rejects_missing_request_reference_without_writing() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        std::fs::write(&log_path, complete_test_log()).unwrap();
+        let url = Url::parse("https://example.test/v1/chat/completions").unwrap();
+        let evidence = read(&log_path, &Redactor::new("secret-key", &url)).unwrap();
+        let mut failed =
+            available_markdown_result("001", CandidateStatus::Fail, Some("服务端拒绝了请求。"));
+        failed.evidence_refs = vec!["request:not-recorded".into()];
+        let artifact = markdown_fixture(vec![failed]);
+
+        let error = write_failed_curl_log(&log_path, &artifact, &evidence).unwrap_err();
+
+        assert!(matches!(
+            error,
+            AnalysisError::Evidence(EvidenceError::Malformed(message))
+                if message == "failed test 001 references missing request not-recorded"
+        ));
+        assert!(!failed_curl_log_path(&log_path).unwrap().exists());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn output_file_is_private() {
@@ -1694,7 +2115,11 @@ mod tests {
             .await
             .unwrap();
 
-        for path in [outcome.path, outcome.markdown_path] {
+        for path in [
+            outcome.path,
+            outcome.markdown_path,
+            outcome.failed_curl_log_path,
+        ] {
             let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
