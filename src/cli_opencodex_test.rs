@@ -5,7 +5,7 @@ use predicates::prelude::*;
 use serde_json::json;
 
 #[test]
-fn default_run_writes_a_separate_opencodex_rule_level_report() {
+fn default_run_merges_opencodex_summary_into_main_report() {
     let server = MockServer::start();
     let endpoint = server.url("/v1/chat/completions");
     let response = server.mock(|when, then| {
@@ -51,6 +51,10 @@ fn default_run_writes_a_separate_opencodex_rule_level_report() {
             .join("doctor-opencodex-v2742.json")
             .exists()
     );
-    assert!(directory.path().join("doctor-opencodex-v2742.md").exists());
+    let markdown =
+        std::fs::read_to_string(directory.path().join("doctor-self-analysis.md")).unwrap();
+    assert!(markdown.contains("## 协议兼容性"));
+    assert!(markdown.contains("检测协议：`openai_chat`"));
+    assert!(!directory.path().join("doctor-opencodex-v2742.md").exists());
     assert!(response.calls() > 46);
 }

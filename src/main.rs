@@ -68,6 +68,7 @@ async fn main() -> ExitCode {
             match result.expect("runner branch always returns a result") {
                 Ok(outcome) => {
                     print_collection_outcome(&outcome);
+                    let mut opencodex_outcome = None;
                     if let Some((url, model, api_key, timeout, insecure)) = opencodex_connection {
                         println!();
                         println!("正在检测 OpenCodex v2.7.42 模型输出兼容性……");
@@ -108,6 +109,7 @@ async fn main() -> ExitCode {
                                 }
                             };
                         print_opencodex_outcome(&compatibility_outcome, &report_paths);
+                        opencodex_outcome = Some(compatibility_outcome);
                     }
                     if let Some(connection) = analysis_connection {
                         println!();
@@ -133,7 +135,24 @@ async fn main() -> ExitCode {
                             }
                         };
                         match analysis_result {
-                            Ok(analysis_outcome) => print_analysis_outcome(&analysis_outcome),
+                            Ok(analysis_outcome) => {
+                                if let Some(compatibility) = opencodex_outcome.as_ref() {
+                                    let section =
+                                        model_capability_doctor::opencodex::report::render_markdown_section(
+                                            compatibility,
+                                            &outcome.detected_protocol.to_string(),
+                                        );
+                                    if let Err(error) =
+                                        model_capability_doctor::opencodex::report::append_markdown_section(
+                                            &analysis_outcome.markdown_path,
+                                            &section,
+                                        )
+                                    {
+                                        eprintln!("协议兼容性结果合并失败：{error}");
+                                    }
+                                }
+                                print_analysis_outcome(&analysis_outcome);
+                            }
                             Err(error) => {
                                 eprintln!("客户侧分析失败（检测日志已正常生成）：{error}")
                             }
@@ -161,7 +180,7 @@ fn print_opencodex_outcome(outcome: &OpenCodexOutcome, paths: &ReportPaths) {
         println!("{}：{status}", result.adapter.id());
     }
     println!("JSON：{}", file_name(&paths.json));
-    println!("结果：{}", file_name(&paths.markdown));
+    println!("结果已合并到主报告：model-doctor-self-analysis.md");
 }
 
 fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcome) {

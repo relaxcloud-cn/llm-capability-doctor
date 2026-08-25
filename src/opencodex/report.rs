@@ -11,7 +11,6 @@ use crate::private_file::create_new_private_file;
 
 pub struct ReportPaths {
     pub json: PathBuf,
-    pub markdown: PathBuf,
 }
 
 #[derive(Debug, Error)]
@@ -27,11 +26,56 @@ pub fn write_reports(
     outcome: &OpenCodexOutcome,
 ) -> Result<ReportPaths, ReportError> {
     let json_path = write_output(log_path, "json", &render_json(outcome)?)?;
-    let markdown_path = write_output(log_path, "md", render_markdown(outcome).as_bytes())?;
-    Ok(ReportPaths {
-        json: json_path,
-        markdown: markdown_path,
-    })
+    Ok(ReportPaths { json: json_path })
+}
+
+pub fn append_markdown_section(path: &Path, section: &str) -> Result<(), std::io::Error> {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    file.write_all(b"\n")?;
+    file.write_all(section.as_bytes())?;
+    file.flush()
+}
+
+pub fn render_markdown_section(outcome: &OpenCodexOutcome, detected_protocol: &str) -> String {
+    let mut output = String::new();
+    output.push_str("## 协议兼容性\n\n");
+    writeln!(output, "检测协议：`{detected_protocol}`\n").unwrap();
+    output.push_str("| 协议适配器 | 检测结果 | 说明 |\n|---|---|---|\n");
+    for result in &outcome.results {
+        let status = if result.passed { "通过" } else { "不通过" };
+        let detail = if result.passed {
+            "响应结构、流结束和工具调用闭环符合要求。".to_owned()
+        } else {
+            result
+                .failures
+                .iter()
+                .map(|failure| {
+                    format!(
+                        "{}：实际返回 {} 为 {}；影响：{}",
+                        failure.rule_id, failure.observed_path, failure.actual, failure.effect
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        writeln!(
+            output,
+            "| {} | {} | {} |",
+            result.adapter.id(),
+            status,
+            markdown_cell(&detail)
+        )
+        .unwrap();
+    }
+    output.push('\n');
+    output
+}
+
+fn markdown_cell(value: &str) -> String {
+    value
+        .replace('|', "\\|")
+        .replace('\n', " ")
+        .replace('\r', " ")
 }
 
 pub fn render_markdown(outcome: &OpenCodexOutcome) -> String {
@@ -157,6 +201,17 @@ mod tests {
         assert!(report.contains("影响：OpenCodex 无法生成 Codex 工具调用事件。"));
         assert!(!report.contains("未支持"));
         assert!(!report.contains("分析不可用"));
+    }
+
+    #[test]
+    fn markdown_section_summarizes_protocol_results_for_the_main_report() {
+        let section = super::render_markdown_section(&fixture_outcome(), "openai_chat");
+
+        assert!(section.contains("## 协议兼容性"));
+        assert!(section.contains("检测协议：`openai_chat`"));
+        assert!(section.contains("| openai-chat | 不通过 |"));
+        assert!(section.contains("function.name 为 object"));
+        assert!(!section.contains("# OpenCodex v2.7.42 模型输出兼容性"));
     }
 
     #[test]

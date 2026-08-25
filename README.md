@@ -53,7 +53,7 @@ mkdir -p ./model-doctor-output
 
 2.以.md为后缀的文件：本次检测的自分析报告，用来直接查看检测结论，适合给客户看。
 
-3.`model-doctor-opencodex-v2742.md`：OpenCodex v2.7.42 的 `openai-chat`、`anthropic` 和 `google` adapter 兼容性报告。
+3.主 Markdown 的“协议兼容性”部分：说明检测到的协议、各协议适配器是否通过，以及未通过的具体原因。
 
 ## OpenCodex v2.7.42 模型输出兼容性
 
@@ -69,11 +69,12 @@ mkdir -p ./model-doctor-output
 
 检测会自动依次发送三种原生请求格式，不需要指定 adapter。每种格式的结果只有“通过”或“不通过”；不通过时，报告会列出 OpenCodex 规则编号、要求的返回字段、实际返回路径和值、以及对工具调用或完成事件的影响。
 
-输出目录会新增：
+输出目录会新增一个机器可读的 JSON 证据文件：
 
 ```text
 model-doctor-opencodex-v2742.json
-model-doctor-opencodex-v2742.md
 ```
+
+OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“协议兼容性”部分。
 
 该阶段的规则固定为 OpenCodex `v2.7.42`，客户环境不需要安装 OpenCodex、Node.js、Bun、Docker，也不会联网下载规则。
