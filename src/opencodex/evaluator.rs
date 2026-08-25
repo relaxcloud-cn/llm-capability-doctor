@@ -74,14 +74,14 @@ fn terminal_rule(adapter: Adapter, termination: &StreamTermination) -> Option<&'
     match termination {
         StreamTermination::Completed | StreamTermination::NotApplicable => None,
         StreamTermination::MissingTerminalEvent => Some(match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-STREAM-006",
-            Adapter::Anthropic => "OCX-ANTH-STREAM-006",
-            Adapter::Google => "OCX-GOOGLE-STREAM-006",
+            Adapter::OpenAiChat => "GW-CHAT-STREAM-006",
+            Adapter::Anthropic => "GW-ANTH-STREAM-006",
+            Adapter::Google => "GW-GOOGLE-STREAM-006",
         }),
         StreamTermination::MalformedStream => Some(match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-STREAM-001",
-            Adapter::Anthropic => "OCX-ANTH-STREAM-001",
-            Adapter::Google => "OCX-GOOGLE-STREAM-001",
+            Adapter::OpenAiChat => "GW-CHAT-STREAM-001",
+            Adapter::Anthropic => "GW-ANTH-STREAM-001",
+            Adapter::Google => "GW-GOOGLE-STREAM-001",
         }),
         _ => Some(shape_rule(adapter)),
     }
@@ -90,27 +90,27 @@ fn terminal_rule(adapter: Adapter, termination: &StreamTermination) -> Option<&'
 fn failure_for_contract_error(adapter: Adapter, error: &str) -> RuleFailure {
     let rule_id = if error.contains("duplicate_tool") || error.contains("conflicting_tool") {
         match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-TOOL-003",
-            Adapter::Anthropic => "OCX-ANTH-TOOL-005",
-            Adapter::Google => "OCX-GOOGLE-TOOL-004",
+            Adapter::OpenAiChat => "GW-CHAT-TOOL-003",
+            Adapter::Anthropic => "GW-ANTH-TOOL-005",
+            Adapter::Google => "GW-GOOGLE-TOOL-004",
         }
     } else if error.contains("function_args") || error.contains("arguments") {
         match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-TOOL-004",
-            Adapter::Anthropic => "OCX-ANTH-TOOL-005",
-            Adapter::Google => "OCX-GOOGLE-TOOL-004",
+            Adapter::OpenAiChat => "GW-CHAT-TOOL-004",
+            Adapter::Anthropic => "GW-ANTH-TOOL-005",
+            Adapter::Google => "GW-GOOGLE-TOOL-004",
         }
     } else if error.contains("tool") {
         match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-TOOL-004",
-            Adapter::Anthropic => "OCX-ANTH-TOOL-005",
-            Adapter::Google => "OCX-GOOGLE-TOOL-004",
+            Adapter::OpenAiChat => "GW-CHAT-TOOL-004",
+            Adapter::Anthropic => "GW-ANTH-TOOL-005",
+            Adapter::Google => "GW-GOOGLE-TOOL-004",
         }
     } else if error.contains("invalid_sse") || error.contains("malformed") {
         match adapter {
-            Adapter::OpenAiChat => "OCX-CHAT-STREAM-001",
-            Adapter::Anthropic => "OCX-ANTH-STREAM-001",
-            Adapter::Google => "OCX-GOOGLE-STREAM-001",
+            Adapter::OpenAiChat => "GW-CHAT-STREAM-001",
+            Adapter::Anthropic => "GW-ANTH-STREAM-001",
+            Adapter::Google => "GW-GOOGLE-STREAM-001",
         }
     } else {
         shape_rule(adapter)
@@ -124,9 +124,9 @@ fn failure_for_contract_error(adapter: Adapter, error: &str) -> RuleFailure {
 
 fn shape_rule(adapter: Adapter) -> &'static str {
     match adapter {
-        Adapter::OpenAiChat => "OCX-CHAT-SHAPE-001",
-        Adapter::Anthropic => "OCX-ANTH-SHAPE-001",
-        Adapter::Google => "OCX-GOOGLE-SHAPE-001",
+        Adapter::OpenAiChat => "GW-CHAT-SHAPE-001",
+        Adapter::Anthropic => "GW-ANTH-SHAPE-001",
+        Adapter::Google => "GW-GOOGLE-SHAPE-001",
     }
 }
 
@@ -170,7 +170,7 @@ mod tests {
             },
         );
 
-        assert_eq!(result.failures[0].rule_id, "OCX-CHAT-STREAM-006");
+        assert_eq!(result.failures[0].rule_id, "GW-CHAT-STREAM-006");
         assert_eq!(result.failures[0].observed_path, "stream_termination");
     }
 
@@ -192,7 +192,7 @@ mod tests {
             result
                 .failures
                 .iter()
-                .any(|failure| failure.rule_id == "OCX-ANTH-TOOL-005")
+                .any(|failure| failure.rule_id == "GW-ANTH-TOOL-005")
         );
         assert_eq!(result.failures.len(), 1);
     }
@@ -217,7 +217,7 @@ mod tests {
             result
                 .failures
                 .iter()
-                .any(|failure| failure.rule_id == "OCX-GOOGLE-TOOL-004")
+                .any(|failure| failure.rule_id == "GW-GOOGLE-TOOL-004")
         );
     }
 }

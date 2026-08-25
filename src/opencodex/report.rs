@@ -228,7 +228,7 @@ mod tests {
         let report = render_markdown(&fixture_outcome());
 
         assert!(report.contains("LLMæ¨¡åç½å³ / openai-chat：不通过"));
-        assert!(report.contains("OCX-CHAT-TOOL-004：不通过"));
+        assert!(report.contains("GW-CHAT-TOOL-004：不通过"));
         assert!(report.contains("OpenCodex 要求：流式工具调用的 function.name 必须是非空字符串。"));
         assert!(
             report.contains("实际返回：choices[0].delta.tool_calls[0].function.name 为 object。")
@@ -250,7 +250,7 @@ mod tests {
             adapter: Adapter::Google,
             passed: false,
             failures: vec![RuleFailure {
-                rule_id: "OCX-GOOGLE-SHAPE-001",
+                rule_id: "GW-GOOGLE-SHAPE-001",
                 requirement: "Google 响应必须包含可读取的 candidates 内容。",
                 observed_path: "http_status".into(),
                 actual: "401".into(),
@@ -312,7 +312,7 @@ mod tests {
                 adapter: Adapter::OpenAiChat,
                 passed: false,
                 failures: vec![RuleFailure {
-                    rule_id: "OCX-CHAT-TOOL-004",
+                    rule_id: "GW-CHAT-TOOL-004",
                     requirement: "流式工具调用的 function.name 必须是非空字符串。",
                     observed_path: "choices[0].delta.tool_calls[0].function.name".into(),
                     actual: "object".into(),
