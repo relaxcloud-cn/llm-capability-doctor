@@ -53,9 +53,8 @@ fn default_run_merges_opencodex_summary_into_main_report() {
     );
     let markdown =
         std::fs::read_to_string(directory.path().join("doctor-self-analysis.md")).unwrap();
-    assert!(markdown.contains("检测协议：`openai_chat`"));
-    assert!(markdown.contains("检测结果："));
-    assert!(markdown.find("检测协议：").unwrap() < markdown.find("**模型最低并发要求").unwrap());
+    assert!(markdown.contains("| 协议兼容性（`openai_chat`） |"));
+    assert!(markdown.find("| 协议兼容性").unwrap() < markdown.find("| 模型最低并发要求").unwrap());
     assert!(!markdown.contains("## 协议兼容性"));
     assert!(!directory.path().join("doctor-opencodex-v2742.md").exists());
     assert!(response.calls() > 46);

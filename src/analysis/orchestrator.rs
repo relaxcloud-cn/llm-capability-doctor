@@ -1072,8 +1072,7 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     .unwrap();
     output.push('\n');
 
-    render_gateway_compatibility(&artifact.gateway_compatibility, &mut output);
-    render_minimum_model_requirements(artifact, &mut output);
+    render_overall_conclusion(artifact, &mut output);
     render_category_summary(artifact, &mut output);
     render_concurrency_summary(artifact, &mut output);
     render_test_table(artifact, &mut output);
@@ -1081,37 +1080,24 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     output
 }
 
-fn render_gateway_compatibility(compatibility: &GatewayCompatibility, output: &mut String) {
-    let status = match compatibility.status {
-        GatewayCompatibilityStatus::Pass => "通过",
-        GatewayCompatibilityStatus::Fail => "不通过",
-    };
+fn render_overall_conclusion(artifact: &SelfAnalysisArtifact, output: &mut String) {
     output.push_str("## 总体结论\n\n");
-    writeln!(output, "**AI模型网关层数据结构兼容性：{status}**\n").unwrap();
-    writeln!(output, "{}", markdown_cell(&compatibility.statement)).unwrap();
-    if compatibility.reasons.is_empty() {
-        output.push('\n');
-        return;
-    }
-    output.push_str("\n原因：\n\n");
-    for reason in &compatibility.reasons {
-        writeln!(output, "- {}", markdown_cell(reason)).unwrap();
-    }
-    output.push('\n');
+    output.push_str("| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n");
+    render_minimum_model_requirements(artifact, output);
 }
 
 fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &mut String) {
     let (concurrency_status, concurrency_detail) = minimum_concurrency_requirement(artifact);
     writeln!(
         output,
-        "**模型最低并发要求（4 并发）：{concurrency_status}**\n\n{concurrency_detail}\n"
+        "| 模型最低并发要求（4 并发） | {concurrency_status} | {concurrency_detail} |\n"
     )
     .unwrap();
 
     let (context_status, context_detail) = minimum_context_requirement(artifact);
     writeln!(
         output,
-        "**模型最低上下文要求（128K）：{context_status}**\n\n{context_detail}\n"
+        "| 模型最低上下文要求（128K） | {context_status} | {context_detail} |\n"
     )
     .unwrap();
 }
@@ -1123,7 +1109,7 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
         .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY)
     else {
         return (
-            "不满足",
+            "不通过",
             "未采集到 4 并发结果，无法验证最低并发要求。".into(),
         );
     };
@@ -1140,7 +1126,7 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
 
     if all_succeeded && within_limit {
         return (
-            "满足",
+            "通过",
             format!(
                 "4/4 成功，平均响应时间 {:.1} ms，不高于 30000 ms。",
                 average_milliseconds.expect("within_limit requires an average")
@@ -1159,7 +1145,7 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
         },
     );
     (
-        "不满足",
+        "不通过",
         format!(
             "4 并发结果为 {}/{} 成功、{} 失败，{}。",
             wave.succeeded, wave.total_requests, wave.failed, average_detail
@@ -1169,13 +1155,13 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
 
 fn minimum_context_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
     let Some(result) = result_for(artifact, MINIMUM_CONTEXT_TEST_ID) else {
-        return ("不满足", "未生成 128K 请求的检测结果。".into());
+        return ("不通过", "未生成 128K 请求的检测结果。".into());
     };
     match result_status(result) {
-        "PASS" => ("满足", "128K 请求成功。".into()),
-        "FAIL" => ("不满足", concrete_failure_reason(result)),
+        "PASS" => ("通过", "128K 请求成功。".into()),
+        "FAIL" => ("不通过", concrete_failure_reason(result)),
         _ => (
-            "不满足",
+            "不通过",
             format!("128K 请求未完成有效判断：{}", unavailable_reason(result)),
         ),
     }
@@ -1204,9 +1190,9 @@ fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String)
             })
             .collect();
         let status = if non_pass.is_empty() {
-            "满足"
+            "通过"
         } else {
-            "不满足"
+            "不通过"
         };
         let reason = if non_pass.is_empty() {
             verified_category_conclusion(category).into()
@@ -1831,7 +1817,7 @@ mod tests {
         );
         assert!(output.contains("\"analysisState\": \"ANALYSIS_UNAVAILABLE\""));
         let markdown = std::fs::read_to_string(outcome.markdown_path).unwrap();
-        assert!(markdown.contains("| 接口与协议 | 不满足 |"));
+        assert!(markdown.contains("| 接口与协议 | 不通过 |"));
         assert!(markdown.contains("分析不可用"));
     }
 
@@ -2174,7 +2160,8 @@ mod tests {
 
         let markdown = render_markdown(&artifact);
 
-        assert_eq!(markdown.matches("| 满足 |").count(), 8);
+        assert!(markdown.contains("| 接口与协议 | 通过 |"));
+        assert!(markdown.contains("| 护栏与词汇 | 通过 |"));
         assert_eq!(markdown.matches("| PASS |").count(), 46);
         assert!(!markdown.contains("## 非通过项详情"));
     }
@@ -2191,12 +2178,8 @@ mod tests {
         let markdown = render_markdown(&artifact);
 
         assert!(markdown.contains("## 总体结论"));
-        assert!(markdown.contains("**AI模型网关层数据结构兼容性：通过**"));
-        assert!(markdown.contains(
-            "该模型接口的同步响应、流式响应、流结束信号、工具调用参数及连续工具调用的结果关联，均符合 AI模型网关层所需的数据结构。"
-        ));
-        assert!(!markdown.contains("OpenCodex"));
-        assert!(!markdown.contains("002、004、005、006"));
+        assert!(markdown.contains("| 检测项 | 检测结果 | 说明 |"));
+        assert!(!markdown.contains("AI模型网关层数据结构兼容性"));
     }
 
     #[test]
@@ -2219,9 +2202,9 @@ mod tests {
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 大分类结论").next().unwrap();
 
-        assert!(overall.contains("**模型最低并发要求（4 并发）：满足**"));
+        assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
         assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms，不高于 30000 ms"));
-        assert!(overall.contains("**模型最低上下文要求（128K）：满足**"));
+        assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
         assert!(overall.contains("128K 请求成功"));
     }
 
@@ -2251,9 +2234,9 @@ mod tests {
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 大分类结论").next().unwrap();
 
-        assert!(overall.contains("**模型最低并发要求（4 并发）：不满足**"));
+        assert!(overall.contains("| 模型最低并发要求（4 并发） | 不通过 |"));
         assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms"));
-        assert!(overall.contains("**模型最低上下文要求（128K）：不满足**"));
+        assert!(overall.contains("| 模型最低上下文要求（128K） | 不通过 |"));
         assert!(overall.contains("128K 请求未成功返回。"));
     }
 
@@ -2276,8 +2259,8 @@ mod tests {
         let markdown = render_markdown(&markdown_fixture(tests));
         let overall = markdown.split("## 大分类结论").next().unwrap();
 
-        assert!(overall.contains("**AI模型网关层数据结构兼容性：不通过**"));
-        assert!(overall.contains("工具调用参数校验：期望 get_weather 同时包含 city、unit、days 三个字段；实际调用缺少 days 字段。"));
+        assert!(overall.contains("| 检测项 | 检测结果 | 说明 |"));
+        assert!(!overall.contains("AI模型网关层数据结构兼容性"));
         assert!(!overall.contains("043 必填参数与类型枚举"));
     }
 
@@ -2300,12 +2283,9 @@ mod tests {
         let markdown = render_markdown(&markdown_fixture(tests));
         let overall = markdown.split("## 大分类结论").next().unwrap();
 
-        assert!(overall.contains("**AI模型网关层数据结构兼容性：不通过**"));
-        assert!(
-            overall.contains(
-                "工具选择未能完成兼容性判断：自分析请求在 300 秒内超时，重试后未返回结果。"
-            )
-        );
+        assert!(overall.contains("| 检测项 | 检测结果 | 说明 |"));
+        assert!(!overall.contains("AI模型网关层数据结构兼容性"));
+        assert!(!overall.contains("工具选择未能完成兼容性判断"));
         assert!(!overall.contains("041 工具选择"));
     }
 
@@ -2411,7 +2391,7 @@ mod tests {
 
         let markdown = render_markdown(&markdown_fixture(results));
 
-        assert!(markdown.contains("| 工具调用 | 不满足 |"));
+        assert!(markdown.contains("| 工具调用 | 不通过 |"));
         assert!(markdown.contains("046 官方工具协议结构合规：tool envelope incomplete"));
         assert!(markdown.contains("### 046 官方工具协议结构合规"));
         assert!(markdown.contains("tool envelope incomplete"));
@@ -2435,7 +2415,7 @@ mod tests {
 
         let markdown = render_markdown(&markdown_fixture(results));
 
-        assert!(markdown.contains("| 工具调用 | 不满足 |"));
+        assert!(markdown.contains("| 工具调用 | 不通过 |"));
         assert!(markdown.contains("049 工具失败恢复：分析不可用：offline"));
         assert!(markdown.contains("| ANALYSIS_UNAVAILABLE |"));
         assert!(markdown.contains("分析不可用：offline"));

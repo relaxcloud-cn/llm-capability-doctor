@@ -34,7 +34,7 @@ pub fn merge_markdown_gateway_compatibility(
     detail: &str,
 ) -> Result<(), std::io::Error> {
     let mut markdown = std::fs::read_to_string(path)?;
-    let marker = "**模型最低并发要求";
+    let marker = "| 模型最低并发要求";
     let position = markdown.find(marker).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -55,7 +55,7 @@ pub fn render_gateway_compatibility_detail(
     detected_protocol: &str,
 ) -> String {
     let mut output = String::new();
-    writeln!(output, "检测协议：`{detected_protocol}`\n").unwrap();
+    let protocol_label = format!("协议兼容性（`{detected_protocol}`）");
     let adapter = adapter_for_protocol(detected_protocol);
     let result = adapter.and_then(|adapter| {
         outcome
@@ -64,9 +64,12 @@ pub fn render_gateway_compatibility_detail(
             .find(|result| result.adapter == adapter)
     });
     match result {
-        Some(result) if result.passed => output.push_str("检测结果：通过\n\n"),
+        Some(result) if result.passed => {
+            output.push_str(&format!(
+                "| {protocol_label} | 通过 | 对应协议兼容性检测通过。 |\n"
+            ));
+        }
         Some(result) => {
-            output.push_str("检测结果：不通过\n\n");
             let reason = result
                 .failures
                 .iter()
@@ -78,14 +81,21 @@ pub fn render_gateway_compatibility_detail(
                 })
                 .collect::<Vec<_>>()
                 .join("；");
-            writeln!(output, "不通过原因：{}\n", markdown_cell(&reason)).unwrap();
+            writeln!(
+                output,
+                "| {protocol_label} | 不通过 | 不通过原因：{} |",
+                markdown_cell(&reason)
+            )
+            .unwrap();
         }
         None => {
-            output.push_str("检测结果：不通过\n\n");
-            output.push_str("不通过原因：未找到该协议对应的兼容性检测结果。\n\n");
+            writeln!(
+                output,
+                "| {protocol_label} | 不通过 | 不通过原因：未找到该协议对应的兼容性检测结果。 |"
+            )
+            .unwrap();
         }
     }
-    output.push('\n');
     output
 }
 
@@ -251,13 +261,12 @@ mod tests {
         });
         let section = super::render_gateway_compatibility_detail(&outcome, "openai_chat");
 
-        assert!(section.contains("检测协议：`openai_chat`"));
-        assert!(section.contains("检测结果：不通过"));
+        assert!(section.contains("| 协议兼容性（`openai_chat`） | 不通过 |"));
         assert!(section.contains("不通过原因："));
         assert!(section.contains("function.name 为 object"));
         assert!(!section.contains("anthropic"));
         assert!(!section.contains("google"));
-        assert!(!section.contains("## 协议兼容性"));
+        assert!(!section.contains("检测协议："));
     }
 
     #[test]
@@ -266,20 +275,20 @@ mod tests {
         let path = directory.path().join("doctor-self-analysis.md");
         std::fs::write(
             &path,
-            "## 总体结论\n\n**AI模型网关层数据结构兼容性：通过**\n\n网关结构符合要求。\n\n**模型最低并发要求（4 并发）：满足**\n",
+            "## 总体结论\n\n| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n| 模型最低并发要求（4 并发） | 通过 | 4/4 成功。 |\n",
         )
         .unwrap();
 
         super::merge_markdown_gateway_compatibility(
             &path,
-            "检测协议：`openai_chat`\n\n检测结果：通过\n",
+            "| 协议兼容性（`openai_chat`） | 通过 | 对应协议兼容性检测通过。 |\n",
         )
         .unwrap();
 
         let markdown = std::fs::read_to_string(path).unwrap();
-        let detail = markdown.find("检测协议：").unwrap();
-        let next_requirement = markdown.find("**模型最低并发要求").unwrap();
-        assert!(detail > markdown.find("网关结构符合要求").unwrap());
+        let detail = markdown.find("| 协议兼容性").unwrap();
+        let next_requirement = markdown.find("| 模型最低并发要求").unwrap();
+        assert!(detail > markdown.find("## 总体结论").unwrap());
         assert!(detail < next_requirement);
         assert!(!markdown.contains("## 协议兼容性"));
     }

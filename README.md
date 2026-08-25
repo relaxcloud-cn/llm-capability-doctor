@@ -75,6 +75,6 @@ mkdir -p ./model-doctor-output
 model-doctor-opencodex-v2742.json
 ```
 
-OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“AI模型网关层数据结构兼容性”结论下面。
+OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“总体结论”表格中。
 
 该阶段的规则固定为 OpenCodex `v2.7.42`，客户环境不需要安装 OpenCodex、Node.js、Bun、Docker，也不会联网下载规则。
