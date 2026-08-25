@@ -47,34 +47,9 @@ mkdir -p ./model-doctor-output
 ```
 
 ## 输出结果
-执行命令默认完成 46 项模型能力检测、OpenCodex v2.7.42 兼容性检测和被测模型自分析，并输出：
+执行命令默认完成 46 项模型能力检测、AI模型网关兼容性检测，并输出：
 
 1.以.log为后缀的文件：该文件记录了检测项的所有curl请求的输入和输出，用来给技术人员分析使用的。
 
 2.以.md为后缀的文件：本次检测的自分析报告，用来直接查看检测结论，适合给客户看。
 
-3.主 Markdown 的“关键检测项结论”中：说明检测到的协议是否通过，以及未通过的具体原因。
-
-## OpenCodex v2.7.42 模型输出兼容性
-
-每次执行都会自动检测同一个模型地址返回的数据能否被 OpenCodex v2.7.42 的 `openai-chat`、`anthropic` 和 `google` adapter 读取并转交给 Codex，不需要额外传入开关。
-
-```bash
-./model-capability-doctor-v0.12.0-macos-arm64 \
-  --url 'https://model.example/v1/chat/completions' \
-  --model 'your-model-name' \
-  --api-key 'your-api-key' \
-  --log-file './model-doctor-output/model-doctor.log'
-```
-
-检测会自动依次发送三种原生请求格式，不需要指定 adapter。每种格式的结果只有“通过”或“不通过”；不通过时，报告会列出 OpenCodex 规则编号、要求的返回字段、实际返回路径和值、以及对工具调用或完成事件的影响。
-
-输出目录会新增一个机器可读的 JSON 证据文件：
-
-```text
-model-doctor-opencodex-v2742.json
-```
-
-OpenCodex 的结论不会单独生成 Markdown，而是合并到 `model-doctor-self-analysis.md` 的“关键检测项结论”表格中。
-
-该阶段的规则固定为 OpenCodex `v2.7.42`，客户环境不需要安装 OpenCodex、Node.js、Bun、Docker，也不会联网下载规则。
