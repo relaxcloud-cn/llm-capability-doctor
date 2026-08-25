@@ -38,7 +38,7 @@ pub fn merge_markdown_gateway_compatibility(
     let position = markdown.find(marker).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "主 Markdown 缺少总体结论插入位置",
+            "主 Markdown 缺少关键检测项结论插入位置",
         )
     })?;
     markdown.insert_str(position, &format!("{}\n", detail.trim_end()));
@@ -275,7 +275,7 @@ mod tests {
         let path = directory.path().join("doctor-self-analysis.md");
         std::fs::write(
             &path,
-            "## 总体结论\n\n| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n| 模型最低并发要求（4 并发） | 通过 | 4/4 成功。 |\n",
+            "## 关键检测项结论\n\n| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n| 模型最低并发要求（4 并发） | 通过 | 4/4 成功。 |\n",
         )
         .unwrap();
 
@@ -288,7 +288,7 @@ mod tests {
         let markdown = std::fs::read_to_string(path).unwrap();
         let detail = markdown.find("| 协议兼容性").unwrap();
         let next_requirement = markdown.find("| 模型最低并发要求").unwrap();
-        assert!(detail > markdown.find("## 总体结论").unwrap());
+        assert!(detail > markdown.find("## 关键检测项结论").unwrap());
         assert!(detail < next_requirement);
         assert!(!markdown.contains("|\n\n| 模型最低并发要求"));
         assert!(!markdown.contains("## 协议兼容性"));

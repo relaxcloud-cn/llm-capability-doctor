@@ -1081,7 +1081,7 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
 }
 
 fn render_overall_conclusion(artifact: &SelfAnalysisArtifact, output: &mut String) {
-    output.push_str("## 总体结论\n\n");
+    output.push_str("## 关键检测项结论\n\n");
     output.push_str("| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n");
     render_minimum_model_requirements(artifact, output);
 }
@@ -1168,7 +1168,7 @@ fn minimum_context_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str
 }
 
 fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
-    output.push_str("## 大分类结论\n\n");
+    output.push_str("## 能力分类检测结论\n\n");
     output.push_str("| 能力分类 | 结论 | 检测结论 |\n|---|---|---|\n");
     let mut categories = Vec::new();
     for test in crate::catalog::CATALOG {
@@ -1649,7 +1649,7 @@ mod tests {
         assert!(failed_curls.contains("failed_test_count: 0"));
         assert!(!failed_curls.contains("========== FAILED TEST"));
         let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
-        assert!(markdown.contains("## 大分类结论"));
+        assert!(markdown.contains("## 能力分类检测结论"));
         assert_eq!(markdown.matches("| PASS |").count(), 46);
         assert!(!markdown.contains("secret-key"));
         drop(directory);
@@ -2160,6 +2160,10 @@ mod tests {
 
         let markdown = render_markdown(&artifact);
 
+        assert!(markdown.contains("## 关键检测项结论"));
+        assert!(markdown.contains("## 能力分类检测结论"));
+        assert!(!markdown.contains("## 总体结论"));
+        assert!(!markdown.contains("## 大分类结论"));
         assert!(markdown.contains("| 接口与协议 | 通过 |"));
         assert!(markdown.contains("| 护栏与词汇 | 通过 |"));
         assert_eq!(markdown.matches("| PASS |").count(), 46);
@@ -2177,7 +2181,7 @@ mod tests {
 
         let markdown = render_markdown(&artifact);
 
-        assert!(markdown.contains("## 总体结论"));
+        assert!(markdown.contains("## 关键检测项结论"));
         assert!(markdown.contains("| 检测项 | 检测结果 | 说明 |"));
         assert!(!markdown.contains("AI模型网关层数据结构兼容性"));
     }
@@ -2200,7 +2204,7 @@ mod tests {
         }];
 
         let markdown = render_markdown(&artifact);
-        let overall = markdown.split("## 大分类结论").next().unwrap();
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
         assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms，不高于 30000 ms"));
@@ -2232,7 +2236,7 @@ mod tests {
         }];
 
         let markdown = render_markdown(&artifact);
-        let overall = markdown.split("## 大分类结论").next().unwrap();
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 不通过 |"));
         assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms"));
@@ -2257,7 +2261,7 @@ mod tests {
         );
 
         let markdown = render_markdown(&markdown_fixture(tests));
-        let overall = markdown.split("## 大分类结论").next().unwrap();
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 检测项 | 检测结果 | 说明 |"));
         assert!(!overall.contains("AI模型网关层数据结构兼容性"));
@@ -2281,7 +2285,7 @@ mod tests {
         result.limitations = vec!["自分析请求在 300 秒内超时，重试后未返回结果。".into()];
 
         let markdown = render_markdown(&markdown_fixture(tests));
-        let overall = markdown.split("## 大分类结论").next().unwrap();
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 检测项 | 检测结果 | 说明 |"));
         assert!(!overall.contains("AI模型网关层数据结构兼容性"));
