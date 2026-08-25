@@ -30,6 +30,9 @@ pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
 const MAX_ANALYSIS_TRANSPORT_ATTEMPTS: usize = 3;
 const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
     ["002", "004", "005", "006", "040", "041", "043", "047"];
+const MINIMUM_CONCURRENCY: usize = 4;
+const MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS: f64 = 30.0;
+const MINIMUM_CONTEXT_TEST_ID: &str = "018";
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -1067,6 +1070,7 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     output.push('\n');
 
     render_gateway_compatibility(&artifact.gateway_compatibility, &mut output);
+    render_minimum_model_requirements(artifact, &mut output);
     render_category_summary(artifact, &mut output);
     render_concurrency_summary(artifact, &mut output);
     render_test_table(artifact, &mut output);
@@ -1091,6 +1095,87 @@ fn render_gateway_compatibility(compatibility: &GatewayCompatibility, output: &m
         writeln!(output, "- {}", markdown_cell(reason)).unwrap();
     }
     output.push('\n');
+}
+
+fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    let (concurrency_status, concurrency_detail) = minimum_concurrency_requirement(artifact);
+    writeln!(
+        output,
+        "**模型最低并发要求（4 并发）：{concurrency_status}**\n\n{concurrency_detail}\n"
+    )
+    .unwrap();
+
+    let (context_status, context_detail) = minimum_context_requirement(artifact);
+    writeln!(
+        output,
+        "**模型最低上下文要求（128K）：{context_status}**\n\n{context_detail}\n"
+    )
+    .unwrap();
+}
+
+fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
+    let Some(wave) = artifact
+        .concurrency_waves
+        .iter()
+        .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY)
+    else {
+        return (
+            "不满足",
+            "未采集到 4 并发结果，无法验证最低并发要求。".into(),
+        );
+    };
+
+    let average_milliseconds = wave
+        .average_response_time_seconds
+        .map(|seconds| seconds * 1000.0);
+    let all_succeeded = wave.total_requests == MINIMUM_CONCURRENCY
+        && wave.succeeded == MINIMUM_CONCURRENCY
+        && wave.failed == 0;
+    let within_limit = wave
+        .average_response_time_seconds
+        .is_some_and(|seconds| seconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS);
+
+    if all_succeeded && within_limit {
+        return (
+            "满足",
+            format!(
+                "4/4 成功，平均响应时间 {:.1} ms，不高于 30000 ms。",
+                average_milliseconds.expect("within_limit requires an average")
+            ),
+        );
+    }
+
+    let average_detail = average_milliseconds.map_or_else(
+        || "平均响应时间缺失".into(),
+        |milliseconds| {
+            if milliseconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS * 1000.0 {
+                format!("平均响应时间 {:.1} ms，不高于 30000 ms", milliseconds)
+            } else {
+                format!("平均响应时间 {:.1} ms，超过 30000 ms", milliseconds)
+            }
+        },
+    );
+    (
+        "不满足",
+        format!(
+            "4 并发结果为 {}/{} 成功、{} 失败，{}。",
+            wave.succeeded, wave.total_requests, wave.failed, average_detail
+        ),
+    )
+}
+
+fn minimum_context_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
+    let Some(result) = result_for(artifact, MINIMUM_CONTEXT_TEST_ID) else {
+        return ("不满足", "未生成 128K 请求的检测结果。".into());
+    };
+    match result_status(result) {
+        "PASS" => ("满足", "128K 请求成功。".into()),
+        "FAIL" => ("不满足", concrete_failure_reason(result)),
+        _ => (
+            "不满足",
+            format!("128K 请求未完成有效判断：{}", unavailable_reason(result)),
+        ),
+    }
 }
 
 fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String) {
@@ -1687,6 +1772,64 @@ mod tests {
         ));
         assert!(!markdown.contains("OpenCodex"));
         assert!(!markdown.contains("002、004、005、006"));
+    }
+
+    #[test]
+    fn markdown_overall_conclusion_reports_satisfied_minimum_concurrency_and_context() {
+        let mut artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+        artifact.concurrency_waves = vec![ConcurrencyWave {
+            concurrency: 4,
+            total_requests: 4,
+            succeeded: 4,
+            failed: 0,
+            average_response_time_seconds: Some(1.2),
+            failures: Vec::new(),
+        }];
+
+        let markdown = render_markdown(&artifact);
+        let overall = markdown.split("## 大分类结论").next().unwrap();
+
+        assert!(overall.contains("**模型最低并发要求（4 并发）：满足**"));
+        assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms，不高于 30000 ms"));
+        assert!(overall.contains("**模型最低上下文要求（128K）：满足**"));
+        assert!(overall.contains("128K 请求成功"));
+    }
+
+    #[test]
+    fn markdown_overall_conclusion_reports_unsatisfied_minimum_requirements() {
+        let mut tests = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        let context = tests
+            .iter_mut()
+            .find(|result| result.test_id == "018")
+            .unwrap();
+        context.candidate_status = Some(CandidateStatus::Fail);
+        context.validated_status = Some(ValidatedStatus::Fail);
+        context.failure_cause = Some("128K 请求未成功返回。".into());
+        let mut artifact = markdown_fixture(tests);
+        artifact.concurrency_waves = vec![ConcurrencyWave {
+            concurrency: 4,
+            total_requests: 4,
+            succeeded: 4,
+            failed: 0,
+            average_response_time_seconds: Some(30.1),
+            failures: Vec::new(),
+        }];
+
+        let markdown = render_markdown(&artifact);
+        let overall = markdown.split("## 大分类结论").next().unwrap();
+
+        assert!(overall.contains("**模型最低并发要求（4 并发）：不满足**"));
+        assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms"));
+        assert!(overall.contains("**模型最低上下文要求（128K）：不满足**"));
+        assert!(overall.contains("128K 请求未成功返回。"));
     }
 
     #[test]
