@@ -45,3 +45,10 @@ chmod +x ./model-capability-doctor-v0.12.0-linux-arm64
 mkdir -p ./model-doctor-output
 ./model-capability-doctor-v0.12.0-linux-arm64 --url 'https://model.example/v1/chat/completions' --model 'your-model-name' --api-key 'your-api-key' --log-file './model-doctor-output/model-doctor.log'
 ```
+
+## 输出结果
+执行完程序后，会输出两样东西：
+
+1.以.log为后缀的文件：该文件记录了检测项的所有curl请求的输入和输出，用来给技术人员分析使用的。
+
+2.以.md为后缀的文件：本次检测的报告，用来直接查看检测结论的，适合给客户看。
