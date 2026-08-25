@@ -1,6 +1,6 @@
 # OpenCodex v2.7.42 Output Contract Design
 
-**Status:** Draft for user review
+**Status:** Approved for implementation
 
 ## Goal
 
