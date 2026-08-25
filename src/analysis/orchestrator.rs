@@ -1090,14 +1090,14 @@ fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &m
     let (concurrency_status, concurrency_detail) = minimum_concurrency_requirement(artifact);
     writeln!(
         output,
-        "| 模型最低并发要求（4 并发） | {concurrency_status} | {concurrency_detail} |\n"
+        "| 模型最低并发要求（4 并发） | {concurrency_status} | {concurrency_detail} |"
     )
     .unwrap();
 
     let (context_status, context_detail) = minimum_context_requirement(artifact);
     writeln!(
         output,
-        "| 模型最低上下文要求（128K） | {context_status} | {context_detail} |\n"
+        "| 模型最低上下文要求（128K） | {context_status} | {context_detail} |"
     )
     .unwrap();
 }

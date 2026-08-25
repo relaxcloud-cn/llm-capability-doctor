@@ -41,7 +41,7 @@ pub fn merge_markdown_gateway_compatibility(
             "主 Markdown 缺少总体结论插入位置",
         )
     })?;
-    markdown.insert_str(position, &format!("{detail}\n"));
+    markdown.insert_str(position, &format!("{}\n", detail.trim_end()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -290,6 +290,7 @@ mod tests {
         let next_requirement = markdown.find("| 模型最低并发要求").unwrap();
         assert!(detail > markdown.find("## 总体结论").unwrap());
         assert!(detail < next_requirement);
+        assert!(!markdown.contains("|\n\n| 模型最低并发要求"));
         assert!(!markdown.contains("## 协议兼容性"));
     }
 
