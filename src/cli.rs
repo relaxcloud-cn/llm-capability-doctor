@@ -45,9 +45,9 @@ pub struct Cli {
     #[arg(long, default_value_t = true)]
     pub self_analyze: bool,
 
-    /// Test whether model responses satisfy OpenCodex v2.7.42 output contracts. Enabled by default.
+    /// Test whether model responses satisfy LLM gateway output contracts. Enabled by default.
     #[arg(long, default_value_t = true)]
-    pub opencodex_compatibility: bool,
+    pub llm_gateway_compatibility: bool,
 }
 
 pub struct Config {
@@ -58,7 +58,7 @@ pub struct Config {
     pub timeout: Duration,
     pub insecure: bool,
     pub self_analyze: bool,
-    pub opencodex_compatibility: bool,
+    pub llm_gateway_compatibility: bool,
 }
 
 pub struct SecretString(String);
@@ -108,7 +108,7 @@ impl Cli {
             timeout: Duration::from_secs(self.timeout),
             insecure: self.insecure,
             self_analyze: self.self_analyze,
-            opencodex_compatibility: self.opencodex_compatibility,
+            llm_gateway_compatibility: self.llm_gateway_compatibility,
         })
     }
 }
@@ -140,7 +140,7 @@ mod tests {
             list_tests: false,
             insecure: false,
             self_analyze: false,
-            opencodex_compatibility: false,
+            llm_gateway_compatibility: false,
         }
     }
 
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn opencodex_compatibility_is_enabled_by_default() {
+    fn llm_gateway_compatibility_is_enabled_by_default() {
         let default = Cli::try_parse_from([
             "doctor",
             "--url",
@@ -185,7 +185,7 @@ mod tests {
             "k",
         ])
         .unwrap();
-        assert!(default.opencodex_compatibility);
+        assert!(default.llm_gateway_compatibility);
 
         let enabled = Cli::try_parse_from([
             "doctor",
@@ -195,10 +195,10 @@ mod tests {
             "m",
             "--api-key",
             "k",
-            "--opencodex-compatibility",
+            "--llm-gateway-compatibility",
         ])
         .unwrap();
-        assert!(enabled.opencodex_compatibility);
+        assert!(enabled.llm_gateway_compatibility);
     }
 
     #[test]

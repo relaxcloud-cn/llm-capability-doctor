@@ -35,7 +35,7 @@ impl OpenCodexOutcome {
         self.results
             .iter()
             .find(|result| result.adapter == adapter)
-            .expect("the OpenCodex runner always evaluates every selected adapter")
+            .expect("the LLM gateway runner always evaluates every selected adapter")
     }
 }
 
@@ -79,7 +79,7 @@ async fn probe_response(
     let spec = basic_request(
         protocol,
         &settings.model,
-        "Reply only MODEL_DOCTOR_OPENCODEX_RESPONSE_OK",
+        "Reply only MODEL_DOCTOR_LLM_GATEWAY_RESPONSE_OK",
         false,
     );
     let evidence = execute_spec(
@@ -116,7 +116,7 @@ async fn probe_stream(
     let spec = basic_request(
         protocol,
         &settings.model,
-        "Reply only MODEL_DOCTOR_OPENCODEX_STREAM_OK",
+        "Reply only MODEL_DOCTOR_LLM_GATEWAY_STREAM_OK",
         true,
     );
     let evidence = execute_spec(
@@ -134,14 +134,14 @@ async fn probe_tool_loop(
     executor: &HttpExecutor,
 ) -> AdapterResult {
     let (protocol, auth_mode) = adapter_connection(adapter);
-    let prompt = tool_prompt(check_id).expect("OpenCodex probes use known tool checks");
+    let prompt = tool_prompt(check_id).expect("LLM gateway probes use known tool checks");
     let initial = tool_request(protocol, &settings.model, check_id, prompt);
     let mut conversation = match ToolConversation::from_initial(protocol, initial.body.clone()) {
         Ok(conversation) => conversation,
         Err(error) => return tool_failure(adapter, check_id, "request", error.to_string()),
     };
     let mut state = ToolLoopState::for_protocol(check_id, protocol)
-        .expect("OpenCodex probes only use known protocols and tool checks");
+        .expect("LLM gateway probes only use known protocols and tool checks");
     let mut current = initial;
     let mut result = pass_result(adapter);
 
@@ -235,7 +235,7 @@ async fn execute_spec(
     executor
         .execute(
             RequestInput {
-                request_id: format!("opencodex-{}-{scenario}", adapter.id()),
+                request_id: format!("llm-gateway-{}-{scenario}", adapter.id()),
                 url: normalize_request_url(protocol, &settings.url, spec.stream),
                 protocol,
                 auth_mode,
@@ -294,9 +294,9 @@ fn tool_failure(
     actual: impl Into<String>,
 ) -> AdapterResult {
     let rule_id = match adapter {
-        Adapter::OpenAiChat => "OCX-CHAT-TOOL-004",
-        Adapter::Anthropic => "OCX-ANTH-TOOL-005",
-        Adapter::Google => "OCX-GOOGLE-TOOL-004",
+        Adapter::OpenAiChat => "GW-CHAT-TOOL-004",
+        Adapter::Anthropic => "GW-ANTH-TOOL-005",
+        Adapter::Google => "GW-GOOGLE-TOOL-004",
     };
     let rule = rule(rule_id);
     AdapterResult {
@@ -349,7 +349,7 @@ mod tests {
                 when.method(POST)
                     .path("/v1/chat/completions")
                     .header("authorization", "Bearer secret-key")
-                    .body_includes("MODEL_DOCTOR_OPENCODEX_STREAM_OK");
+                    .body_includes("MODEL_DOCTOR_LLM_GATEWAY_STREAM_OK");
                 then.status(200)
                     .header("content-type", "text/event-stream")
                     .body(format!(
@@ -390,7 +390,7 @@ mod tests {
             .mock_async(|when, then| {
                 when.method(POST)
                     .path("/v1/chat/completions")
-                    .body_includes("MODEL_DOCTOR_OPENCODEX_RESPONSE_OK");
+                    .body_includes("MODEL_DOCTOR_LLM_GATEWAY_RESPONSE_OK");
                 then.status(200)
                     .header("content-type", "application/json")
                     .body(r#"{"unexpected":true}"#);
@@ -414,7 +414,7 @@ mod tests {
                 .failures
                 .iter()
                 .any(|failure| {
-                    failure.rule_id == "OCX-CHAT-SHAPE-001"
+                    failure.rule_id == "GW-CHAT-SHAPE-001"
                         && failure.actual
                             == "response did not match the OpenAI Chat response structure"
                 })
@@ -429,9 +429,9 @@ mod tests {
                 when.method(POST)
                     .path("/v1/chat/completions")
                     .header("authorization", "Bearer secret-key")
-                    .body_includes("MODEL_DOCTOR_OPENCODEX_RESPONSE_OK");
+                    .body_includes("MODEL_DOCTOR_LLM_GATEWAY_RESPONSE_OK");
                 then.status(200).json_body(json!({
-                    "choices": [{"message": {"content": "MODEL_DOCTOR_OPENCODEX_RESPONSE_OK"}}]
+                    "choices": [{"message": {"content": "MODEL_DOCTOR_LLM_GATEWAY_RESPONSE_OK"}}]
                 }));
             })
             .await;
@@ -440,7 +440,7 @@ mod tests {
                 when.method(POST)
                     .path("/v1/chat/completions")
                     .header("authorization", "Bearer secret-key")
-                    .body_includes("MODEL_DOCTOR_OPENCODEX_STREAM_OK");
+                    .body_includes("MODEL_DOCTOR_LLM_GATEWAY_STREAM_OK");
                 then.status(200)
                     .header("content-type", "text/event-stream")
                     .body(format!(

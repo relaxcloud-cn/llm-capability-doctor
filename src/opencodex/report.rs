@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::opencodex::contract::{Adapter, CONTRACT, SOURCE_FILES, contract_digest, rule};
+use crate::opencodex::contract::{Adapter, SOURCE_FILES, contract_digest, rule};
 use crate::opencodex::runner::OpenCodexOutcome;
 use crate::private_file::create_new_private_file;
 
@@ -117,13 +117,13 @@ fn markdown_cell(value: &str) -> String {
 
 pub fn render_markdown(outcome: &OpenCodexOutcome) -> String {
     let mut output = String::new();
-    writeln!(output, "# OpenCodex v2.7.42 模型输出兼容性\n").unwrap();
+    writeln!(output, "# LLM模型网关兼容性\n").unwrap();
     writeln!(output, "规则包校验值：`{}`\n", contract_digest()).unwrap();
     for result in &outcome.results {
         let status = if result.passed { "通过" } else { "不通过" };
         writeln!(
             output,
-            "## OpenCodex v2.7.42 / {}：{status}\n",
+            "## LLM模型网关 / {}：{status}\n",
             result.adapter.id()
         )
         .unwrap();
@@ -133,7 +133,7 @@ pub fn render_markdown(outcome: &OpenCodexOutcome) -> String {
         }
         for failure in &result.failures {
             writeln!(output, "### {}：不通过\n", failure.rule_id).unwrap();
-            writeln!(output, "OpenCodex 要求：{}\n", failure.requirement).unwrap();
+            writeln!(output, "LLM模型网关要求：{}\n", failure.requirement).unwrap();
             writeln!(
                 output,
                 "实际返回：{} 为 {}。\n",
@@ -171,10 +171,8 @@ fn render_json(outcome: &OpenCodexOutcome) -> Result<Vec<u8>, serde_json::Error>
         .collect::<Vec<_>>();
     let mut bytes = serde_json::to_vec_pretty(&json!({
         "profile": {
-            "name": "OpenCodex output contract",
-            "version": CONTRACT.version,
-            "commit": CONTRACT.commit,
-            "digest": contract_digest(),
+            "name": "LLM模型网关兼容性",
+            "ruleSetDigest": contract_digest(),
         },
         "results": results,
     }))?;
@@ -187,7 +185,7 @@ fn source_digest(path: &str) -> &'static str {
         .iter()
         .find(|source| source.path == path)
         .map(|source| source.sha256)
-        .expect("every OpenCodex rule references a pinned source file")
+        .expect("every LLM gateway rule references a pinned source file")
 }
 
 fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
@@ -203,7 +201,7 @@ fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBu
         } else {
             format!("-{sequence}")
         };
-        let path = directory.join(format!("{stem}-opencodex-v2742{suffix}.{extension}"));
+        let path = directory.join(format!("{stem}-llm-gateway-compatibility{suffix}.{extension}"));
         match create_new_private_file(&path) {
             Ok(mut file) => {
                 file.write_all(bytes)?;
@@ -229,7 +227,7 @@ mod tests {
     fn markdown_reports_only_pass_or_fail_and_explains_each_failure() {
         let report = render_markdown(&fixture_outcome());
 
-        assert!(report.contains("OpenCodex v2.7.42 / openai-chat：不通过"));
+        assert!(report.contains("LLMæ¨¡åç½å³ / openai-chat：不通过"));
         assert!(report.contains("OCX-CHAT-TOOL-004：不通过"));
         assert!(report.contains("OpenCodex 要求：流式工具调用的 function.name 必须是非空字符串。"));
         assert!(
@@ -301,6 +299,8 @@ mod tests {
             super::write_reports(&directory.path().join("doctor.log"), &fixture_outcome()).unwrap();
         let json = std::fs::read_to_string(paths.json).unwrap();
 
+        assert!(json.contains("LLM模型网关兼容性"));
+        assert!(!json.contains("OpenCodex"));
         assert!(json.contains("src/adapters/openai-chat.ts"));
         assert!(json.contains("ea32bc0aab76a954ed37e2431c56e8ec31f356dfbfbc60eedc1b4a0c870c4cac"));
         assert!(!json.contains("https://"));

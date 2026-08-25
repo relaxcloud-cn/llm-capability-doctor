@@ -43,12 +43,13 @@ fn default_run_merges_opencodex_summary_into_main_report() {
         ])
         .assert()
         .success()
-        .stdout(predicate::str::contains("OpenCodex v2.7.42 模型输出兼容性"));
+        .stdout(predicate::str::contains("LLM模型网关兼容性"))
+        .stdout(predicate::str::contains("OpenCodex").not());
 
     assert!(
         directory
             .path()
-            .join("doctor-opencodex-v2742.json")
+            .join("doctor-llm-gateway-compatibility.json")
             .exists()
     );
     let markdown =

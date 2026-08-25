@@ -19,7 +19,7 @@ use crate::redaction::Redactor;
 
 const SCRIPT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const LOG_SCHEMA: &str = "llm-capability-doctor.evidence.v4";
-const COMPATIBILITY_PROFILE: &str = "opencodex-2.7.42-data-format";
+const COMPATIBILITY_PROFILE: &str = "llm-gateway-data-format";
 
 pub struct RunMetadata {
     pub run_id: String,
@@ -506,7 +506,7 @@ mod tests {
         let output = fs::read_to_string(path).expect("read audit");
         assert!(output.contains("script_version: 0.12.0\n"));
         assert!(output.contains("log_schema: llm-capability-doctor.evidence.v4\n"));
-        assert!(output.contains("compatibility_profile: opencodex-2.7.42-data-format\n"));
+        assert!(output.contains("compatibility_profile: llm-gateway-data-format\n"));
         assert!(!output.contains("collection_profile:"));
     }
 

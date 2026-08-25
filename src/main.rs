@@ -44,7 +44,7 @@ async fn main() -> ExitCode {
                 timeout: config.timeout,
                 insecure: config.insecure,
             });
-            let opencodex_connection = config.opencodex_compatibility.then(|| {
+            let gateway_connection = config.llm_gateway_compatibility.then(|| {
                 (
                     config.url.clone(),
                     config.model.clone(),
@@ -69,10 +69,10 @@ async fn main() -> ExitCode {
             match result.expect("runner branch always returns a result") {
                 Ok(outcome) => {
                     print_collection_outcome(&outcome);
-                    let mut opencodex_outcome = None;
-                    if let Some((url, model, api_key, timeout, insecure)) = opencodex_connection {
+                    let mut gateway_outcome = None;
+                    if let Some((url, model, api_key, timeout, insecure)) = gateway_connection {
                         println!();
-                        println!("正在检测 OpenCodex v2.7.42 模型输出兼容性……");
+                        println!("正在检测 LLM模型网关兼容性……");
                         let compatibility =
                             model_capability_doctor::opencodex::runner::run(OpenCodexSettings {
                                 url,
@@ -94,7 +94,7 @@ async fn main() -> ExitCode {
                         let compatibility_outcome = match compatibility_outcome {
                             Ok(value) => value,
                             Err(error) => {
-                                eprintln!("OpenCodex 兼容性检测失败：{error}");
+                                eprintln!("LLM模型网关兼容性检测失败：{error}");
                                 return ExitCode::FAILURE;
                             }
                         };
@@ -105,16 +105,16 @@ async fn main() -> ExitCode {
                             ) {
                                 Ok(paths) => paths,
                                 Err(error) => {
-                                    eprintln!("OpenCodex 兼容性报告写入失败：{error}");
+                                    eprintln!("LLM模型网关兼容性报告写入失败：{error}");
                                     return ExitCode::FAILURE;
                                 }
                             };
-                        print_opencodex_outcome(
+                        print_gateway_outcome(
                             &compatibility_outcome,
                             &report_paths,
                             &outcome.detected_protocol.to_string(),
                         );
-                        opencodex_outcome = Some(compatibility_outcome);
+                        gateway_outcome = Some(compatibility_outcome);
                     }
                     if let Some(connection) = analysis_connection {
                         println!();
@@ -141,7 +141,7 @@ async fn main() -> ExitCode {
                         };
                         match analysis_result {
                             Ok(analysis_outcome) => {
-                                if let Some(compatibility) = opencodex_outcome.as_ref() {
+                                if let Some(compatibility) = gateway_outcome.as_ref() {
                                     let detail =
                                         model_capability_doctor::opencodex::report::render_gateway_compatibility_detail(
                                             compatibility,
@@ -178,12 +178,12 @@ async fn main() -> ExitCode {
     }
 }
 
-fn print_opencodex_outcome(
+fn print_gateway_outcome(
     outcome: &OpenCodexOutcome,
     paths: &ReportPaths,
     detected_protocol: &str,
 ) {
-    println!("========== OpenCodex v2.7.42 模型输出兼容性 ==========");
+    println!("========== LLM模型网关兼容性 ==========");
     if let Some(adapter) = adapter_for_protocol(detected_protocol) {
         if let Some(result) = outcome
             .results

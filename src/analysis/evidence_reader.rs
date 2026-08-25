@@ -97,7 +97,7 @@ pub fn read(path: &Path, redactor: &Redactor) -> Result<ParsedEvidence, Evidence
     require(
         &run,
         "compatibility_profile",
-        "opencodex-2.7.42-data-format",
+        "llm-gateway-data-format",
     )?;
     if run.contains_key("collection_profile") {
         return Err(EvidenceError::InvalidContract(
@@ -511,7 +511,7 @@ mod tests {
              collector_runtime: rust\n\
              section_encoding: base64\n\
              log_schema: llm-capability-doctor.evidence.v4\n\
-             compatibility_profile: opencodex-2.7.42-data-format\n\
+             compatibility_profile: llm-gateway-data-format\n\
              started_at: 2026-08-21T10:00:00+0800\n\
              url: https://example.test/v1/chat/completions\n\
              model: test-model\n\
