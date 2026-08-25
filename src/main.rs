@@ -142,15 +142,15 @@ async fn main() -> ExitCode {
                         match analysis_result {
                             Ok(analysis_outcome) => {
                                 if let Some(compatibility) = opencodex_outcome.as_ref() {
-                                    let section =
-                                        model_capability_doctor::opencodex::report::render_markdown_section(
+                                    let detail =
+                                        model_capability_doctor::opencodex::report::render_gateway_compatibility_detail(
                                             compatibility,
                                             &outcome.detected_protocol.to_string(),
                                         );
                                     if let Err(error) =
-                                        model_capability_doctor::opencodex::report::append_markdown_section(
+                                        model_capability_doctor::opencodex::report::merge_markdown_gateway_compatibility(
                                             &analysis_outcome.markdown_path,
-                                            &section,
+                                            &detail,
                                         )
                                     {
                                         eprintln!("协议兼容性结果合并失败：{error}");

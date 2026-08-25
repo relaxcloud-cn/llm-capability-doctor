@@ -29,16 +29,32 @@ pub fn write_reports(
     Ok(ReportPaths { json: json_path })
 }
 
-pub fn append_markdown_section(path: &Path, section: &str) -> Result<(), std::io::Error> {
-    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
-    file.write_all(b"\n")?;
-    file.write_all(section.as_bytes())?;
+pub fn merge_markdown_gateway_compatibility(
+    path: &Path,
+    detail: &str,
+) -> Result<(), std::io::Error> {
+    let mut markdown = std::fs::read_to_string(path)?;
+    let marker = "**模型最低并发要求";
+    let position = markdown.find(marker).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "主 Markdown 缺少总体结论插入位置",
+        )
+    })?;
+    markdown.insert_str(position, &format!("{detail}\n"));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)?;
+    file.write_all(markdown.as_bytes())?;
     file.flush()
 }
 
-pub fn render_markdown_section(outcome: &OpenCodexOutcome, detected_protocol: &str) -> String {
+pub fn render_gateway_compatibility_detail(
+    outcome: &OpenCodexOutcome,
+    detected_protocol: &str,
+) -> String {
     let mut output = String::new();
-    output.push_str("## 协议兼容性\n\n");
     writeln!(output, "检测协议：`{detected_protocol}`\n").unwrap();
     let adapter = adapter_for_protocol(detected_protocol);
     let result = adapter.and_then(|adapter| {
@@ -233,16 +249,39 @@ mod tests {
                 effect: "OpenCodex 无法读取模型响应。".into(),
             }],
         });
-        let section = super::render_markdown_section(&outcome, "openai_chat");
+        let section = super::render_gateway_compatibility_detail(&outcome, "openai_chat");
 
-        assert!(section.contains("## 协议兼容性"));
         assert!(section.contains("检测协议：`openai_chat`"));
         assert!(section.contains("检测结果：不通过"));
         assert!(section.contains("不通过原因："));
         assert!(section.contains("function.name 为 object"));
         assert!(!section.contains("anthropic"));
         assert!(!section.contains("google"));
-        assert!(!section.contains("# OpenCodex v2.7.42 模型输出兼容性"));
+        assert!(!section.contains("## 协议兼容性"));
+    }
+
+    #[test]
+    fn merges_protocol_detail_inside_overall_gateway_conclusion() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor-self-analysis.md");
+        std::fs::write(
+            &path,
+            "## 总体结论\n\n**AI模型网关层数据结构兼容性：通过**\n\n网关结构符合要求。\n\n**模型最低并发要求（4 并发）：满足**\n",
+        )
+        .unwrap();
+
+        super::merge_markdown_gateway_compatibility(
+            &path,
+            "检测协议：`openai_chat`\n\n检测结果：通过\n",
+        )
+        .unwrap();
+
+        let markdown = std::fs::read_to_string(path).unwrap();
+        let detail = markdown.find("检测协议：").unwrap();
+        let next_requirement = markdown.find("**模型最低并发要求").unwrap();
+        assert!(detail > markdown.find("网关结构符合要求").unwrap());
+        assert!(detail < next_requirement);
+        assert!(!markdown.contains("## 协议兼容性"));
     }
 
     #[test]
