@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 use thiserror::Error;
 
-use crate::opencodex::contract::{CONTRACT, contract_digest};
+use crate::opencodex::contract::{CONTRACT, SOURCE_FILES, contract_digest, rule};
 use crate::opencodex::runner::OpenCodexOutcome;
 use crate::private_file::create_new_private_file;
 
@@ -79,6 +79,11 @@ fn render_json(outcome: &OpenCodexOutcome) -> Result<Vec<u8>, serde_json::Error>
                     "observedPath": failure.observed_path,
                     "actual": failure.actual,
                     "effect": failure.effect,
+                    "source": {
+                        "file": rule(failure.rule_id).source_file,
+                        "sha256": source_digest(rule(failure.rule_id).source_file),
+                        "test": rule(failure.rule_id).source_test,
+                    },
                 })).collect::<Vec<_>>(),
             })
         })
@@ -94,6 +99,14 @@ fn render_json(outcome: &OpenCodexOutcome) -> Result<Vec<u8>, serde_json::Error>
     }))?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn source_digest(path: &str) -> &'static str {
+    SOURCE_FILES
+        .iter()
+        .find(|source| source.path == path)
+        .map(|source| source.sha256)
+        .expect("every OpenCodex rule references a pinned source file")
 }
 
 fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBuf, std::io::Error> {
@@ -133,7 +146,33 @@ mod tests {
 
     #[test]
     fn markdown_reports_only_pass_or_fail_and_explains_each_failure() {
-        let report = render_markdown(&OpenCodexOutcome {
+        let report = render_markdown(&fixture_outcome());
+
+        assert!(report.contains("OpenCodex v2.7.42 / openai-chat：不通过"));
+        assert!(report.contains("OCX-CHAT-TOOL-004：不通过"));
+        assert!(report.contains("OpenCodex 要求：流式工具调用的 function.name 必须是非空字符串。"));
+        assert!(
+            report.contains("实际返回：choices[0].delta.tool_calls[0].function.name 为 object。")
+        );
+        assert!(report.contains("影响：OpenCodex 无法生成 Codex 工具调用事件。"));
+        assert!(!report.contains("未支持"));
+        assert!(!report.contains("分析不可用"));
+    }
+
+    #[test]
+    fn json_records_the_offline_source_file_and_digest_for_each_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths =
+            super::write_reports(&directory.path().join("doctor.log"), &fixture_outcome()).unwrap();
+        let json = std::fs::read_to_string(paths.json).unwrap();
+
+        assert!(json.contains("src/adapters/openai-chat.ts"));
+        assert!(json.contains("ea32bc0aab76a954ed37e2431c56e8ec31f356dfbfbc60eedc1b4a0c870c4cac"));
+        assert!(!json.contains("https://"));
+    }
+
+    fn fixture_outcome() -> OpenCodexOutcome {
+        OpenCodexOutcome {
             results: vec![AdapterResult {
                 adapter: Adapter::OpenAiChat,
                 passed: false,
@@ -145,16 +184,6 @@ mod tests {
                     effect: "OpenCodex 无法生成 Codex 工具调用事件。",
                 }],
             }],
-        });
-
-        assert!(report.contains("OpenCodex v2.7.42 / openai-chat：不通过"));
-        assert!(report.contains("OCX-CHAT-TOOL-004：不通过"));
-        assert!(report.contains("OpenCodex 要求：流式工具调用的 function.name 必须是非空字符串。"));
-        assert!(
-            report.contains("实际返回：choices[0].delta.tool_calls[0].function.name 为 object。")
-        );
-        assert!(report.contains("影响：OpenCodex 无法生成 Codex 工具调用事件。"));
-        assert!(!report.contains("未支持"));
-        assert!(!report.contains("分析不可用"));
+        }
     }
 }

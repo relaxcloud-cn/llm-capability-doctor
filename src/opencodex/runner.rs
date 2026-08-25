@@ -7,11 +7,15 @@ use url::Url;
 use crate::checks::Body;
 use crate::http::{HttpExecutor, RequestInput};
 use crate::opencodex::contract::{Adapter, rule};
-use crate::opencodex::evaluator::{AdapterResult, evaluate_http_failure, evaluate_stream};
+use crate::opencodex::evaluator::{
+    AdapterResult, evaluate_http_failure, evaluate_shape_failure, evaluate_stream,
+};
 use crate::protocol::stream::parse_stream;
 use crate::protocol::tool_loop::{LoopDecision, ToolLoopState};
 use crate::protocol::tools::{ToolConversation, tool_prompt, tool_request};
-use crate::protocol::{AuthMode, Protocol, RequestSpec, basic_request, normalize_request_url};
+use crate::protocol::{
+    AuthMode, Protocol, RequestSpec, basic_request, matches_response, normalize_request_url,
+};
 
 pub struct OpenCodexSettings {
     pub url: Url,
@@ -45,7 +49,10 @@ pub async fn run(settings: OpenCodexSettings) -> Result<OpenCodexOutcome, OpenCo
     let executor = HttpExecutor::new(settings.timeout, settings.insecure)?;
     let mut results = Vec::with_capacity(3);
     for adapter in [Adapter::OpenAiChat, Adapter::Anthropic, Adapter::Google] {
-        let mut result = probe_stream(adapter, &settings, &executor).await;
+        let mut result = merge_results(
+            probe_response(adapter, &settings, &executor).await,
+            probe_stream(adapter, &settings, &executor).await,
+        );
         if result.passed {
             result = merge_results(
                 result,
@@ -61,6 +68,43 @@ pub async fn run(settings: OpenCodexSettings) -> Result<OpenCodexOutcome, OpenCo
         results.push(result);
     }
     Ok(OpenCodexOutcome { results })
+}
+
+async fn probe_response(
+    adapter: Adapter,
+    settings: &OpenCodexSettings,
+    executor: &HttpExecutor,
+) -> AdapterResult {
+    let (protocol, auth_mode) = adapter_connection(adapter);
+    let spec = basic_request(
+        protocol,
+        &settings.model,
+        "Reply only MODEL_DOCTOR_OPENCODEX_RESPONSE_OK",
+        false,
+    );
+    let evidence = execute_spec(
+        adapter, "response", protocol, auth_mode, spec, settings, executor,
+    )
+    .await;
+    let successful_status = evidence
+        .metrics
+        .http_status
+        .is_some_and(|status| (200..300).contains(&status));
+    if !successful_status || !evidence.transport_outcome.is_success() {
+        return evaluate_http_failure(adapter, evidence.metrics.http_status, &evidence.error);
+    }
+    if matches_response(protocol, &evidence.response_body) {
+        pass_result(adapter)
+    } else {
+        evaluate_shape_failure(
+            adapter,
+            "response_body",
+            &format!(
+                "response did not match the {} response structure",
+                adapter_display_name(adapter)
+            ),
+        )
+    }
 }
 
 async fn probe_stream(
@@ -276,6 +320,14 @@ const fn adapter_connection(adapter: Adapter) -> (Protocol, AuthMode) {
     }
 }
 
+const fn adapter_display_name(adapter: Adapter) -> &'static str {
+    match adapter {
+        Adapter::OpenAiChat => "OpenAI Chat",
+        Adapter::Anthropic => "Anthropic",
+        Adapter::Google => "Google",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
@@ -332,8 +384,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runner_fails_chat_when_its_non_stream_response_has_the_wrong_shape() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1/chat/completions")
+                    .body_includes("MODEL_DOCTOR_OPENCODEX_RESPONSE_OK");
+                then.status(200)
+                    .header("content-type", "application/json")
+                    .body(r#"{"unexpected":true}"#);
+            })
+            .await;
+
+        let outcome = run(OpenCodexSettings {
+            url: server.url("/v1/chat/completions").parse().unwrap(),
+            model: "test-model".into(),
+            api_key: "secret-key".into(),
+            timeout: Duration::from_secs(2),
+            insecure: false,
+            cancellation: CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            outcome
+                .result(Adapter::OpenAiChat)
+                .failures
+                .iter()
+                .any(|failure| {
+                    failure.rule_id == "OCX-CHAT-SHAPE-001"
+                        && failure.actual
+                            == "response did not match the OpenAI Chat response structure"
+                })
+        );
+    }
+
+    #[tokio::test]
     async fn runner_completes_a_chat_tool_result_round_trip() {
         let server = MockServer::start_async().await;
+        let response = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/v1/chat/completions")
+                    .header("authorization", "Bearer secret-key")
+                    .body_includes("MODEL_DOCTOR_OPENCODEX_RESPONSE_OK");
+                then.status(200).json_body(json!({
+                    "choices": [{"message": {"content": "MODEL_DOCTOR_OPENCODEX_RESPONSE_OK"}}]
+                }));
+            })
+            .await;
         let basic = server
             .mock_async(|when, then| {
                 when.method(POST)
@@ -431,6 +532,7 @@ mod tests {
         .unwrap();
 
         let basic_calls = basic.calls_async().await;
+        let response_calls = response.calls_async().await;
         let initial_tool_calls = initial_tool_turn.calls_async().await;
         let final_tool_calls = final_tool_turn.calls_async().await;
         let serial_initial_calls = serial_initial.calls_async().await;
@@ -439,7 +541,7 @@ mod tests {
         let chat_result = outcome.result(Adapter::OpenAiChat);
         assert!(
             chat_result.passed,
-            "basic={basic_calls}, initial_tool={initial_tool_calls}, final_tool={final_tool_calls}, serial_initial={serial_initial_calls}, serial_time={serial_time_calls}, serial_final={serial_final_calls}; {:?}",
+            "response={response_calls}, basic={basic_calls}, initial_tool={initial_tool_calls}, final_tool={final_tool_calls}, serial_initial={serial_initial_calls}, serial_time={serial_time_calls}, serial_final={serial_final_calls}; {:?}",
             chat_result
                 .failures
                 .iter()
@@ -450,6 +552,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         basic.assert_async().await;
+        response.assert_async().await;
         initial_tool_turn.assert_async().await;
         final_tool_turn.assert_async().await;
         serial_initial.assert_async().await;

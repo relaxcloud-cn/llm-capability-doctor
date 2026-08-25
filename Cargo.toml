@@ -39,3 +39,7 @@ strip = true
 [[test]]
 name = "cli_self_analysis"
 path = "src/cli_self_analysis_test.rs"
+
+[[test]]
+name = "cli_opencodex"
+path = "src/cli_opencodex_test.rs"

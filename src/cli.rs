@@ -44,6 +44,10 @@ pub struct Cli {
     /// Analyze completed evidence by calling the tested model through the same endpoint.
     #[arg(long)]
     pub self_analyze: bool,
+
+    /// Test whether model responses satisfy OpenCodex v2.7.42 output contracts.
+    #[arg(long)]
+    pub opencodex_compatibility: bool,
 }
 
 pub struct Config {
@@ -54,6 +58,7 @@ pub struct Config {
     pub timeout: Duration,
     pub insecure: bool,
     pub self_analyze: bool,
+    pub opencodex_compatibility: bool,
 }
 
 pub struct SecretString(String);
@@ -103,6 +108,7 @@ impl Cli {
             timeout: Duration::from_secs(self.timeout),
             insecure: self.insecure,
             self_analyze: self.self_analyze,
+            opencodex_compatibility: self.opencodex_compatibility,
         })
     }
 }
@@ -134,6 +140,7 @@ mod tests {
             list_tests: false,
             insecure: false,
             self_analyze: false,
+            opencodex_compatibility: false,
         }
     }
 
@@ -164,6 +171,34 @@ mod tests {
         ])
         .unwrap();
         assert!(enabled.self_analyze);
+    }
+
+    #[test]
+    fn opencodex_compatibility_is_opt_in() {
+        let disabled = Cli::try_parse_from([
+            "doctor",
+            "--url",
+            "https://example.test/v1/chat/completions",
+            "--model",
+            "m",
+            "--api-key",
+            "k",
+        ])
+        .unwrap();
+        assert!(!disabled.opencodex_compatibility);
+
+        let enabled = Cli::try_parse_from([
+            "doctor",
+            "--url",
+            "https://example.test/v1/chat/completions",
+            "--model",
+            "m",
+            "--api-key",
+            "k",
+            "--opencodex-compatibility",
+        ])
+        .unwrap();
+        assert!(enabled.opencodex_compatibility);
     }
 
     #[test]

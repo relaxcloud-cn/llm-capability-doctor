@@ -54,6 +54,22 @@ pub fn evaluate_http_failure(adapter: Adapter, status: Option<u16>, detail: &str
     }
 }
 
+pub fn evaluate_shape_failure(
+    adapter: Adapter,
+    observed_path: &str,
+    actual: &str,
+) -> AdapterResult {
+    AdapterResult {
+        adapter,
+        passed: false,
+        failures: vec![failure(
+            rule(shape_rule(adapter)),
+            observed_path,
+            actual.to_owned(),
+        )],
+    }
+}
+
 fn terminal_rule(adapter: Adapter, termination: &StreamTermination) -> Option<&'static str> {
     match termination {
         StreamTermination::Completed | StreamTermination::NotApplicable => None,

@@ -7,6 +7,8 @@ use model_capability_doctor::analysis::orchestrator::{
 };
 use model_capability_doctor::catalog;
 use model_capability_doctor::cli::Cli;
+use model_capability_doctor::opencodex::report::ReportPaths;
+use model_capability_doctor::opencodex::runner::{OpenCodexOutcome, OpenCodexSettings};
 use model_capability_doctor::terminal;
 use tokio_util::sync::CancellationToken;
 
@@ -40,6 +42,15 @@ async fn main() -> ExitCode {
                 timeout: config.timeout,
                 insecure: config.insecure,
             });
+            let opencodex_connection = config.opencodex_compatibility.then(|| {
+                (
+                    config.url.clone(),
+                    config.model.clone(),
+                    config.api_key.expose().to_owned(),
+                    config.timeout,
+                    config.insecure,
+                )
+            });
             let cancellation = CancellationToken::new();
             let shutdown = shutdown_signal();
             tokio::pin!(shutdown);
@@ -56,6 +67,47 @@ async fn main() -> ExitCode {
             match result.expect("runner branch always returns a result") {
                 Ok(outcome) => {
                     print_collection_outcome(&outcome);
+                    if let Some((url, model, api_key, timeout, insecure)) = opencodex_connection {
+                        println!();
+                        println!("正在检测 OpenCodex v2.7.42 模型输出兼容性……");
+                        let compatibility =
+                            model_capability_doctor::opencodex::runner::run(OpenCodexSettings {
+                                url,
+                                model,
+                                api_key,
+                                timeout,
+                                insecure,
+                                cancellation: cancellation.clone(),
+                            });
+                        tokio::pin!(compatibility);
+                        let compatibility_outcome = tokio::select! {
+                            result = &mut compatibility => result,
+                            exit_code = &mut shutdown => {
+                                cancellation.cancel();
+                                let _ = (&mut compatibility).await;
+                                return ExitCode::from(exit_code);
+                            }
+                        };
+                        let compatibility_outcome = match compatibility_outcome {
+                            Ok(value) => value,
+                            Err(error) => {
+                                eprintln!("OpenCodex 兼容性检测失败：{error}");
+                                return ExitCode::FAILURE;
+                            }
+                        };
+                        let report_paths =
+                            match model_capability_doctor::opencodex::report::write_reports(
+                                &outcome.log_path,
+                                &compatibility_outcome,
+                            ) {
+                                Ok(paths) => paths,
+                                Err(error) => {
+                                    eprintln!("OpenCodex 兼容性报告写入失败：{error}");
+                                    return ExitCode::FAILURE;
+                                }
+                            };
+                        print_opencodex_outcome(&compatibility_outcome, &report_paths);
+                    }
                     if let Some(connection) = analysis_connection {
                         println!();
                         println!("正在准备本地证据分析……");
@@ -99,6 +151,16 @@ async fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+fn print_opencodex_outcome(outcome: &OpenCodexOutcome, paths: &ReportPaths) {
+    println!("========== OpenCodex v2.7.42 模型输出兼容性 ==========");
+    for result in &outcome.results {
+        let status = if result.passed { "通过" } else { "不通过" };
+        println!("{}：{status}", result.adapter.id());
+    }
+    println!("JSON：{}", file_name(&paths.json));
+    println!("结果：{}", file_name(&paths.markdown));
 }
 
 fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcome) {
