@@ -178,11 +178,7 @@ async fn main() -> ExitCode {
     }
 }
 
-fn print_gateway_outcome(
-    outcome: &OpenCodexOutcome,
-    paths: &ReportPaths,
-    detected_protocol: &str,
-) {
+fn print_gateway_outcome(outcome: &OpenCodexOutcome, paths: &ReportPaths, detected_protocol: &str) {
     println!("========== LLM模型网关兼容性 ==========");
     if let Some(adapter) = adapter_for_protocol(detected_protocol) {
         if let Some(result) = outcome

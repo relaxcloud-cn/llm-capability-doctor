@@ -1353,3 +1353,46 @@ async fn context_capacity_probes_bisect_downward_after_rejection() {
         );
     }
 }
+
+#[tokio::test]
+async fn context_capacity_stops_immediately_when_declared_limit_fails_the_bar() {
+    // 服务端在报错里声明上限 96K（不足 128K 档）：主探针被拒后无需夹逼。
+    let rejection = serde_json::json!({
+        "error": {
+            "message": "This model's maximum context length is 96000 tokens. However, you requested 124016 tokens",
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded"
+        }
+    })
+    .to_string()
+    .into_bytes();
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(10_000),
+        ))],
+        vec![ServerAction::Write(http_response_with_declared_length(
+            "400 Bad Request",
+            rejection.len(),
+            &rejection,
+        ))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("tempdir");
+    let mut runner = test_runner(
+        &server,
+        &temp,
+        Protocol::OpenAiChat,
+        Duration::from_secs(30),
+    );
+
+    runner
+        .execute_check(catalog_test("018"))
+        .await
+        .expect("context capacity check");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 2, "calibration + rejected main probe only");
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
+    assert!(log.contains("========== REQUEST test-018-probe-124000-a1 BEGIN =========="));
+    assert!(!log.contains("test-018-probe-6"));
+}

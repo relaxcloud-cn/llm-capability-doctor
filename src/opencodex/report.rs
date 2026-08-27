@@ -201,7 +201,9 @@ fn write_output(log_path: &Path, extension: &str, bytes: &[u8]) -> Result<PathBu
         } else {
             format!("-{sequence}")
         };
-        let path = directory.join(format!("{stem}-llm-gateway-compatibility{suffix}.{extension}"));
+        let path = directory.join(format!(
+            "{stem}-llm-gateway-compatibility{suffix}.{extension}"
+        ));
         match create_new_private_file(&path) {
             Ok(mut file) => {
                 file.write_all(bytes)?;

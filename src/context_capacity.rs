@@ -40,8 +40,9 @@ const FILLER_BLOCK: &str = "FILLER_BLOCK_0123456789 ";
 pub enum ProbeOutcome {
     /// 服务端接受（HTTP 2xx、传输成功、回复非空）。
     Accepted { measured_tokens: Option<u64> },
-    /// 服务端以超长为由拒绝（HTTP 4xx 且错误内容指向上下文超限）。
-    RejectedTooLong,
+    /// 服务端以超长为由拒绝（HTTP 4xx 且错误内容指向上下文超限），
+    /// 携带报错里声明的模型上下文上限（如有）。
+    RejectedTooLong { declared_limit: Option<u64> },
     /// 超时（含重试后仍超时）。
     TimedOut,
     /// 其他失败（5xx、断连等），不能归因为上下文容量。
@@ -58,6 +59,8 @@ pub struct ContextConclusion {
     pub floor_is_measured: bool,
     /// 已确认被拒的最小目标 token 数。
     pub ceiling_tokens: Option<u64>,
+    /// ceiling 是否来自服务端报错里声明的上限值（而非我们的探针档位）。
+    pub ceiling_is_declared: bool,
     /// 无法判断时的原因（其他状态为空）。
     pub reason: String,
 }
@@ -73,22 +76,29 @@ pub enum ContextStatus {
 }
 
 impl ContextConclusion {
-    pub fn satisfied_with(floor: u64, measured: bool, ceiling: Option<u64>) -> Self {
+    pub fn satisfied_with(
+        floor: u64,
+        measured: bool,
+        ceiling: Option<u64>,
+        ceiling_is_declared: bool,
+    ) -> Self {
         Self {
             status: ContextStatus::Satisfied,
             floor_tokens: Some(floor),
             floor_is_measured: measured,
             ceiling_tokens: ceiling,
+            ceiling_is_declared,
             reason: String::new(),
         }
     }
 
-    pub fn not_satisfied(floor: Option<u64>, ceiling: u64) -> Self {
+    pub fn not_satisfied(floor: Option<u64>, ceiling: u64, ceiling_is_declared: bool) -> Self {
         Self {
             status: ContextStatus::NotSatisfied,
             floor_tokens: floor,
             floor_is_measured: false,
             ceiling_tokens: Some(ceiling),
+            ceiling_is_declared,
             reason: String::new(),
         }
     }
@@ -99,6 +109,7 @@ impl ContextConclusion {
             floor_tokens: None,
             floor_is_measured: false,
             ceiling_tokens: None,
+            ceiling_is_declared: false,
             reason: reason.into(),
         }
     }
@@ -271,6 +282,122 @@ pub fn is_context_length_rejection(http_status: Option<u16>, body: &[u8]) -> boo
     .any(|pattern| text.contains(pattern))
 }
 
+/// 从超长拒绝报错里提取服务端声明的上下文上限（token 数）。
+///
+/// 各家都会在报错里带上自己的上限值，例如：
+/// - OpenAI / vLLM / SGLang：`maximum context length is 262144 tokens`、
+///   `exceeds 'max_model_len' (262144)`
+/// - Anthropic：`prompt is too long: 200001 tokens > 200000 maximum`
+/// - Gemini：`exceeds the maximum number of tokens allowed (128000)`
+/// - Ollama：`prompt must have at most 131072 tokens`
+///
+/// 只锚定上限侧的关键词，避免把「you requested 320000」这类请求侧数字当成上限。
+/// 多处命中时取最小值（保守）。
+pub fn extract_declared_context_limit(body: &[u8]) -> Option<u64> {
+    let text = String::from_utf8_lossy(body).to_lowercase();
+    let mut candidates: Vec<u64> = Vec::new();
+
+    // "maximum context length is 262144"
+    if let Some(value) = number_after(&text, "maximum context length is ") {
+        candidates.push(value);
+    }
+    // "context window ... limit of 262144"? 罕见，跳过。
+    // "exceeds 'max_model_len' (262144)" / "max_model_len limit 262144"
+    if let Some(index) = text.find("max_model_len") {
+        if let Some(value) = first_number_in(&text[index + "max_model_len".len()..]) {
+            candidates.push(value);
+        }
+    }
+    // Anthropic: "... tokens > 200000 maximum"
+    if let Some(index) = text.find(" maximum") {
+        if let Some(value) = number_before(&text[..index]) {
+            candidates.push(value);
+        }
+    }
+    // Gemini: "maximum number of tokens allowed (128000)"
+    if let Some(value) = number_after(&text, "maximum number of tokens allowed ") {
+        candidates.push(value);
+    }
+    // Ollama: "at most 131072 tokens"
+    if let Some(value) = number_after(&text, "at most ") {
+        candidates.push(value);
+    }
+    // Bedrock/其他： "exceed max tokens 200000"
+    if let Some(value) = number_after(&text, "max tokens ") {
+        candidates.push(value);
+    }
+
+    // 合理上限范围：8K 以上、16M 以下，过滤误抓的请求侧/无关数字。
+    candidates
+        .into_iter()
+        .filter(|value| (8_000..=16_000_000).contains(value))
+        .min()
+}
+
+/// 返回锚点之后第一段数字（跳过非数字字符，但不超过锚点后 32 个字符，
+/// 避免跨句子误抓）。
+fn number_after(text: &str, anchor: &str) -> Option<u64> {
+    let index = text.find(anchor)?;
+    let rest = &text[index + anchor.len()..];
+    let window = &rest[..rest.len().min(32)];
+    first_number_in(window)
+}
+
+/// 返回锚点之前紧邻的一段数字（跳过空白）。
+fn number_before(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let mut end = bytes.len();
+    while end > 0 && bytes[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && bytes[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    text[start..end].parse().ok()
+}
+
+fn first_number_in(text: &str) -> Option<u64> {
+    let bytes = text.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor].is_ascii_digit() {
+            let start = cursor;
+            while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+                cursor += 1;
+            }
+            let value: u64 = text[start..cursor].parse().ok()?;
+            // 带逗分的大数（如 1,048,576）继续拼接。
+            if cursor + 1 < bytes.len()
+                && bytes[cursor] == b','
+                && bytes[cursor + 1].is_ascii_digit()
+            {
+                let mut merged = value.to_string();
+                let mut scan = cursor;
+                while scan + 1 < bytes.len()
+                    && bytes[scan] == b','
+                    && bytes[scan + 1].is_ascii_digit()
+                {
+                    let digits_start = scan + 1;
+                    let mut digits_end = digits_start;
+                    while digits_end < bytes.len() && bytes[digits_end].is_ascii_digit() {
+                        digits_end += 1;
+                    }
+                    merged.push_str(&text[digits_start..digits_end]);
+                    scan = digits_end;
+                }
+                return merged.parse().ok();
+            }
+            return Some(value);
+        }
+        cursor += 1;
+    }
+    None
+}
+
 /// 用与采集端相同的规则对单条证据分类。
 pub fn classify_probe(
     protocol: Protocol,
@@ -292,7 +419,9 @@ pub fn classify_probe(
         return ProbeOutcome::TimedOut;
     }
     if is_context_length_rejection(http_status, response_body) {
-        return ProbeOutcome::RejectedTooLong;
+        return ProbeOutcome::RejectedTooLong {
+            declared_limit: extract_declared_context_limit(response_body),
+        };
     }
     ProbeOutcome::RejectedOther
 }
@@ -334,6 +463,9 @@ pub fn conclusion_sentence(conclusion: &ContextConclusion) -> String {
                     "经检测，上下文在{}-{ceiling}左右，不满足智能体部署所需要的128K的要求。",
                     format_tokens_k(floor)
                 ),
+                None if conclusion.ceiling_is_declared => format!(
+                    "经检测，上下文上限为服务端声明的{ceiling}，不满足智能体部署所需要的128K的要求。"
+                ),
                 None => {
                     format!("经检测，上下文上限低于{ceiling}，不满足智能体部署所需要的128K的要求。")
                 }
@@ -348,7 +480,8 @@ pub fn conclusion_sentence(conclusion: &ContextConclusion) -> String {
 /// 由全部探针结果推导最终结论。这是采集端和分析端共用的唯一判定入口。
 pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
     let mut floor: Option<(u64, bool)> = None;
-    let mut ceiling: Option<u64> = None;
+    let mut target_ceiling: Option<u64> = None;
+    let mut declared_min: Option<u64> = None;
     let mut truncation: Option<(u64, u64)> = None;
     let mut timed_out_at: Option<u64> = None;
     let mut other_error_at: Option<u64> = None;
@@ -366,13 +499,26 @@ pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
                     truncation = Some((target, measured));
                 }
             }
-            ProbeOutcome::RejectedTooLong => {
-                ceiling = Some(ceiling.map_or(target, |current: u64| current.min(target)));
+            ProbeOutcome::RejectedTooLong { declared_limit } => {
+                target_ceiling =
+                    Some(target_ceiling.map_or(target, |current: u64| current.min(target)));
+                if let Some(declared) = declared_limit {
+                    declared_min =
+                        Some(declared_min.map_or(declared, |current| current.min(declared)));
+                }
             }
             ProbeOutcome::TimedOut => timed_out_at = Some(target),
             ProbeOutcome::RejectedOther => other_error_at = Some(target),
         }
     }
+
+    // 上界取两者中更紧的：探针档位（实测被拒）与服务端声明值。
+    let ceiling = match (target_ceiling, declared_min) {
+        (Some(target), Some(declared)) => Some((target.min(declared), declared <= target)),
+        (None, Some(declared)) => Some((declared, true)),
+        (Some(target), None) => Some((target, false)),
+        (None, None) => None,
+    };
 
     if let Some((target, measured)) = truncation {
         return ContextConclusion::indeterminate(format!(
@@ -383,12 +529,19 @@ pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
     }
     if floor.is_some_and(|(tokens, _)| tokens >= CONTEXT_MAIN_TARGET_TOKENS) {
         let (tokens, measured) = floor.expect("checked above");
-        return ContextConclusion::satisfied_with(tokens, measured, ceiling);
+        let (ceiling_tokens, ceiling_is_declared) =
+            ceiling.map_or((None, false), |(value, declared)| (Some(value), declared));
+        return ContextConclusion::satisfied_with(
+            tokens,
+            measured,
+            ceiling_tokens,
+            ceiling_is_declared,
+        );
     }
     // 未达标：有被拒上限就能给出实测区间。
-    if let Some(ceiling) = ceiling {
+    if let Some((ceiling, ceiling_is_declared)) = ceiling {
         let floor_tokens = floor.map(|(tokens, _)| tokens);
-        return ContextConclusion::not_satisfied(floor_tokens, ceiling);
+        return ContextConclusion::not_satisfied(floor_tokens, ceiling, ceiling_is_declared);
     }
     // 没有被拒上限：按失败方式解释为什么无法判断。
     if let Some(target) = timed_out_at {
@@ -583,7 +736,12 @@ mod tests {
             "completed_eof",
             br#"{"error":{"message":"prompt is too long"}}"#,
         );
-        assert_eq!(too_long, ProbeOutcome::RejectedTooLong);
+        assert_eq!(
+            too_long,
+            ProbeOutcome::RejectedTooLong {
+                declared_limit: None
+            }
+        );
 
         let crashed = classify_probe(
             Protocol::OpenAiChat,
@@ -617,7 +775,12 @@ mod tests {
                     measured_tokens: None,
                 },
             ),
-            (496_000, ProbeOutcome::RejectedTooLong),
+            (
+                496_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: None,
+                },
+            ),
         ]);
 
         assert_eq!(conclusion.status, ContextStatus::Satisfied);
@@ -665,14 +828,24 @@ mod tests {
     #[test]
     fn conclude_reports_bracket_below_the_requirement() {
         let conclusion = conclude(&[
-            (124_000, ProbeOutcome::RejectedTooLong),
+            (
+                124_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: None,
+                },
+            ),
             (
                 62_000,
                 ProbeOutcome::Accepted {
                     measured_tokens: Some(62_100),
                 },
             ),
-            (93_000, ProbeOutcome::RejectedTooLong),
+            (
+                93_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: None,
+                },
+            ),
         ]);
 
         assert_eq!(conclusion.status, ContextStatus::NotSatisfied);
@@ -714,10 +887,113 @@ mod tests {
     }
 
     #[test]
+    fn declared_limits_are_extracted_from_each_vendor_error_shape() {
+        let vllm = br#"{"error":{"message":"This model's maximum context length is 262144 tokens. However, you requested 320000 tokens (including 16 for the generated output), which exceeds the context length of 262144","code":400}}"#;
+        assert_eq!(extract_declared_context_limit(vllm), Some(262_144));
+
+        let anthropic = br#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 200001 tokens > 200000 maximum"}}"#;
+        assert_eq!(extract_declared_context_limit(anthropic), Some(200_000));
+
+        let gemini =
+            b"The input token count (128001) exceeds the maximum number of tokens allowed (128000)";
+        assert_eq!(extract_declared_context_limit(gemini), Some(128_000));
+
+        let ollama = b"prompt must have at most 131072 tokens but found 131073";
+        assert_eq!(extract_declared_context_limit(ollama), Some(131_072));
+
+        let sglang = br#"{"object":"error","message":"The total number of tokens (320016) exceeds max_model_len limit 262144"}"#;
+        assert_eq!(extract_declared_context_limit(sglang), Some(262_144));
+
+        // 无关报错提取不出上限。
+        assert_eq!(
+            extract_declared_context_limit(br#"{"error":{"message":"model not found"}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_probe_carries_the_declared_limit() {
+        let outcome = classify_probe(
+            Protocol::OpenAiChat,
+            Some(400),
+            "completed_eof",
+            br#"{"error":{"message":"This model's maximum context length is 96000 tokens. However, you requested 124016 tokens"}}"#,
+        );
+
+        assert_eq!(
+            outcome,
+            ProbeOutcome::RejectedTooLong {
+                declared_limit: Some(96_000)
+            }
+        );
+    }
+
+    #[test]
+    fn conclude_uses_the_declared_limit_as_the_tighter_ceiling() {
+        let conclusion = conclude(&[
+            (
+                124_000,
+                ProbeOutcome::Accepted {
+                    measured_tokens: Some(124_012),
+                },
+            ),
+            (
+                248_000,
+                ProbeOutcome::Accepted {
+                    measured_tokens: Some(248_030),
+                },
+            ),
+            (
+                496_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: Some(262_144),
+                },
+            ),
+        ]);
+
+        assert_eq!(conclusion.status, ContextStatus::Satisfied);
+        assert_eq!(conclusion.floor_tokens, Some(248_030));
+        assert_eq!(conclusion.ceiling_tokens, Some(262_144));
+        assert!(conclusion.ceiling_is_declared);
+        assert_eq!(
+            conclusion_sentence(&conclusion),
+            "经检测，上下文在248K-262K左右，满足智能体部署所需要的128K的要求。"
+        );
+    }
+
+    #[test]
+    fn conclude_reports_declared_limit_when_only_rejections_exist() {
+        let conclusion = conclude(&[(
+            124_000,
+            ProbeOutcome::RejectedTooLong {
+                declared_limit: Some(96_000),
+            },
+        )]);
+
+        assert_eq!(conclusion.status, ContextStatus::NotSatisfied);
+        assert_eq!(conclusion.ceiling_tokens, Some(96_000));
+        assert!(conclusion.ceiling_is_declared);
+        assert_eq!(
+            conclusion_sentence(&conclusion),
+            "经检测，上下文上限为服务端声明的96K，不满足智能体部署所需要的128K的要求。"
+        );
+    }
+
+    #[test]
     fn conclude_handles_rejection_without_any_accepted_probe() {
         let conclusion = conclude(&[
-            (124_000, ProbeOutcome::RejectedTooLong),
-            (62_000, ProbeOutcome::RejectedTooLong),
+            (
+                124_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: None,
+                },
+            ),
+            (
+                62_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: None,
+                },
+            ),
         ]);
 
         assert_eq!(conclusion.status, ContextStatus::NotSatisfied);

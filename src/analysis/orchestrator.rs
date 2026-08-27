@@ -2281,7 +2281,7 @@ mod tests {
             failures: Vec::new(),
         }];
         artifact.context_conclusion =
-            crate::context_capacity::ContextConclusion::satisfied_with(126_431, true, None);
+            crate::context_capacity::ContextConclusion::satisfied_with(126_431, true, None, false);
 
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
@@ -2304,6 +2304,7 @@ mod tests {
             248_000,
             false,
             Some(496_000),
+            false,
         );
 
         let markdown = render_markdown(&artifact);
@@ -2348,7 +2349,7 @@ mod tests {
             failures: Vec::new(),
         }];
         artifact.context_conclusion =
-            crate::context_capacity::ContextConclusion::not_satisfied(Some(62_100), 93_000);
+            crate::context_capacity::ContextConclusion::not_satisfied(Some(62_100), 93_000, false);
 
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
@@ -2663,6 +2664,7 @@ mod tests {
                 126_431,
                 true,
                 Some(496_000),
+                false,
             ),
         }
     }

@@ -500,8 +500,17 @@ impl Runner {
                     let effective = measured_tokens.unwrap_or(target);
                     low = Some(low.map_or(effective, |current| current.max(effective)));
                 }
-                ProbeOutcome::RejectedTooLong => {
-                    high = Some(high.map_or(target, |current| current.min(target)));
+                ProbeOutcome::RejectedTooLong { declared_limit } => {
+                    // 目标档位本身被拒，声明值只会把上界收得更紧，不会放宽。
+                    let bound = declared_limit.map_or(target, |declared| declared.min(target));
+                    high = Some(high.map_or(bound, |current| current.min(bound)));
+                    // 服务端在报错里声明了上限且明确不足 128K 档：无需再夹逼。
+                    if declared_limit.is_some_and(|declared| {
+                        declared < context_capacity::CONTEXT_MAIN_TARGET_TOKENS
+                    }) {
+                        outcomes.push((target, outcome));
+                        break;
+                    }
                 }
                 // 超时或其他错误不能归因为容量，停止搜索，保留已知区间。
                 ProbeOutcome::TimedOut | ProbeOutcome::RejectedOther => {
