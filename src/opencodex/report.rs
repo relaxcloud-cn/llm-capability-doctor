@@ -109,10 +109,7 @@ fn adapter_for_protocol(protocol: &str) -> Option<Adapter> {
 }
 
 fn markdown_cell(value: &str) -> String {
-    value
-        .replace('|', "\\|")
-        .replace('\n', " ")
-        .replace('\r', " ")
+    value.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 pub fn render_markdown(outcome: &OpenCodexOutcome) -> String {
@@ -229,13 +226,15 @@ mod tests {
     fn markdown_reports_only_pass_or_fail_and_explains_each_failure() {
         let report = render_markdown(&fixture_outcome());
 
-        assert!(report.contains("LLMæ¨¡åç½å³ / openai-chat：不通过"));
+        assert!(report.contains("LLM模型网关 / openai-chat：不通过"));
         assert!(report.contains("GW-CHAT-TOOL-004：不通过"));
-        assert!(report.contains("OpenCodex 要求：流式工具调用的 function.name 必须是非空字符串。"));
+        assert!(
+            report.contains("LLM模型网关要求：流式工具调用的 function.name 必须是非空字符串。")
+        );
         assert!(
             report.contains("实际返回：choices[0].delta.tool_calls[0].function.name 为 object。")
         );
-        assert!(report.contains("影响：OpenCodex 无法生成 Codex 工具调用事件。"));
+        assert!(report.contains("影响：LLM模型网关无法生成工具调用事件。"));
         assert!(!report.contains("未支持"));
         assert!(!report.contains("分析不可用"));
     }
@@ -256,7 +255,7 @@ mod tests {
                 requirement: "Google 响应必须包含可读取的 candidates 内容。",
                 observed_path: "http_status".into(),
                 actual: "401".into(),
-                effect: "OpenCodex 无法读取模型响应。".into(),
+                effect: "LLM模型网关无法读取模型响应。".into(),
             }],
         });
         let section = super::render_gateway_compatibility_detail(&outcome, "openai_chat");
@@ -318,7 +317,7 @@ mod tests {
                     requirement: "流式工具调用的 function.name 必须是非空字符串。",
                     observed_path: "choices[0].delta.tool_calls[0].function.name".into(),
                     actual: "object".into(),
-                    effect: "OpenCodex 无法生成 Codex 工具调用事件。",
+                    effect: "LLM模型网关无法生成工具调用事件。",
                 }],
             }],
         }

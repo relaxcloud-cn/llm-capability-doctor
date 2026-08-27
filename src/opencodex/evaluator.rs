@@ -94,13 +94,10 @@ fn failure_for_contract_error(adapter: Adapter, error: &str) -> RuleFailure {
             Adapter::Anthropic => "GW-ANTH-TOOL-005",
             Adapter::Google => "GW-GOOGLE-TOOL-004",
         }
-    } else if error.contains("function_args") || error.contains("arguments") {
-        match adapter {
-            Adapter::OpenAiChat => "GW-CHAT-TOOL-004",
-            Adapter::Anthropic => "GW-ANTH-TOOL-005",
-            Adapter::Google => "GW-GOOGLE-TOOL-004",
-        }
-    } else if error.contains("tool") {
+    } else if error.contains("function_args")
+        || error.contains("arguments")
+        || error.contains("tool")
+    {
         match adapter {
             Adapter::OpenAiChat => "GW-CHAT-TOOL-004",
             Adapter::Anthropic => "GW-ANTH-TOOL-005",

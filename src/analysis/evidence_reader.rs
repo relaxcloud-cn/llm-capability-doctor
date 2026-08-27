@@ -31,6 +31,16 @@ pub struct ParsedEvidence {
     pub run: BTreeMap<String, String>,
     pub requests: BTreeMap<String, ParsedRequest>,
     pub tests: BTreeMap<String, ParsedTest>,
+    /// 解析失败但被跳过（而非整体报错）的请求块，含各自原因。
+    pub degraded_requests: Vec<DegradedEntry>,
+    /// 解析失败或引用了降级请求的检测块，含各自原因。
+    pub degraded_tests: Vec<DegradedEntry>,
+}
+
+#[derive(Clone, Debug)]
+pub struct DegradedEntry {
+    pub id: String,
+    pub reason: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -107,14 +117,23 @@ pub fn read(path: &Path, redactor: &Redactor) -> Result<ParsedEvidence, Evidence
         }
     }
 
-    let requests = parse_requests(text, redactor)?;
-    let tests = parse_tests(text, &requests)?;
+    let (requests, degraded_requests) = parse_requests(text, redactor)?;
+    let (tests, degraded_tests) = parse_tests(text, &requests, &degraded_requests)?;
     let summary = parse_summary(text)?;
-    require_count(&summary, "request_count", requests.len())?;
-    require_count(&summary, "test_manifest_count", tests.len())?;
+    require_count(
+        &summary,
+        "request_count",
+        requests.len() + degraded_requests.len(),
+    )?;
+    require_count(
+        &summary,
+        "test_manifest_count",
+        tests.len() + degraded_tests.len(),
+    )?;
 
     let expected_ids: HashSet<_> = CATALOG.iter().map(|test| test.id).collect();
-    let actual_ids: HashSet<_> = tests.keys().map(String::as_str).collect();
+    let mut actual_ids: HashSet<_> = tests.keys().map(String::as_str).collect();
+    actual_ids.extend(degraded_tests.iter().map(|entry| entry.id.as_str()));
     if actual_ids != expected_ids {
         return Err(EvidenceError::InvalidContract(format!(
             "evidence.v4 must contain the exact {}-check catalog",
@@ -138,6 +157,8 @@ pub fn read(path: &Path, redactor: &Redactor) -> Result<ParsedEvidence, Evidence
         run,
         requests,
         tests,
+        degraded_requests,
+        degraded_tests,
     })
 }
 
@@ -166,67 +187,118 @@ fn parse_summary(text: &str) -> Result<BTreeMap<String, String>, EvidenceError> 
 fn parse_requests(
     text: &str,
     redactor: &Redactor,
-) -> Result<BTreeMap<String, ParsedRequest>, EvidenceError> {
+) -> Result<(BTreeMap<String, ParsedRequest>, Vec<DegradedEntry>), EvidenceError> {
     let mut requests = BTreeMap::new();
-    for (request_id, block) in blocks(text, BlockKind::Request)? {
-        if requests.contains_key(&request_id) {
+    let mut degraded = Vec::new();
+    for block in blocks(text, BlockKind::Request)? {
+        let (request_id, body) = match block {
+            ParsedBlock::Intact(id, body) => (id, Some(body)),
+            ParsedBlock::Degraded(id) => (id, None),
+        };
+        if requests.contains_key(&request_id)
+            || degraded.iter().any(|e: &DegradedEntry| e.id == request_id)
+        {
             return Err(EvidenceError::Malformed(format!(
                 "duplicate request block {request_id}"
             )));
         }
-        let metadata_end = block
-            .find("----- CURL COMMAND BEGIN -----")
-            .ok_or_else(|| {
-                EvidenceError::Malformed(format!("request {request_id} has no curl section"))
-            })?;
-        let metadata = key_values(&block[..metadata_end]);
-        if metadata.get("request_id") != Some(&request_id) {
-            return Err(EvidenceError::Malformed(format!(
-                "request block {request_id} declares a different request_id"
-            )));
-        }
-        for field in REQUIRED_REQUEST_FIELDS {
-            if !metadata.contains_key(field) {
-                return Err(EvidenceError::Malformed(format!(
-                    "request {request_id} is missing {field}"
-                )));
-            }
-        }
-
-        requests.insert(
-            request_id.clone(),
-            ParsedRequest {
-                request_id,
-                metadata: redact_map(metadata, redactor),
-                metrics: key_values(section(&block, "RESPONSE METRICS")?),
-                curl_command: redactor.redact_text(section(&block, "CURL COMMAND")?),
-                request_body: decode_section(&block, "REQUEST BODY", redactor)?,
-                response_headers: redactor.redact_text(section(&block, "RESPONSE HEADERS")?),
-                stderr: decode_section(&block, "CURL STDERR", redactor)?,
-                response_body: decode_section(&block, "RESPONSE BODY", redactor)?,
+        match body {
+            Some(body) => match parse_request_block(&request_id, &body, redactor) {
+                Ok(parsed) => {
+                    requests.insert(request_id.clone(), parsed);
+                }
+                Err(reason) => degraded.push(DegradedEntry {
+                    id: request_id,
+                    reason,
+                }),
             },
-        );
+            None => degraded.push(DegradedEntry {
+                id: request_id,
+                reason: "请求块损坏：缺少 END 标记".to_owned(),
+            }),
+        }
     }
     if requests.is_empty() {
+        if degraded.is_empty() {
+            return Err(EvidenceError::InvalidContract(
+                "evidence contains no request blocks".into(),
+            ));
+        }
         return Err(EvidenceError::InvalidContract(
-            "evidence contains no request blocks".into(),
+            "evidence contains no intact request blocks".into(),
         ));
     }
-    Ok(requests)
+    Ok((requests, degraded))
+}
+
+fn parse_request_block(
+    request_id: &str,
+    block: &str,
+    redactor: &Redactor,
+) -> Result<ParsedRequest, String> {
+    let metadata_end = block
+        .find("----- CURL COMMAND BEGIN -----")
+        .ok_or_else(|| format!("请求块损坏：缺少 CURL COMMAND 段（request {request_id}）"))?;
+    let metadata = key_values(&block[..metadata_end]);
+    if metadata.get("request_id") != Some(&request_id.to_owned()) {
+        return Err(format!(
+            "请求块损坏：request_id 与块标识不一致（request {request_id}）"
+        ));
+    }
+    for field in REQUIRED_REQUEST_FIELDS {
+        if !metadata.contains_key(field) {
+            return Err(format!(
+                "请求块损坏：缺少字段 {field}（request {request_id}）"
+            ));
+        }
+    }
+    Ok(ParsedRequest {
+        request_id: request_id.to_owned(),
+        metadata: redact_map(metadata, redactor),
+        metrics: key_values(section(block, "RESPONSE METRICS").map_err(degradation_reason)?),
+        curl_command: redactor
+            .redact_text(section(block, "CURL COMMAND").map_err(degradation_reason)?),
+        request_body: decode_section(block, "REQUEST BODY", redactor)
+            .map_err(|error| degradation_reason(error.to_string()))?,
+        response_headers: redactor
+            .redact_text(section(block, "RESPONSE HEADERS").map_err(degradation_reason)?),
+        stderr: decode_section(block, "CURL STDERR", redactor)
+            .map_err(|error| degradation_reason(error.to_string()))?,
+        response_body: decode_section(block, "RESPONSE BODY", redactor)
+            .map_err(|error| degradation_reason(error.to_string()))?,
+    })
 }
 
 fn parse_tests(
     text: &str,
     requests: &BTreeMap<String, ParsedRequest>,
-) -> Result<BTreeMap<String, ParsedTest>, EvidenceError> {
+    degraded_requests: &[DegradedEntry],
+) -> Result<(BTreeMap<String, ParsedTest>, Vec<DegradedEntry>), EvidenceError> {
+    let degraded_request_ids: HashSet<&str> = degraded_requests
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
     let mut tests = BTreeMap::new();
-    for (test_id, block) in blocks(text, BlockKind::Test)? {
-        if tests.contains_key(&test_id) {
+    let mut degraded = Vec::new();
+    for block in blocks(text, BlockKind::Test)? {
+        let (test_id, body) = match block {
+            ParsedBlock::Intact(id, body) => (id, Some(body)),
+            ParsedBlock::Degraded(id) => (id, None),
+        };
+        if tests.contains_key(&test_id) || degraded.iter().any(|e: &DegradedEntry| e.id == test_id)
+        {
             return Err(EvidenceError::Malformed(format!(
                 "duplicate test block {test_id}"
             )));
         }
-        let values = key_values(&block);
+        let Some(body) = body else {
+            degraded.push(DegradedEntry {
+                id: test_id,
+                reason: "检测块损坏：缺少 END 标记".to_owned(),
+            });
+            continue;
+        };
+        let values = key_values(&body);
         if ["result", "expected", "detected", "conclusion", "status"]
             .iter()
             .any(|field| values.contains_key(*field))
@@ -235,45 +307,66 @@ fn parse_tests(
                 "test {test_id} contains a forbidden judgment field"
             )));
         }
-        let name = non_empty(&values, "name", &test_id)?;
-        let category = non_empty(&values, "category", &test_id)?;
-        let raw_refs = values.get("request_refs").ok_or_else(|| {
-            EvidenceError::Malformed(format!("test {test_id} is missing request_refs"))
-        })?;
-        let request_refs: Vec<String> = if raw_refs.is_empty() {
-            Vec::new()
-        } else {
-            raw_refs
-                .split(',')
-                .map(str::trim)
-                .map(str::to_owned)
-                .collect()
-        };
-        let unique: HashSet<_> = request_refs.iter().collect();
-        if request_refs.iter().any(String::is_empty) || unique.len() != request_refs.len() {
-            return Err(EvidenceError::Malformed(format!(
-                "test {test_id} has invalid request_refs"
-            )));
-        }
-        if let Some(missing) = request_refs
-            .iter()
-            .find(|reference| !requests.contains_key(*reference))
-        {
-            return Err(EvidenceError::Malformed(format!(
-                "test {test_id} references missing request {missing}"
-            )));
-        }
-        tests.insert(
-            test_id.clone(),
-            ParsedTest {
+        match parse_test_block(&test_id, &values, requests, &degraded_request_ids) {
+            Ok(parsed) => {
+                tests.insert(test_id.clone(), parsed);
+            }
+            Err(reason) => degraded.push(DegradedEntry {
                 id: test_id,
-                name,
-                category,
-                request_refs,
-            },
-        );
+                reason,
+            }),
+        }
     }
-    Ok(tests)
+    Ok((tests, degraded))
+}
+
+fn parse_test_block(
+    test_id: &str,
+    values: &BTreeMap<String, String>,
+    requests: &BTreeMap<String, ParsedRequest>,
+    degraded_request_ids: &HashSet<&str>,
+) -> Result<ParsedTest, String> {
+    let name = non_empty(values, "name", test_id).map_err(degradation_reason)?;
+    let category = non_empty(values, "category", test_id).map_err(degradation_reason)?;
+    let raw_refs = values
+        .get("request_refs")
+        .ok_or_else(|| format!("检测块损坏：缺少 request_refs（test {test_id}）"))?;
+    let request_refs: Vec<String> = if raw_refs.is_empty() {
+        Vec::new()
+    } else {
+        raw_refs
+            .split(',')
+            .map(str::trim)
+            .map(str::to_owned)
+            .collect()
+    };
+    let unique: HashSet<_> = request_refs.iter().collect();
+    if request_refs.iter().any(String::is_empty) || unique.len() != request_refs.len() {
+        return Err(format!(
+            "检测块损坏：request_refs 格式无效（test {test_id}）"
+        ));
+    }
+    if let Some(reference) = request_refs
+        .iter()
+        .find(|reference| !requests.contains_key(*reference))
+    {
+        return Err(if degraded_request_ids.contains(reference.as_str()) {
+            format!("引用的请求 {reference} 证据损坏（test {test_id}）")
+        } else {
+            format!("检测块损坏：引用的请求 {reference} 不存在（test {test_id}）")
+        });
+    }
+    Ok(ParsedTest {
+        id: test_id.to_owned(),
+        name,
+        category,
+        request_refs,
+    })
+}
+
+/// 将读取端错误转为面向报告的降级原因文案。
+fn degradation_reason(error: impl std::fmt::Display) -> String {
+    format!("证据损坏：{error}")
 }
 
 #[derive(Clone, Copy)]
@@ -282,7 +375,13 @@ enum BlockKind {
     Test,
 }
 
-fn blocks(text: &str, kind: BlockKind) -> Result<Vec<(String, String)>, EvidenceError> {
+enum ParsedBlock {
+    Intact(String, String),
+    /// 块标识可读但缺少 END 标记（例如文件中段损坏），跳过并降级。
+    Degraded(String),
+}
+
+fn blocks(text: &str, kind: BlockKind) -> Result<Vec<ParsedBlock>, EvidenceError> {
     let (prefix, suffix, end_prefix) = match kind {
         BlockKind::Request => (
             "========== REQUEST ",
@@ -308,11 +407,14 @@ fn blocks(text: &str, kind: BlockKind) -> Result<Vec<(String, String)>, Evidence
         let body_start = identifier_end + suffix.len();
         let body_start = body_start + usize::from(text.as_bytes().get(body_start) == Some(&b'\n'));
         let end_marker = format!("{end_prefix}{identifier} END ==========");
-        let body_end = text[body_start..]
-            .find(&end_marker)
-            .map(|offset| body_start + offset)
-            .ok_or_else(|| EvidenceError::Malformed(format!("unterminated block {identifier}")))?;
-        output.push((
+        let Some(relative_end) = text[body_start..].find(&end_marker) else {
+            // 单块缺 END 不再让整个读取失败：记为降级，从块体起点继续扫描后续块。
+            output.push(ParsedBlock::Degraded(identifier));
+            cursor = body_start;
+            continue;
+        };
+        let body_end = body_start + relative_end;
+        output.push(ParsedBlock::Intact(
             identifier,
             text[body_start..body_end].trim_end_matches('\n').to_owned(),
         ));
@@ -413,7 +515,7 @@ fn non_empty(
 }
 
 #[cfg(test)]
-pub(crate) use tests::complete_test_log;
+pub(crate) use tests::{complete_test_log, two_request_log};
 
 #[cfg(test)]
 mod tests {
@@ -519,6 +621,117 @@ mod tests {
         assert!(curl_command.contains("[REDACTED]"));
         assert!(!curl_command.contains("secret-token"));
         assert!(!curl_command.contains("query-secret"));
+    }
+
+    /// 在 complete_test_log 基础上加入第二个完好请求 test-shared-2，
+    /// 并把 001 的引用改指向它；其余检测仍引用 test-shared。
+    pub(crate) fn two_request_log() -> String {
+        let mut log = complete_test_log();
+        let block_start = log
+            .find("========== REQUEST test-shared BEGIN ==========")
+            .unwrap();
+        let end_marker = "========== REQUEST test-shared END ==========";
+        let block_end = log.find(end_marker).unwrap() + end_marker.len() + 1;
+        let second_block = log[block_start..block_end].replace("test-shared", "test-shared-2");
+        log.insert_str(block_end, &second_block);
+        log = log.replace("request_count: 1", "request_count: 2");
+        let test_start = log.find("========== TEST-001 BEGIN ==========").unwrap();
+        let test_end = log.find("========== TEST-001 END ==========").unwrap();
+        let repointed = log[test_start..test_end].replace(
+            "request_refs: test-shared\n",
+            "request_refs: test-shared-2\n",
+        );
+        log.replace_range(test_start..test_end, &repointed);
+        log
+    }
+
+    fn redactor_for_test() -> Redactor {
+        Redactor::new("secret-token", &Url::parse("https://example.test").unwrap())
+    }
+
+    #[test]
+    fn corrupt_request_degrades_instead_of_failing_whole_log() {
+        let mut log = two_request_log();
+        let target = "----- RESPONSE BODY BEGIN -----\ncmVzcG9uc2U=";
+        let index = log.find(target).unwrap();
+        log.replace_range(
+            index..index + target.len(),
+            "----- RESPONSE BODY BEGIN -----\n!!!not-base64!!!",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(&path, log).unwrap();
+
+        let parsed = read(&path, &redactor_for_test()).unwrap();
+
+        assert_eq!(parsed.requests.len(), 1);
+        assert!(parsed.requests.contains_key("test-shared-2"));
+        assert_eq!(parsed.degraded_requests.len(), 1);
+        assert_eq!(parsed.degraded_requests[0].id, "test-shared");
+        assert!(parsed.degraded_requests[0].reason.contains("证据损坏"));
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(parsed.degraded_tests.len(), CATALOG.len() - 1);
+        assert!(
+            parsed
+                .degraded_tests
+                .iter()
+                .all(|entry| entry.reason.contains("引用的请求 test-shared 证据损坏"))
+        );
+    }
+
+    #[test]
+    fn request_block_without_end_marker_degrades_and_scanning_continues() {
+        let log =
+            two_request_log().replace("\n========== REQUEST test-shared END ==========\n", "\n");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(&path, log).unwrap();
+
+        let parsed = read(&path, &redactor_for_test()).unwrap();
+
+        assert_eq!(parsed.degraded_requests.len(), 1);
+        assert_eq!(
+            parsed.degraded_requests[0].reason,
+            "请求块损坏：缺少 END 标记"
+        );
+        assert!(parsed.requests.contains_key("test-shared-2"));
+        assert_eq!(parsed.tests.len(), 1);
+        assert_eq!(parsed.degraded_tests.len(), CATALOG.len() - 1);
+    }
+
+    #[test]
+    fn corrupt_test_block_degrades_instead_of_failing_whole_log() {
+        let mut log = complete_test_log();
+        let marker = "========== TEST-042 BEGIN ==========\n";
+        let start = log.find(marker).unwrap() + marker.len();
+        let name_line_end = start + log[start..].find('\n').unwrap() + 1;
+        log.replace_range(start..name_line_end, "");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(&path, log).unwrap();
+
+        let parsed = read(&path, &redactor_for_test()).unwrap();
+
+        assert_eq!(parsed.tests.len(), CATALOG.len() - 1);
+        assert_eq!(parsed.degraded_tests.len(), 1);
+        assert_eq!(parsed.degraded_tests[0].id, "042");
+        assert!(parsed.degraded_tests[0].reason.contains("name"));
+        assert!(parsed.degraded_requests.is_empty());
+    }
+
+    #[test]
+    fn all_requests_corrupt_still_fails_loudly() {
+        let log = complete_test_log().replace("cmVzcG9uc2U=", "!!!not-base64!!!");
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(&path, log).unwrap();
+
+        match read(&path, &redactor_for_test()) {
+            Err(EvidenceError::InvalidContract(message)) => {
+                assert!(message.contains("no intact request blocks"));
+            }
+            other => panic!("expected fatal contract error, got {other:?}"),
+        }
     }
 
     pub(crate) fn complete_test_log() -> String {

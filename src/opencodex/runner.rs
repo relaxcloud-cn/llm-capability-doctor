@@ -186,7 +186,7 @@ async fn probe_tool_loop(
                         adapter,
                         check_id,
                         "assistant_turn.final_text",
-                        &format!("expected {marker}, received {}", assistant_turn.final_text),
+                        format!("expected {marker}, received {}", assistant_turn.final_text),
                     ),
                 );
             }
@@ -206,7 +206,7 @@ async fn probe_tool_loop(
             } => {
                 return merge_results(
                     result,
-                    tool_failure(adapter, check_id, "tool_calls", &contract_errors.join(", ")),
+                    tool_failure(adapter, check_id, "tool_calls", contract_errors.join(", ")),
                 );
             }
         }

@@ -116,8 +116,17 @@ pub async fn build_packet(
 pub async fn build_all_packets(
     evidence: &ParsedEvidence,
 ) -> Result<Vec<EvidencePacket>, PacketError> {
+    let degraded: std::collections::HashSet<&str> = evidence
+        .degraded_tests
+        .iter()
+        .map(|entry| entry.id.as_str())
+        .collect();
     let mut packets = Vec::with_capacity(crate::catalog::CATALOG.len());
     for test in crate::catalog::CATALOG {
+        if degraded.contains(test.id) {
+            // 证据损坏的检测项不进入自分析，由 orchestrator 标记为分析不可用。
+            continue;
+        }
         if test.id == "057" {
             packets.extend(build_concurrency_packets(evidence).await?);
         } else {
@@ -632,6 +641,8 @@ mod tests {
                     request_refs: vec!["test-019".into()],
                 },
             )]),
+            degraded_requests: Vec::new(),
+            degraded_tests: Vec::new(),
         }
     }
 
@@ -654,6 +665,8 @@ mod tests {
                     request_refs: vec![request.request_id],
                 },
             )]),
+            degraded_requests: Vec::new(),
+            degraded_tests: Vec::new(),
         }
     }
 

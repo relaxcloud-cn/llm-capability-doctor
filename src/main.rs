@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use model_capability_doctor::analysis::orchestrator::{
-    AnalysisConnectionSettings, AnalysisOutcome,
+    AnalysisConnectionSettings, AnalysisError, AnalysisOutcome,
 };
 use model_capability_doctor::catalog;
 use model_capability_doctor::cli::Cli;
@@ -159,7 +159,11 @@ async fn main() -> ExitCode {
                                 print_analysis_outcome(&analysis_outcome);
                             }
                             Err(error) => {
-                                eprintln!("客户侧分析失败（检测日志已正常生成）：{error}")
+                                eprintln!(
+                                    "客户侧分析失败（检测日志已正常生成）：{}{}",
+                                    error,
+                                    analysis_failure_hint(&error)
+                                )
                             }
                         }
                     }
@@ -216,6 +220,28 @@ fn print_collection_outcome(outcome: &model_capability_doctor::runner::RunOutcom
 
 fn print_analysis_outcome(outcome: &AnalysisOutcome) {
     print!("{}", format_analysis_outcome(outcome));
+}
+
+/// 针对常见失败原因给出可操作的中文提示；其余失败不附加提示。
+fn analysis_failure_hint(error: &AnalysisError) -> String {
+    use model_capability_doctor::analysis::evidence_reader::EvidenceError;
+
+    let AnalysisError::Evidence(evidence) = error else {
+        return String::new();
+    };
+    match evidence {
+        EvidenceError::InvalidContract(message)
+            if message.contains("script_version must equal") =>
+        {
+            format!(
+                "\n提示：该检测日志由其他版本的工具生成（{message}）。请使用生成日志的同版本工具进行分析，或重新运行检测。"
+            )
+        }
+        EvidenceError::MissingRunSummary => {
+            "\n提示：检测日志不完整（写入可能被中断）。请重新运行检测生成完整日志。".to_owned()
+        }
+        _ => String::new(),
+    }
 }
 
 fn format_analysis_outcome(outcome: &AnalysisOutcome) -> String {
@@ -301,7 +327,10 @@ fn shutdown_signal() -> impl std::future::Future<Output = u8> {
 mod tests {
     use std::path::PathBuf;
 
-    use super::{AnalysisOutcome, format_analysis_outcome};
+    use model_capability_doctor::analysis::evidence_reader::EvidenceError;
+    use model_capability_doctor::analysis::orchestrator::AnalysisError;
+
+    use super::{AnalysisOutcome, analysis_failure_hint, format_analysis_outcome};
 
     #[test]
     fn analysis_summary_lists_the_failed_curl_log() {
@@ -319,5 +348,32 @@ mod tests {
         assert!(
             format_analysis_outcome(&outcome).contains("失败 cURL 日志：doctor-failed-curls.log")
         );
+    }
+
+    #[test]
+    fn version_mismatch_failure_gets_actionable_hint() {
+        let error = AnalysisError::Evidence(EvidenceError::InvalidContract(
+            "script_version must equal 0.13.0".into(),
+        ));
+
+        let hint = analysis_failure_hint(&error);
+
+        assert!(hint.contains("同版本工具"));
+        assert!(hint.contains("重新运行检测"));
+    }
+
+    #[test]
+    fn incomplete_log_failure_gets_actionable_hint() {
+        let hint =
+            analysis_failure_hint(&AnalysisError::Evidence(EvidenceError::MissingRunSummary));
+
+        assert!(hint.contains("重新运行检测"));
+    }
+
+    #[test]
+    fn other_failures_get_no_hint() {
+        let error = AnalysisError::Evidence(EvidenceError::Malformed("odd corruption".into()));
+
+        assert_eq!(analysis_failure_hint(&error), "");
     }
 }

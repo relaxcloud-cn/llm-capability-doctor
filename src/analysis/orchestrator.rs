@@ -13,7 +13,9 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::client::{AnalysisClient, AnalysisTarget, ClientError, ModelAnalysisClient};
-use super::evidence_reader::{EvidenceError, EvidenceSource, ParsedEvidence, ParsedRequest, read};
+use super::evidence_reader::{
+    DegradedEntry, EvidenceError, EvidenceSource, ParsedEvidence, ParsedRequest, read,
+};
 use super::packet::{EvidencePacket, PacketError, bounded_excerpt, default_batches};
 use super::prompt::{PROMPT_VERSION, build_prompt, build_repair_prompt};
 use super::validator::{
@@ -119,10 +121,63 @@ struct SelfAnalysisArtifact {
     batches: Vec<BatchResult>,
     counts: AnalysisCounts,
     gateway_compatibility: GatewayCompatibility,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence_degradations: Vec<EvidenceDegradation>,
     #[serde(skip)]
     concurrency_waves: Vec<ConcurrencyWave>,
     #[serde(skip)]
     context_conclusion: ContextConclusion,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceDegradation {
+    pub kind: &'static str,
+    pub id: String,
+    pub reason: String,
+}
+
+/// 汇总读取端跳过的损坏块，写入产物与报告，供用户核对证据完整性。
+fn collect_evidence_degradations(evidence: &ParsedEvidence) -> Vec<EvidenceDegradation> {
+    evidence
+        .degraded_requests
+        .iter()
+        .map(|entry| EvidenceDegradation {
+            kind: "request",
+            id: entry.id.clone(),
+            reason: entry.reason.clone(),
+        })
+        .chain(
+            evidence
+                .degraded_tests
+                .iter()
+                .map(|entry| EvidenceDegradation {
+                    kind: "test",
+                    id: entry.id.clone(),
+                    reason: entry.reason.clone(),
+                }),
+        )
+        .collect()
+}
+
+/// 证据损坏的检测项以“分析不可用”进入报告，而不是让整个自分析失败。
+fn degraded_test_results(degraded_tests: &[DegradedEntry]) -> Vec<AnalysisTestResult> {
+    degraded_tests
+        .iter()
+        .map(|entry| AnalysisTestResult {
+            test_id: entry.id.clone(),
+            report_test_id: entry.id.clone(),
+            analysis_state: AnalysisState::AnalysisUnavailable,
+            candidate_status: None,
+            validated_status: None,
+            decision_source: None,
+            observations: Vec::new(),
+            failure_cause: None,
+            evidence_refs: Vec::new(),
+            limitations: vec![entry.reason.clone()],
+            validation_notes: vec!["no validated self-analysis candidate was produced".into()],
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -356,6 +411,11 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
     }
 
     let tests = consolidate_report_results(tests);
+    let evidence_degradations = collect_evidence_degradations(&evidence);
+    let tests = tests
+        .into_iter()
+        .chain(degraded_test_results(&evidence.degraded_tests))
+        .collect::<Vec<_>>();
     let counts = AnalysisCounts {
         pass: tests
             .iter()
@@ -397,6 +457,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
         batches: batch_results,
         counts,
         gateway_compatibility,
+        evidence_degradations,
         concurrency_waves,
         context_conclusion,
     };
@@ -1128,7 +1189,33 @@ fn render_markdown(artifact: &SelfAnalysisArtifact) -> String {
     render_concurrency_summary(artifact, &mut output);
     render_test_table(artifact, &mut output);
     render_non_pass_details(artifact, &mut output);
+    render_evidence_degradations(artifact, &mut output);
     output
+}
+
+fn render_evidence_degradations(artifact: &SelfAnalysisArtifact, output: &mut String) {
+    if artifact.evidence_degradations.is_empty() {
+        return;
+    }
+    output.push_str("## 证据降级说明\n\n");
+    output.push_str(
+        "以下证据块在解析时损坏，已被跳过；相关检测项标记为分析不可用，其余检测不受影响。\n\n",
+    );
+    for entry in &artifact.evidence_degradations {
+        let kind = if entry.kind == "request" {
+            "请求"
+        } else {
+            "检测"
+        };
+        writeln!(
+            output,
+            "- {kind} {}：{}",
+            entry.id,
+            markdown_cell(&entry.reason)
+        )
+        .unwrap();
+    }
+    output.push('\n');
 }
 
 fn render_overall_conclusion(artifact: &SelfAnalysisArtifact, output: &mut String) {
@@ -1629,9 +1716,10 @@ mod tests {
 
     use super::*;
     use crate::analysis::client::{AnalysisClient, ClientError};
-    use crate::analysis::evidence_reader::{complete_test_log, read};
+    use crate::analysis::evidence_reader::{complete_test_log, read, two_request_log};
     use crate::analysis::packet::{EvidencePacket, default_batches};
     use crate::analysis::validator::{CandidateEnvelope, CandidateReview, CandidateStatus};
+    use crate::catalog::CATALOG;
     use crate::protocol::{AuthMode, Protocol};
     use crate::redaction::Redactor;
 
@@ -1834,6 +1922,51 @@ mod tests {
 
         assert_eq!(outcome.unavailable_count, batches[0].len());
         assert!(lines.contains(&"[自分析 01/11] 接口与协议 | 分析不可用".into()));
+    }
+
+    #[tokio::test]
+    async fn degraded_evidence_still_produces_full_report() {
+        let directory = tempfile::tempdir().unwrap();
+        let log_path = directory.path().join("doctor.log");
+        let mut log = two_request_log();
+        let target = "----- RESPONSE BODY BEGIN -----\ncmVzcG9uc2U=";
+        let index = log.find(target).unwrap();
+        log.replace_range(
+            index..index + target.len(),
+            "----- RESPONSE BODY BEGIN -----\n!!!not-base64!!!",
+        );
+        std::fs::write(&log_path, log).unwrap();
+        let url = "https://example.test/v1/chat/completions".parse().unwrap();
+        let redactor = Redactor::new("secret-key", &url);
+        let batches = default_batches(&read(&log_path, &redactor).unwrap())
+            .await
+            .unwrap();
+        let responses = batches
+            .iter()
+            .map(|batch| Ok(valid_envelope_for(batch)))
+            .collect();
+        let client = FakeClient::new(responses);
+        let settings = AnalysisSettings {
+            log_path,
+            url,
+            model: "test-model".into(),
+            api_key: "secret-key".into(),
+            timeout: Duration::from_secs(2),
+            insecure: false,
+            protocol: Protocol::OpenAiChat,
+            auth_mode: AuthMode::Bearer,
+        };
+
+        let outcome = analyze_with_client(settings, &client, CancellationToken::new())
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.available_count, 1);
+        assert_eq!(outcome.unavailable_count, CATALOG.len() - 1);
+        let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
+        assert!(markdown.contains("证据降级说明"));
+        assert!(markdown.contains("test-shared"));
+        assert!(markdown.contains("引用的请求 test-shared 证据损坏"));
     }
 
     #[test]
@@ -2659,6 +2792,7 @@ mod tests {
                 unavailable: 0,
             },
             gateway_compatibility,
+            evidence_degradations: Vec::new(),
             concurrency_waves: Vec::new(),
             context_conclusion: crate::context_capacity::ContextConclusion::satisfied_with(
                 126_431,
