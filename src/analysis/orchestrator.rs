@@ -20,6 +20,10 @@ use super::validator::{
     CandidateEnvelope, CandidateStatus, DecisionSource, ValidatedReview, ValidatedStatus,
     validate_candidates,
 };
+use crate::context_capacity::{
+    ContextConclusion, ContextStatus, ProbeOutcome, classify_probe, conclusion_sentence,
+    is_calibration_request, parse_probe_target, protocol_from_wire_name,
+};
 use crate::private_file::create_new_private_file;
 use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
@@ -33,7 +37,6 @@ const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
     ["002", "004", "005", "006", "040", "041", "043", "047"];
 const MINIMUM_CONCURRENCY: usize = 4;
 const MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS: f64 = 30.0;
-const MINIMUM_CONTEXT_TEST_ID: &str = "018";
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -118,6 +121,8 @@ struct SelfAnalysisArtifact {
     gateway_compatibility: GatewayCompatibility,
     #[serde(skip)]
     concurrency_waves: Vec<ConcurrencyWave>,
+    #[serde(skip)]
+    context_conclusion: ContextConclusion,
 }
 
 #[derive(Serialize)]
@@ -368,6 +373,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
     let collector_version = evidence.run["script_version"].clone();
     let evidence_schema_version = evidence.run["log_schema"].clone();
     let concurrency_waves = summarize_concurrency(&evidence);
+    let context_conclusion = summarize_context(&evidence);
     let detected_protocol = settings.protocol.to_string();
     let gateway_compatibility = derive_gateway_compatibility(&detected_protocol, &tests);
     let mut source = evidence.source.clone();
@@ -392,6 +398,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
         counts,
         gateway_compatibility,
         concurrency_waves,
+        context_conclusion,
     };
     let pass_count = artifact.counts.pass;
     let fail_count = artifact.counts.fail;
@@ -786,6 +793,46 @@ fn concurrency_level(request_id: &str) -> Option<usize> {
     (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0).then_some(concurrency)
 }
 
+/// 从证据日志还原上下文容量实测结论（与采集端共用同一套判定函数）。
+fn summarize_context(evidence: &ParsedEvidence) -> ContextConclusion {
+    // 同一目标可能因超时重试出现多条记录（-a1/-a2），保留最后一次尝试。
+    let mut outcomes: BTreeMap<u64, ProbeOutcome> = BTreeMap::new();
+    for request in evidence.requests.values() {
+        if is_calibration_request(&request.request_id) {
+            continue;
+        }
+        let Some(target) = parse_probe_target(&request.request_id) else {
+            continue;
+        };
+        let protocol = protocol_from_wire_name(
+            request
+                .metadata
+                .get("protocol")
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        let http_status = request
+            .metrics
+            .get("http_status")
+            .and_then(|value| value.parse::<u16>().ok());
+        let transport_outcome = request
+            .metadata
+            .get("transport_outcome")
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        outcomes.insert(
+            target,
+            classify_probe(
+                protocol,
+                http_status,
+                transport_outcome,
+                request.response_body.as_bytes(),
+            ),
+        );
+    }
+    crate::context_capacity::conclude(&outcomes.into_iter().collect::<Vec<_>>())
+}
+
 fn concurrency_request_succeeded(request: &ParsedRequest) -> bool {
     let http_success = request
         .metrics
@@ -1008,7 +1055,7 @@ fn verified_category_conclusion(category: &str) -> &'static str {
             "能按要求输出严格 JSON，字段类型、嵌套对象、数组顺序、空值和额外字段控制均符合要求，并能正确返回调查阶段和证据引用。"
         }
         "上下文" => {
-            "本轮 8K、16K、32K、64K、128K 字符级请求均返回非空响应，多轮修正状态也能保持；本轮最高验证到 128K 字符近似档位，不等同于真实 Token 上限。"
+            "上下文容量按实测 Token 判定（先校准字符/Token 密度，再按实测密度构造目标 Token 数的探针，以服务端统计为准）；多轮修正状态也能保持。"
         }
         "指令与文本" => {
             "能执行精确文本、组合格式、多字段抽取和限长摘要要求，输出内容完整且没有额外干扰文本。"
@@ -1158,15 +1205,14 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
 }
 
 fn minimum_context_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
-    let Some(result) = result_for(artifact, MINIMUM_CONTEXT_TEST_ID) else {
-        return ("不通过", "未生成 128K 请求的检测结果。".into());
-    };
-    match result_status(result) {
-        "PASS" => ("通过", "128K 请求成功。".into()),
-        "FAIL" => ("不通过", concrete_failure_reason(result)),
-        _ => (
-            "不通过",
-            format!("128K 请求未完成有效判断：{}", unavailable_reason(result)),
+    match artifact.context_conclusion.status {
+        ContextStatus::Satisfied => ("通过", conclusion_sentence(&artifact.context_conclusion)),
+        ContextStatus::NotSatisfied => {
+            ("不通过", conclusion_sentence(&artifact.context_conclusion))
+        }
+        ContextStatus::Indeterminate => (
+            "无法判断",
+            conclusion_sentence(&artifact.context_conclusion),
         ),
     }
 }
@@ -1269,7 +1315,10 @@ fn render_concurrency_summary(artifact: &SelfAnalysisArtifact, output: &mut Stri
 }
 
 fn render_test_table(artifact: &SelfAnalysisArtifact, output: &mut String) {
-    output.push_str("## 46 项检测明细\n\n");
+    output.push_str(&format!(
+        "## {} 项检测明细\n\n",
+        crate::catalog::CATALOG.len()
+    ));
     output.push_str("| 编号 | 分类 | 检测项 | 结果 | 原因 |\n|---|---|---|---|---|\n");
     for test in crate::catalog::CATALOG {
         let result = result_for(artifact, test.id);
@@ -1640,12 +1689,12 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 46);
+        assert_eq!(outcome.available_count, 42);
         assert_eq!(client.call_count(), batches.len() + 1);
         assert!(client.prompts()[1].contains("missing reviews"));
         let output = std::fs::read_to_string(&outcome.path).unwrap();
         assert!(output.contains("llm-capability-doctor.self-analysis.v3"));
-        assert!(output.contains("model-doctor-self-analysis-prompt.v4"));
+        assert!(output.contains(PROMPT_VERSION));
         assert!(output.contains("\"gatewayCompatibility\""));
         assert!(!output.contains("openCodexCompatibility"));
         assert!(!output.contains("secret-key"));
@@ -1654,7 +1703,7 @@ mod tests {
         assert!(!failed_curls.contains("========== FAILED TEST"));
         let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
         assert!(markdown.contains("## 能力分类检测结论"));
-        assert_eq!(markdown.matches("| PASS |").count(), 46);
+        assert_eq!(markdown.matches("| PASS |").count(), 42);
         assert!(!markdown.contains("secret-key"));
         drop(directory);
     }
@@ -1678,7 +1727,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 46);
+        assert_eq!(outcome.available_count, 42);
         assert_eq!(client.call_count(), batches.len() + 5);
         assert!(client.prompts()[5].contains("missing testId"));
     }
@@ -1721,7 +1770,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 46);
+        assert_eq!(outcome.available_count, 42);
         assert_eq!(client.call_count(), batches.len() + 1);
     }
 
@@ -1755,9 +1804,9 @@ mod tests {
                 batches.len()
             )
         );
-        assert_eq!(lines[1], "[自分析 01/12] 接口与协议 | 001-004 | 正在分析");
-        assert_eq!(lines[2], "[自分析 01/12] 接口与协议 | 重试 1/3");
-        assert_eq!(lines[3], "[自分析 01/12] 接口与协议 | 已完成");
+        assert_eq!(lines[1], "[自分析 01/11] 接口与协议 | 001-004 | 正在分析");
+        assert_eq!(lines[2], "[自分析 01/11] 接口与协议 | 重试 1/3");
+        assert_eq!(lines[3], "[自分析 01/11] 接口与协议 | 已完成");
     }
 
     #[tokio::test]
@@ -1784,7 +1833,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.unavailable_count, batches[0].len());
-        assert!(lines.contains(&"[自分析 01/12] 接口与协议 | 分析不可用".into()));
+        assert!(lines.contains(&"[自分析 01/11] 接口与协议 | 分析不可用".into()));
     }
 
     #[test]
@@ -1819,7 +1868,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome.unavailable_count, batches[0].len());
-        assert_eq!(outcome.available_count, 46 - batches[0].len());
+        assert_eq!(outcome.available_count, 42 - batches[0].len());
         assert_eq!(client.call_count(), batches.len() + 2);
     }
 
@@ -1836,10 +1885,10 @@ mod tests {
 
         assert!(outcome.cancelled);
         assert_eq!(outcome.available_count, 0);
-        assert_eq!(outcome.unavailable_count, 46);
+        assert_eq!(outcome.unavailable_count, 42);
         assert_eq!(client.call_count(), 0);
         let output = std::fs::read_to_string(outcome.path).unwrap();
-        assert!(output.contains("\"collectorVersion\": \"0.12.0\""));
+        assert!(output.contains("\"collectorVersion\": \"0.13.0\""));
         assert!(
             output.contains("\"evidenceSchemaVersion\": \"llm-capability-doctor.evidence.v4\"")
         );
@@ -2178,7 +2227,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_all_pass_has_eight_satisfied_categories_and_46_rows() {
+    fn markdown_all_pass_has_eight_satisfied_categories_and_42_rows() {
         let artifact = markdown_fixture(
             crate::catalog::CATALOG
                 .iter()
@@ -2190,11 +2239,12 @@ mod tests {
 
         assert!(markdown.contains("## 关键检测项结论"));
         assert!(markdown.contains("## 能力分类检测结论"));
+        assert!(markdown.contains("## 42 项检测明细"));
         assert!(!markdown.contains("## 总体结论"));
         assert!(!markdown.contains("## 大分类结论"));
         assert!(markdown.contains("| 接口与协议 | 通过 |"));
         assert!(markdown.contains("| 护栏与词汇 | 通过 |"));
-        assert_eq!(markdown.matches("| PASS |").count(), 46);
+        assert_eq!(markdown.matches("| PASS |").count(), 42);
         assert!(!markdown.contains("## 非通过项详情"));
     }
 
@@ -2230,6 +2280,8 @@ mod tests {
             average_response_time_seconds: Some(1.2),
             failures: Vec::new(),
         }];
+        artifact.context_conclusion =
+            crate::context_capacity::ContextConclusion::satisfied_with(126_431, true, None);
 
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
@@ -2237,23 +2289,56 @@ mod tests {
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
         assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms，不高于 30000 ms"));
         assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
-        assert!(overall.contains("128K 请求成功"));
+        assert!(overall.contains("经检测，上下文不低于126K，满足智能体部署所需要的128K的要求。"));
+    }
+
+    #[test]
+    fn markdown_overall_conclusion_reports_measured_context_brackets() {
+        let mut artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+        artifact.context_conclusion = crate::context_capacity::ContextConclusion::satisfied_with(
+            248_000,
+            false,
+            Some(496_000),
+        );
+
+        let markdown = render_markdown(&artifact);
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
+
+        assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
+        assert!(overall.contains("经检测，上下文在248K-496K左右，满足智能体部署所需要的128K的要求（服务端未返回 usage，按构造值估计）。"));
+    }
+
+    #[test]
+    fn markdown_overall_conclusion_reports_indeterminate_context() {
+        let mut artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
+        artifact.context_conclusion =
+            crate::context_capacity::ContextConclusion::indeterminate("124K的请求连续超时");
+
+        let markdown = render_markdown(&artifact);
+        let overall = markdown.split("## 能力分类检测结论").next().unwrap();
+
+        assert!(overall.contains("| 模型最低上下文要求（128K） | 无法判断 |"));
+        assert!(overall.contains("无法判断：124K的请求连续超时。本轮不计通过或不通过。"));
     }
 
     #[test]
     fn markdown_overall_conclusion_reports_unsatisfied_minimum_requirements() {
-        let mut tests = crate::catalog::CATALOG
-            .iter()
-            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
-            .collect::<Vec<_>>();
-        let context = tests
-            .iter_mut()
-            .find(|result| result.test_id == "018")
-            .unwrap();
-        context.candidate_status = Some(CandidateStatus::Fail);
-        context.validated_status = Some(ValidatedStatus::Fail);
-        context.failure_cause = Some("128K 请求未成功返回。".into());
-        let mut artifact = markdown_fixture(tests);
+        let mut artifact = markdown_fixture(
+            crate::catalog::CATALOG
+                .iter()
+                .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+                .collect(),
+        );
         artifact.concurrency_waves = vec![ConcurrencyWave {
             concurrency: 4,
             total_requests: 4,
@@ -2262,6 +2347,8 @@ mod tests {
             average_response_time_seconds: Some(30.1),
             failures: Vec::new(),
         }];
+        artifact.context_conclusion =
+            crate::context_capacity::ContextConclusion::not_satisfied(Some(62_100), 93_000);
 
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
@@ -2269,7 +2356,9 @@ mod tests {
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 不通过 |"));
         assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms"));
         assert!(overall.contains("| 模型最低上下文要求（128K） | 不通过 |"));
-        assert!(overall.contains("128K 请求未成功返回。"));
+        assert!(
+            overall.contains("经检测，上下文在62.1K-93K左右，不满足智能体部署所需要的128K的要求。")
+        );
     }
 
     #[test]
@@ -2336,7 +2425,7 @@ mod tests {
             "接口可正常访问，鉴权和模型名均被接受；同时支持同步、流式响应、完整流结束、Token usage 和结构化错误返回。"
         ));
         assert!(markdown.contains(
-            "本轮 8K、16K、32K、64K、128K 字符级请求均返回非空响应，多轮修正状态也能保持；本轮最高验证到 128K 字符近似档位，不等同于真实 Token 上限。"
+            "上下文容量按实测 Token 判定（先校准字符/Token 密度，再按实测密度构造目标 Token 数的探针，以服务端统计为准）；多轮修正状态也能保持。"
         ));
         assert!(markdown.contains(
             "支持单工具、工具选择、参数校验、嵌套参数、并行调用、串行调用、工具结果关联、失败重试和大工具目录。"
@@ -2544,7 +2633,7 @@ mod tests {
         let gateway_compatibility = derive_gateway_compatibility("openai_chat", &tests);
         SelfAnalysisArtifact {
             schema_version: SELF_ANALYSIS_SCHEMA_VERSION,
-            collector_version: "0.12.0".into(),
+            collector_version: "0.13.0".into(),
             evidence_schema_version: "llm-capability-doctor.evidence.v4".into(),
             generated_at: "2026-08-24T00:00:00+08:00".into(),
             source: EvidenceSource {
@@ -2570,6 +2659,11 @@ mod tests {
             },
             gateway_compatibility,
             concurrency_waves: Vec::new(),
+            context_conclusion: crate::context_capacity::ContextConclusion::satisfied_with(
+                126_431,
+                true,
+                Some(496_000),
+            ),
         }
     }
 

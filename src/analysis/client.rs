@@ -95,6 +95,7 @@ impl AnalysisClient for ModelAnalysisClient {
                     body: serde_json::to_vec(&spec.body)?,
                     stream: false,
                     api_key: self.target.api_key.clone(),
+                    timeout_override: None,
                 },
                 cancellation,
             )

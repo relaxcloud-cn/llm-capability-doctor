@@ -94,11 +94,7 @@ pub fn read(path: &Path, redactor: &Redactor) -> Result<ParsedEvidence, Evidence
     require(&run, "collector_runtime", "rust")?;
     require(&run, "section_encoding", "base64")?;
     require(&run, "log_schema", "llm-capability-doctor.evidence.v4")?;
-    require(
-        &run,
-        "compatibility_profile",
-        "llm-gateway-data-format",
-    )?;
+    require(&run, "compatibility_profile", "llm-gateway-data-format")?;
     if run.contains_key("collection_profile") {
         return Err(EvidenceError::InvalidContract(
             "collection_profile is forbidden for evidence.v4".into(),
@@ -120,9 +116,10 @@ pub fn read(path: &Path, redactor: &Redactor) -> Result<ParsedEvidence, Evidence
     let expected_ids: HashSet<_> = CATALOG.iter().map(|test| test.id).collect();
     let actual_ids: HashSet<_> = tests.keys().map(String::as_str).collect();
     if actual_ids != expected_ids {
-        return Err(EvidenceError::InvalidContract(
-            "evidence.v4 must contain the exact 46-check catalog".into(),
-        ));
+        return Err(EvidenceError::InvalidContract(format!(
+            "evidence.v4 must contain the exact {}-check catalog",
+            CATALOG.len()
+        )));
     }
 
     let digest = Sha256::digest(&raw);
@@ -327,13 +324,17 @@ fn blocks(text: &str, kind: BlockKind) -> Result<Vec<(String, String)>, Evidence
 fn section<'a>(block: &'a str, name: &str) -> Result<&'a str, EvidenceError> {
     let start_marker = format!("----- {name} BEGIN -----\n");
     let end_marker = format!("\n----- {name} END -----");
+    let bare_end_marker = format!("----- {name} END -----");
     let start = block
         .find(&start_marker)
         .map(|index| index + start_marker.len())
         .ok_or_else(|| EvidenceError::Malformed(format!("missing section {name}")))?;
-    let end = block[start..]
+    let remainder = &block[start..];
+    // 空内容区块（例如请求在收到响应头之前失败）紧跟 END 标记，没有前导换行。
+    let end = remainder
         .find(&end_marker)
-        .map(|index| start + index)
+        .map(|offset| start + offset)
+        .or_else(|| remainder.starts_with(&bare_end_marker).then_some(start))
         .ok_or_else(|| EvidenceError::Malformed(format!("unterminated section {name}")))?;
     Ok(&block[start..end])
 }
@@ -436,7 +437,7 @@ mod tests {
 
         let parsed = read(&path, &redactor).unwrap();
 
-        assert_eq!(parsed.tests.len(), 46);
+        assert_eq!(parsed.tests.len(), CATALOG.len());
         assert_eq!(parsed.requests.len(), 1);
         assert_eq!(parsed.tests["001"].request_refs, vec!["test-shared"]);
         assert_eq!(
@@ -444,6 +445,23 @@ mod tests {
             "curl 'https://example.test/v1/chat/completions'"
         );
         assert_eq!(parsed.source.sha256.len(), 64);
+    }
+
+    #[test]
+    fn empty_sections_from_pre_response_failures_still_parse() {
+        // 请求在收到响应头之前失败时，RESPONSE HEADERS 区块为空（BEGIN 后直接 END）。
+        let log = complete_test_log().replace(
+            "----- RESPONSE HEADERS BEGIN -----\ncontent-type: application/json\n----- RESPONSE HEADERS END -----",
+            "----- RESPONSE HEADERS BEGIN -----\n----- RESPONSE HEADERS END -----",
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("doctor.log");
+        std::fs::write(&path, log).unwrap();
+        let redactor = Redactor::new("secret-token", &Url::parse("https://example.test").unwrap());
+
+        let parsed = read(&path, &redactor).unwrap();
+
+        assert_eq!(parsed.requests["test-shared"].response_headers, "");
     }
 
     #[test]
@@ -507,7 +525,7 @@ mod tests {
         let mut log = String::from(
             "========== MODEL DOCTOR RUN ==========\n\
              run_id: run-1\n\
-             script_version: 0.12.0\n\
+             script_version: 0.13.0\n\
              collector_runtime: rust\n\
              section_encoding: base64\n\
              log_schema: llm-capability-doctor.evidence.v4\n\
@@ -518,7 +536,7 @@ mod tests {
              api_key: [MASKED]\n\
              curl_version: not_used (native rust reqwest)\n\
              tls_verification: enabled\n\
-             selected_test_count: 46\n\
+             selected_test_count: 42\n\
              \n\
              ========== REQUEST test-shared BEGIN ==========\n\
              request_id: test-shared\n\
@@ -581,7 +599,7 @@ mod tests {
              completed_at: 2026-08-21T10:01:00+0800\n\
              duration_seconds: 60\n\
              request_count: 1\n\
-             test_manifest_count: 46\n\
+             test_manifest_count: 42\n\
              ========== END ==========\n",
         );
         log

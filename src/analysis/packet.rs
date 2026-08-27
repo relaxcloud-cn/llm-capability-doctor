@@ -37,6 +37,8 @@ pub struct PacketRequest {
     pub http_status: Option<u16>,
     pub time_total_seconds: Option<f64>,
     pub time_starttransfer_seconds: Option<f64>,
+    pub context_target_tokens: Option<u64>,
+    pub context_measured_tokens: Option<u64>,
     pub request_body_excerpt: String,
     pub response_body_excerpt: String,
     pub stderr_excerpt: String,
@@ -290,6 +292,19 @@ pub fn bounded_excerpt(value: &str, max_bytes: usize) -> String {
 }
 
 fn packet_request(request: &ParsedRequest, excerpt_limit: usize) -> PacketRequest {
+    let context_target_tokens = crate::context_capacity::parse_probe_target(&request.request_id);
+    let context_measured_tokens = context_target_tokens.and_then(|_| {
+        crate::context_capacity::extract_prompt_tokens(
+            crate::context_capacity::protocol_from_wire_name(
+                request
+                    .metadata
+                    .get("protocol")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            ),
+            request.response_body.as_bytes(),
+        )
+    });
     PacketRequest {
         request_id: request.request_id.clone(),
         protocol: metadata(request, "protocol", "unknown"),
@@ -306,6 +321,8 @@ fn packet_request(request: &ParsedRequest, excerpt_limit: usize) -> PacketReques
         time_total_seconds: metric(request, "time_total").and_then(|value| value.parse().ok()),
         time_starttransfer_seconds: metric(request, "time_starttransfer")
             .and_then(|value| value.parse().ok()),
+        context_target_tokens,
+        context_measured_tokens,
         request_body_excerpt: bounded_excerpt(&request.request_body, excerpt_limit),
         response_body_excerpt: bounded_excerpt(&request.response_body, excerpt_limit),
         stderr_excerpt: bounded_excerpt(&request.stderr, excerpt_limit),
@@ -406,6 +423,22 @@ mod tests {
         let packet = build_packet(&evidence, "019").await.unwrap();
 
         assert_eq!(packet.requests[0].response_body_excerpt, response_body);
+    }
+
+    #[tokio::test]
+    async fn context_probe_packets_expose_target_and_measured_tokens() {
+        let mut request = parsed_request("test-018-probe-124000-a1", "expected");
+        request
+            .metadata
+            .insert("protocol".into(), "openai_chat".into());
+        request.response_body =
+            r#"{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":124012}}"#.into();
+        let evidence = single_test_evidence("018", request);
+
+        let packet = build_packet(&evidence, "018").await.unwrap();
+
+        assert_eq!(packet.requests[0].context_target_tokens, Some(124_000));
+        assert_eq!(packet.requests[0].context_measured_tokens, Some(124_012));
     }
 
     #[test]
@@ -671,6 +704,8 @@ mod tests {
                 http_status: Some(200),
                 time_total_seconds: Some(1.0),
                 time_starttransfer_seconds: Some(0.5),
+                context_target_tokens: None,
+                context_measured_tokens: None,
                 request_body_excerpt: "prompt".into(),
                 response_body_excerpt: "x".repeat(response_size),
                 stderr_excerpt: String::new(),

@@ -242,6 +242,7 @@ async fn execute_spec(
                 body: Body::Json(spec.body).to_bytes(),
                 stream: spec.stream,
                 api_key: settings.api_key.clone(),
+                timeout_override: None,
             },
             settings.cancellation.child_token(),
         )

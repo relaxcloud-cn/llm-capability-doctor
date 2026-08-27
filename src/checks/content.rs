@@ -7,7 +7,6 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
         "009" | "010" | "011" | "012" | "013" => {
             vec![basic(id, structured_prompt(id), false, context)]
         }
-        "014" | "015" | "016" | "017" | "018" => vec![context_capacity(id, context)],
         "019" | "020" | "022" | "024" | "038" => {
             vec![basic(id, text_prompt(id), false, context)]
         }
@@ -102,57 +101,9 @@ fn text_prompt(id: &str) -> String {
     .to_owned()
 }
 
-fn context_capacity(id: &str, context: &PlanContext<'_>) -> super::PlannedRequest {
-    let target = match id {
-        "014" => 32_000,
-        "015" => 64_000,
-        "016" => 128_000,
-        "017" => 256_000,
-        "018" => 512_000,
-        _ => unreachable!("context capacity ID is validated by caller"),
-    };
-    let segment = generate_filler(target / 3);
-    let prompt = format!(
-        "MODEL_DOCTOR_CONTEXT_{id}. This probe measures context acceptance only. \
-         Response accuracy and exact wording are not evaluated. {segment}{segment}{segment} \
-         The full request is complete. Return any short non-empty response."
-    );
-    basic(id, prompt, false, context)
-}
-
-fn generate_filler(target: usize) -> String {
-    const BLOCK: &str = "FILLER_BLOCK_0123456789 ";
-    let mut filler = String::with_capacity(target + BLOCK.len());
-    while filler.len() < target {
-        filler.push_str(BLOCK);
-    }
-    filler
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::protocol::{AuthMode, Protocol};
-
     use super::*;
-
-    #[test]
-    fn context_capacity_probe_requests_only_a_non_empty_response() {
-        let context = PlanContext {
-            protocol: Protocol::OpenAiChat,
-            auth_mode: AuthMode::None,
-            model: "fixture-model",
-        };
-        let request = context_capacity("014", &context);
-        let prompt = request.body.json()["messages"][0]["content"]
-            .as_str()
-            .expect("OpenAI Chat prompt");
-
-        assert!(prompt.contains("This probe measures context acceptance only."));
-        assert!(prompt.contains("Return any short non-empty response."));
-        assert!(!prompt.contains("compact JSON shaped exactly"));
-        assert!(!prompt.contains("Link prefix"));
-        assert!(!prompt.contains("Primary target"));
-    }
 
     #[test]
     fn check_020_requires_literal_ascii_vertical_bars() {

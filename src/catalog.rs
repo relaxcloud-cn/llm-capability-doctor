@@ -15,7 +15,7 @@ macro_rules! test_case {
     };
 }
 
-pub static CATALOG: [TestCase; 46] = [
+pub static CATALOG: [TestCase; 42] = [
     test_case!("001", "接口与协议", "URL 可达性"),
     test_case!("002", "接口与协议", "协议识别"),
     test_case!("003", "接口与协议", "鉴权与模型接受"),
@@ -29,11 +29,7 @@ pub static CATALOG: [TestCase; 46] = [
     test_case!("011", "结构化结果", "嵌套数组与空值"),
     test_case!("012", "结构化结果", "Result 核心字段"),
     test_case!("013", "结构化结果", "调查阶段与证据引用"),
-    test_case!("014", "上下文", "8K 级上下文（字符近似）"),
-    test_case!("015", "上下文", "16K 级上下文（字符近似）"),
-    test_case!("016", "上下文", "32K 级上下文（字符近似）"),
-    test_case!("017", "上下文", "64K 级上下文（字符近似）"),
-    test_case!("018", "上下文", "128K 级上下文（字符近似）"),
+    test_case!("018", "上下文", "上下文容量实测"),
     test_case!("019", "指令与文本", "精确输出"),
     test_case!("020", "指令与文本", "组合格式约束"),
     test_case!("022", "指令与文本", "多字段抽取"),
@@ -88,15 +84,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_46_unique_checks_without_034() {
-        assert_eq!(CATALOG.len(), 46);
-        assert!(!CATALOG.iter().any(|test| test.id == "034"));
+    fn catalog_has_42_unique_checks_without_the_char_ladder() {
+        assert_eq!(CATALOG.len(), 42);
+        for retired in ["014", "015", "016", "017", "034"] {
+            assert!(!CATALOG.iter().any(|test| test.id == retired));
+        }
         assert_eq!(
             CATALOG
                 .iter()
-                .find(|test| test.id == "046")
+                .find(|test| test.id == "018")
                 .map(|test| test.name),
-            Some("官方工具协议结构合规")
+            Some("上下文容量实测")
         );
         assert_eq!(
             CATALOG
@@ -104,7 +102,7 @@ mod tests {
                 .map(|test| test.id)
                 .collect::<HashSet<_>>()
                 .len(),
-            46
+            42
         );
     }
 }

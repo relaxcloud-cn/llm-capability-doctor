@@ -3,6 +3,7 @@ pub mod audit;
 pub mod catalog;
 pub mod checks;
 pub mod cli;
+pub mod context_capacity;
 pub mod evidence;
 pub mod http;
 pub mod opencodex;
@@ -41,19 +42,15 @@ mod terminal_progress_tests {
     #[test]
     fn terminal_labels_are_customer_readable_and_plain_text() {
         assert_eq!(display_category("上下文"), "上下文能力");
-        assert_eq!(display_title("014", None), "测试模型是否支持 8K 上下文长度");
-        assert_eq!(
-            display_title("018", None),
-            "测试模型是否支持 128K 上下文长度"
-        );
+        assert_eq!(display_title("018", None), "实测模型可用上下文 Token 上限");
         assert_eq!(
             display_title("057", Some(32)),
             "测试模型在 32 并发下能否正常响应"
         );
-        let line = collection_line(14, 46, "上下文能力", "测试模型是否支持 8K 上下文长度", None);
+        let line = collection_line(14, 42, "上下文能力", "实测模型可用上下文 Token 上限", None);
         assert_eq!(
             line,
-            "[采集 14/46] 上下文能力 | 测试模型是否支持 8K 上下文长度"
+            "[采集 14/42] 上下文能力 | 实测模型可用上下文 Token 上限"
         );
         assert!(!line.contains('\u{1b}'));
         for test in crate::catalog::CATALOG {

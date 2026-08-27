@@ -484,7 +484,7 @@ mod tests {
     use crate::redaction::Redactor;
 
     #[test]
-    fn run_header_declares_012_and_evidence_v4() {
+    fn run_header_declares_the_script_version_and_evidence_v4() {
         let directory = tempdir().expect("tempdir");
         let path = directory.path().join("audit.log");
         let url: url::Url = "https://example.com/v1/chat/completions"
@@ -504,7 +504,7 @@ mod tests {
         drop(audit);
 
         let output = fs::read_to_string(path).expect("read audit");
-        assert!(output.contains("script_version: 0.12.0\n"));
+        assert!(output.contains(&format!("script_version: {}\n", env!("CARGO_PKG_VERSION"))));
         assert!(output.contains("log_schema: llm-capability-doctor.evidence.v4\n"));
         assert!(output.contains("compatibility_profile: llm-gateway-data-format\n"));
         assert!(!output.contains("collection_profile:"));

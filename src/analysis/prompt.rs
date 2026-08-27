@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::packet::EvidencePacket;
 
-pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v4";
+pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v5";
 
 pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Error> {
     let payload = json!({

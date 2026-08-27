@@ -33,7 +33,7 @@ fn run_outcome_exposes_detected_connection_metadata() {
 fn collection_progress_includes_category_purpose_and_concurrency_wave() {
     let context = crate::catalog::CATALOG
         .iter()
-        .find(|test| test.id == "014")
+        .find(|test| test.id == "018")
         .unwrap();
     let concurrency = crate::catalog::CATALOG
         .iter()
@@ -41,12 +41,12 @@ fn collection_progress_includes_category_purpose_and_concurrency_wave() {
         .unwrap();
 
     assert_eq!(
-        collection_progress_line(14, 46, context, None),
-        "[采集 14/46] 上下文能力 | 测试模型是否支持 8K 上下文长度"
+        collection_progress_line(14, 42, context, None),
+        "[采集 14/42] 上下文能力 | 实测模型可用上下文 Token 上限"
     );
     assert_eq!(
-        collection_progress_line(44, 46, concurrency, Some((4, 4, 32))),
-        "[采集 44/46 | 并发 4/4] 性能与稳定性 | 测试模型在 32 并发下能否正常响应"
+        collection_progress_line(40, 42, concurrency, Some((4, 4, 32))),
+        "[采集 40/42 | 并发 4/4] 性能与稳定性 | 测试模型在 32 并发下能否正常响应"
     );
 }
 
@@ -1194,4 +1194,162 @@ fn openai_chat_final_stream(text: &str, include_done: bool) -> Vec<u8> {
         body.extend_from_slice(b"data: [DONE]\n\n");
     }
     body
+}
+
+fn openai_completion_with_usage(prompt_tokens: u64) -> Vec<u8> {
+    serde_json::json!({
+        "id": "chatcmpl-context",
+        "object": "chat.completion",
+        "model": "test-model",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": "ok"},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": prompt_tokens, "completion_tokens": 2, "total_tokens": prompt_tokens + 2}
+    })
+    .to_string()
+    .into_bytes()
+}
+
+fn context_too_long_response() -> Vec<u8> {
+    serde_json::json!({
+        "error": {
+            "message": "This model's maximum context length is 393216 tokens. However, you requested more tokens.",
+            "type": "invalid_request_error",
+            "code": "context_length_exceeded"
+        }
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[tokio::test]
+async fn context_capacity_probes_calibrate_density_then_double_upward() {
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(10_000),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(124_000),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(248_000),
+        ))],
+        vec![ServerAction::Write(http_response_with_declared_length(
+            "400 Bad Request",
+            context_too_long_response().len(),
+            &context_too_long_response(),
+        ))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("tempdir");
+    let mut runner = test_runner(
+        &server,
+        &temp,
+        Protocol::OpenAiChat,
+        Duration::from_secs(30),
+    );
+
+    runner
+        .execute_check(catalog_test("018"))
+        .await
+        .expect("context capacity check");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 4, "calibration + 3 capacity probes");
+
+    let calibration = String::from_utf8_lossy(&requests[0].body);
+    assert!(calibration.contains("MODEL_DOCTOR_CONTEXT_CALIBRATION"));
+
+    // 主探针按校准密度构造（40184 字符 / 10000 token ≈ 4.02），而不是旧的 4 字符假设。
+    let main_probe = String::from_utf8_lossy(&requests[1].body);
+    assert!(main_probe.contains("MODEL_DOCTOR_CONTEXT_CAPACITY"));
+    assert!(main_probe.contains("\"max_tokens\":16"));
+    assert!(
+        main_probe.len() > 480_000 && main_probe.len() < 520_000,
+        "main probe size {} did not follow measured density",
+        main_probe.len()
+    );
+
+    let upward = String::from_utf8_lossy(&requests[2].body);
+    assert!(
+        upward.len() > 950_000,
+        "upward probe size {} did not double",
+        upward.len()
+    );
+
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
+    for id in [
+        "test-018-calibration",
+        "test-018-probe-124000-a1",
+        "test-018-probe-248000-a1",
+        "test-018-probe-496000-a1",
+    ] {
+        assert!(
+            log.contains(&format!("========== REQUEST {id} BEGIN ==========")),
+            "missing {id}"
+        );
+    }
+    assert!(log.contains(
+        "request_refs: test-018-calibration,test-018-probe-124000-a1,test-018-probe-248000-a1,test-018-probe-496000-a1"
+    ));
+}
+
+#[tokio::test]
+async fn context_capacity_probes_bisect_downward_after_rejection() {
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(10_000),
+        ))],
+        vec![ServerAction::Write(http_response_with_declared_length(
+            "400 Bad Request",
+            context_too_long_response().len(),
+            &context_too_long_response(),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(67_000),
+        ))],
+        vec![ServerAction::Write(http_response_with_declared_length(
+            "400 Bad Request",
+            context_too_long_response().len(),
+            &context_too_long_response(),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(81_250),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(88_375),
+        ))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("tempdir");
+    let mut runner = test_runner(
+        &server,
+        &temp,
+        Protocol::OpenAiChat,
+        Duration::from_secs(30),
+    );
+
+    runner
+        .execute_check(catalog_test("018"))
+        .await
+        .expect("context capacity check");
+
+    let requests = server.recorded_requests().await;
+    assert_eq!(requests.len(), 6, "calibration + five bisection probes");
+
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
+    for id in [
+        "test-018-probe-124000-a1",
+        "test-018-probe-67000-a1",
+        "test-018-probe-95500-a1",
+        "test-018-probe-81250-a1",
+        "test-018-probe-88375-a1",
+    ] {
+        assert!(
+            log.contains(&format!("========== REQUEST {id} BEGIN ==========")),
+            "missing {id}"
+        );
+    }
 }

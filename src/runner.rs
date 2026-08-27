@@ -14,6 +14,11 @@ use crate::checks::{
     Body, CheckError, ManifestRefs, PlanContext, PlannedRequest, RequestGroup, plan,
 };
 use crate::cli::Config;
+use crate::context_capacity::{
+    self, CALIBRATION_REQUEST_ID, ContextConclusion, ProbeOutcome, calibration_prompt,
+    capacity_prompt, classify_probe, conclude, next_target, probe_request, probe_request_id,
+    probe_timeout,
+};
 use crate::evidence::{StreamTermination, ToolContractStatus, ToolLoopOutcome, TransportOutcome};
 use crate::http::{HttpExecutor, RequestInput};
 use crate::protocol::stream::{StreamParseResult, parse_stream};
@@ -351,7 +356,8 @@ impl Runner {
         collection_progress: Option<(usize, usize)>,
     ) -> Result<(), RunnerError> {
         let is_tool_loop = matches!(test.id, "046" | "047" | "048" | "049");
-        if is_tool_loop && self.detected_protocol == Protocol::Unknown {
+        let is_context_capacity = test.id == "018";
+        if (is_tool_loop || is_context_capacity) && self.detected_protocol == Protocol::Unknown {
             self.audit.append_manifest(&TestManifest {
                 id: test.id.to_owned(),
                 name: test.name.to_owned(),
@@ -367,44 +373,60 @@ impl Runner {
             auth_mode: self.detected_auth_mode,
             model: &self.config.model,
         };
-        let check_plan = plan(test.id, &context)?;
-        let manifest_refs = check_plan.manifest_refs;
-        let evidence = if is_tool_loop {
-            let initial = check_plan
-                .groups
-                .into_iter()
-                .flat_map(|group| match group {
-                    RequestGroup::Sequential(requests) | RequestGroup::Concurrent(requests) => {
-                        requests
-                    }
-                })
-                .next()
-                .expect("tool-loop plan has one initial request");
-            self.execute_tool_loop(test, initial).await?
-        } else if manifest_refs == ManifestRefs::SharedRepeatSamples && !self.repeat_refs.is_empty()
-        {
-            Vec::new()
+        let check_plan = if is_context_capacity {
+            None
         } else {
-            self.execute_groups(check_plan.groups, test, collection_progress)
-                .await?
+            Some(plan(test.id, &context)?)
+        };
+        let manifest_refs = check_plan
+            .as_ref()
+            .map_or(ManifestRefs::Executed, |plan| plan.manifest_refs);
+        let evidence = if is_context_capacity {
+            self.execute_context_capacity_check().await?
+        } else {
+            let check_plan = check_plan.expect("non-context checks are always planned");
+            if is_tool_loop {
+                let initial = check_plan
+                    .groups
+                    .into_iter()
+                    .flat_map(|group| match group {
+                        RequestGroup::Sequential(requests) | RequestGroup::Concurrent(requests) => {
+                            requests
+                        }
+                    })
+                    .next()
+                    .expect("tool-loop plan has one initial request");
+                self.execute_tool_loop(test, initial).await?
+            } else if manifest_refs == ManifestRefs::SharedRepeatSamples
+                && !self.repeat_refs.is_empty()
+            {
+                Vec::new()
+            } else {
+                self.execute_groups(check_plan.groups, test, collection_progress)
+                    .await?
+            }
         };
 
         let executed_refs: Vec<String> = evidence
             .iter()
             .map(|request| request.request_id.clone())
             .collect();
-        let request_refs = match manifest_refs {
-            ManifestRefs::Executed => executed_refs,
-            ManifestRefs::AllProtocolProbes => self.protocol_probe_refs.clone(),
-            ManifestRefs::SelectedProtocolProbe => self
-                .selected_probe_ref
-                .clone()
-                .map_or_else(|| self.protocol_probe_refs.clone(), |id| vec![id]),
-            ManifestRefs::SharedRepeatSamples => {
-                if self.repeat_refs.is_empty() {
-                    self.repeat_refs = executed_refs;
+        let request_refs = if is_context_capacity {
+            executed_refs
+        } else {
+            match manifest_refs {
+                ManifestRefs::Executed => executed_refs,
+                ManifestRefs::AllProtocolProbes => self.protocol_probe_refs.clone(),
+                ManifestRefs::SelectedProtocolProbe => self
+                    .selected_probe_ref
+                    .clone()
+                    .map_or_else(|| self.protocol_probe_refs.clone(), |id| vec![id]),
+                ManifestRefs::SharedRepeatSamples => {
+                    if self.repeat_refs.is_empty() {
+                        self.repeat_refs = executed_refs;
+                    }
+                    self.repeat_refs.clone()
                 }
-                self.repeat_refs.clone()
             }
         };
         self.audit.append_manifest(&TestManifest {
@@ -415,6 +437,141 @@ impl Runner {
             request_refs,
         })?;
         Ok(())
+    }
+
+    /// 自适应上下文容量检测（检测项 018）：
+    /// 1. 校准请求读取服务端 usage，得到真实字符/token 密度；
+    /// 2. 按实测密度构造 124K token 主探针；
+    /// 3. 依据结果向上翻倍或对半夹逼，直到得出满足 128K 与否的实测结论。
+    async fn execute_context_capacity_check(
+        &mut self,
+    ) -> Result<Vec<RequestEvidence>, RunnerError> {
+        let mut evidence = Vec::new();
+
+        let calibration_prompt = calibration_prompt();
+        let calibration = PlannedRequest {
+            id: CALIBRATION_REQUEST_ID.to_owned(),
+            protocol: self.detected_protocol,
+            auth_mode: self.detected_auth_mode,
+            body: Body::Json(
+                probe_request(
+                    self.detected_protocol,
+                    &self.config.model,
+                    &calibration_prompt,
+                )
+                .body,
+            ),
+            stream: false,
+        };
+        let calibration_evidence = self.execute_one(calibration).await?;
+        let calibration_outcome = classify_probe(
+            calibration_evidence.protocol,
+            calibration_evidence.metrics.http_status,
+            &calibration_evidence.transport_outcome.to_string(),
+            &calibration_evidence.response_body,
+        );
+        let ProbeOutcome::Accepted {
+            measured_tokens: calibration_tokens,
+        } = calibration_outcome
+        else {
+            evidence.push(calibration_evidence);
+            return Ok(evidence);
+        };
+        let density = calibration_tokens
+            .map(|tokens| {
+                (calibration_prompt.chars().count() as f64 / tokens as f64).clamp(0.5, 16.0)
+            })
+            .unwrap_or(context_capacity::FALLBACK_CHARS_PER_TOKEN);
+        evidence.push(calibration_evidence);
+
+        let mut low = calibration_tokens;
+        let mut high: Option<u64> = None;
+        let mut outcomes: Vec<(u64, ProbeOutcome)> = Vec::new();
+        for probe_index in 0..context_capacity::MAX_CAPACITY_PROBES {
+            self.ensure_not_cancelled()?;
+            let Some(target) = next_target(low, high, probe_index) else {
+                break;
+            };
+            let outcome = self
+                .send_capacity_probe(target, density, &mut evidence)
+                .await?;
+            match outcome {
+                ProbeOutcome::Accepted { measured_tokens } => {
+                    let effective = measured_tokens.unwrap_or(target);
+                    low = Some(low.map_or(effective, |current| current.max(effective)));
+                }
+                ProbeOutcome::RejectedTooLong => {
+                    high = Some(high.map_or(target, |current| current.min(target)));
+                }
+                // 超时或其他错误不能归因为容量，停止搜索，保留已知区间。
+                ProbeOutcome::TimedOut | ProbeOutcome::RejectedOther => {
+                    outcomes.push((target, outcome));
+                    break;
+                }
+            }
+            outcomes.push((target, outcome));
+        }
+
+        let conclusion: ContextConclusion = conclude(&outcomes);
+        println!(
+            "  上下文实测：{}",
+            context_capacity::conclusion_sentence(&conclusion)
+        );
+        Ok(evidence)
+    }
+
+    /// 发送一个容量探针；超时自动重试一次（请求 ID 带 -a2 序号）。
+    async fn send_capacity_probe(
+        &mut self,
+        target_tokens: u64,
+        chars_per_token: f64,
+        evidence: &mut Vec<RequestEvidence>,
+    ) -> Result<ProbeOutcome, RunnerError> {
+        let prompt = capacity_prompt(target_tokens, chars_per_token);
+        let mut attempt = 1;
+        loop {
+            self.ensure_not_cancelled()?;
+            let request = PlannedRequest {
+                id: probe_request_id(target_tokens, attempt),
+                protocol: self.detected_protocol,
+                auth_mode: self.detected_auth_mode,
+                body: Body::Json(
+                    probe_request(self.detected_protocol, &self.config.model, &prompt).body,
+                ),
+                stream: false,
+            };
+            let timeout = probe_timeout(self.config.timeout, target_tokens);
+            let input = RequestInput {
+                request_id: request.id,
+                url: normalize_request_url(request.protocol, &self.config.url, request.stream),
+                protocol: request.protocol,
+                auth_mode: request.auth_mode,
+                body: request.body.to_bytes(),
+                stream: request.stream,
+                api_key: self.config.api_key.expose().to_owned(),
+                timeout_override: Some(timeout),
+            };
+            let mut probe = self
+                .http
+                .execute(input, self.cancellation.child_token())
+                .await;
+            enrich_stream_evidence(&mut probe).await;
+            self.audit.append_request(&probe)?;
+            if probe.transport_outcome == TransportOutcome::ClientCancelled {
+                return Err(RunnerError::Interrupted);
+            }
+            let protocol = probe.protocol;
+            let http_status = probe.metrics.http_status;
+            let transport_outcome = probe.transport_outcome.to_string();
+            let response_body = std::mem::take(&mut probe.response_body);
+            evidence.push(probe);
+            let outcome = classify_probe(protocol, http_status, &transport_outcome, &response_body);
+            if outcome == ProbeOutcome::TimedOut && attempt == 1 {
+                attempt += 1;
+                continue;
+            }
+            return Ok(outcome);
+        }
     }
 
     async fn execute_groups(
@@ -526,6 +683,7 @@ impl Runner {
             body: request.body.to_bytes(),
             stream: request.stream,
             api_key: self.config.api_key.expose().to_owned(),
+            timeout_override: None,
         }
     }
 

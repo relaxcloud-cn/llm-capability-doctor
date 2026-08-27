@@ -21,6 +21,8 @@ pub struct RequestInput {
     pub body: Vec<u8>,
     pub stream: bool,
     pub api_key: String,
+    /// 单请求超时覆盖（上下文容量探针等长请求使用），None 时用执行器默认值。
+    pub timeout_override: Option<Duration>,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,7 @@ impl HttpExecutor {
     ) -> RequestEvidence {
         let started_at = Local::now();
         let started = Instant::now();
+        let effective_timeout = input.timeout_override.unwrap_or(self.timeout);
         let client = if endpoint_is_loopback(&input.url) {
             &self.direct_client
         } else {
@@ -107,6 +110,7 @@ impl HttpExecutor {
             .post(input.url.clone())
             .header(ACCEPT, "application/json, text/event-stream")
             .header(CONTENT_TYPE, "application/json")
+            .timeout(effective_timeout)
             .body(input.body.clone());
         request = match input.auth_mode {
             AuthMode::Bearer => {
@@ -273,7 +277,7 @@ impl HttpExecutor {
             auth_mode: input.auth_mode,
             stream: input.stream,
             url: input.url,
-            timeout: self.timeout,
+            timeout: effective_timeout,
             insecure: self.insecure,
             body: String::from_utf8_lossy(&input.body).into_owned(),
             metrics: ResponseMetrics {
@@ -324,6 +328,7 @@ impl HttpExecutor {
         facts: TransportFacts,
     ) -> RequestEvidence {
         let classification = classify_transport(facts);
+        let timeout = input.timeout_override.unwrap_or(self.timeout);
         RequestEvidence {
             request_id: input.request_id,
             started_at,
@@ -332,7 +337,7 @@ impl HttpExecutor {
             auth_mode: input.auth_mode,
             stream: input.stream,
             url: input.url,
-            timeout: self.timeout,
+            timeout,
             insecure: self.insecure,
             body: String::from_utf8_lossy(&input.body).into_owned(),
             metrics: ResponseMetrics {
@@ -749,6 +754,7 @@ mod tests {
             body: br#"{"probe":true}"#.to_vec(),
             stream: true,
             api_key: String::new(),
+            timeout_override: None,
         }
     }
 
@@ -845,6 +851,7 @@ mod tests {
             body: b"{}".to_vec(),
             stream,
             api_key: String::new(),
+            timeout_override: None,
         }
     }
 

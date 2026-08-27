@@ -16,7 +16,7 @@ macro_rules! rule {
     };
 }
 
-pub const RULES: [AnalysisRule; 46] = [
+pub const RULES: [AnalysisRule; 42] = [
     rule!("001", "至少一个探测请求获得可观察的 HTTP 响应。"),
     rule!(
         "002",
@@ -45,11 +45,10 @@ pub const RULES: [AnalysisRule; 46] = [
         "单个 JSON 对象包含要求的 result.verdict、impact 和 nextMove。"
     ),
     rule!("013", "调查阶段正确引用存在的 EVID-001 证据对象。"),
-    rule!("014", "8K 字符近似档请求成功且模型可见回复非空。"),
-    rule!("015", "16K 字符近似档请求成功且模型可见回复非空。"),
-    rule!("016", "32K 字符近似档请求成功且模型可见回复非空。"),
-    rule!("017", "64K 字符近似档请求成功且模型可见回复非空。"),
-    rule!("018", "128K 字符近似档请求成功且模型可见回复非空。"),
+    rule!(
+        "018",
+        "上下文按实测 Token 判定：校准请求成功返回 usage；最终被接受的最大容量探针的服务端 prompt tokens 不低于 124000（128K 要求留余量）为 PASS；主探针因超长被拒且搜索出的实测上限不足 124000 为 FAIL；超时、疑似截断或与上下文长度无关的错误写入 limitations，不算 FAIL。"
+    ),
     rule!("019", "去除首尾空白后内容与指定 marker 完全相等。"),
     rule!("020", "严格输出三行 [BEGIN]、ALPHA|BETA|GAMMA、[END]。"),
     rule!(
