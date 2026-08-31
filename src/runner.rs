@@ -32,6 +32,8 @@ use crate::protocol::{
 use crate::redaction::{Redactor, mask_api_key};
 use crate::terminal;
 
+const MAX_INTERFACE_PROTOCOL_RETRIES: usize = 5;
+
 pub struct RunOutcome {
     pub duration: Duration,
     pub request_count: usize,
@@ -326,7 +328,7 @@ impl Runner {
                 body: Body::Json(spec.body),
                 stream: false,
             };
-            let evidence = self.execute_one(request).await?;
+            let evidence = self.execute_interface_request(request).await?;
             self.protocol_probe_refs.push(evidence.request_id.clone());
             self.ensure_not_cancelled()?;
             if evidence.metrics.transport_exit_code == 0
@@ -594,7 +596,12 @@ impl Runner {
             match group {
                 RequestGroup::Sequential(requests) => {
                     for request in requests {
-                        evidence.push(self.execute_one(request).await?);
+                        let request = if test.category == "接口与协议" {
+                            self.execute_interface_request(request).await?
+                        } else {
+                            self.execute_one(request).await?
+                        };
+                        evidence.push(request);
                         self.ensure_not_cancelled()?;
                     }
                 }
@@ -643,6 +650,26 @@ impl Runner {
             return Err(RunnerError::Interrupted);
         }
         Ok(evidence)
+    }
+
+    async fn execute_interface_request(
+        &mut self,
+        request: PlannedRequest,
+    ) -> Result<RequestEvidence, RunnerError> {
+        let request_id = request.id.clone();
+        for attempt in 1..=MAX_INTERFACE_PROTOCOL_RETRIES + 1 {
+            let mut attempt_request = request.clone();
+            if attempt > 1 {
+                attempt_request.id = format!("{request_id}-a{attempt}");
+            }
+            let evidence = self.execute_one(attempt_request).await?;
+            if attempt == MAX_INTERFACE_PROTOCOL_RETRIES + 1
+                || !retryable_interface_protocol_failure(&evidence)
+            {
+                return Ok(evidence);
+            }
+        }
+        unreachable!("interface/protocol retry loop always returns")
     }
 
     async fn execute_concurrent(
@@ -750,6 +777,21 @@ fn collection_progress_line(
         &terminal::display_title(test.id, concurrency),
         wave_progress,
     )
+}
+
+fn retryable_interface_protocol_failure(evidence: &RequestEvidence) -> bool {
+    if matches!(
+        evidence.transport_outcome,
+        TransportOutcome::Timeout
+            | TransportOutcome::TransportError
+            | TransportOutcome::UpstreamDisconnect
+    ) {
+        return true;
+    }
+    evidence
+        .metrics
+        .http_status
+        .is_some_and(|status| (500..600).contains(&status))
 }
 
 async fn parse_stream_evidence(evidence: &mut RequestEvidence) -> Option<StreamParseResult> {

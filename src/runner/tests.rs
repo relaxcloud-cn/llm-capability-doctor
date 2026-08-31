@@ -107,6 +107,68 @@ async fn ordinary_stream_request_records_missing_terminal() {
 }
 
 #[tokio::test]
+async fn interface_protocol_retries_transient_failure_and_uses_final_evidence() {
+    let response = openai_completion_with_usage(2);
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Close],
+        vec![ServerAction::Write(http_response(&response))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("temp directory");
+    let mut runner = test_runner(&server, &temp, Protocol::OpenAiChat, Duration::from_secs(1));
+
+    runner
+        .execute_check(catalog_test("004"))
+        .await
+        .expect("interface check retry");
+
+    assert_eq!(server.accepted_count(), 2);
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).expect("audit log");
+    assert!(log.contains("REQUEST test-004 BEGIN"));
+    assert!(log.contains("REQUEST test-004-a2 BEGIN"));
+    assert!(log.contains("request_refs: test-004-a2"));
+}
+
+#[tokio::test]
+async fn interface_protocol_does_not_retry_explicit_client_error() {
+    let body = br#"{"error":"unauthorized"}"#;
+    let server = RawTcpServer::spawn(vec![vec![ServerAction::Write(
+        http_response_with_declared_length("401 Unauthorized", body.len(), body),
+    )]])
+    .await;
+    let temp = TempDir::new().expect("temp directory");
+    let mut runner = test_runner(&server, &temp, Protocol::OpenAiChat, Duration::from_secs(1));
+
+    runner
+        .execute_check(catalog_test("004"))
+        .await
+        .expect("interface check");
+
+    assert_eq!(server.accepted_count(), 1);
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).expect("audit log");
+    assert!(!log.contains("REQUEST test-004-a2 BEGIN"));
+}
+
+#[tokio::test]
+async fn protocol_detection_retries_transient_probe_failure() {
+    let response = openai_completion_with_usage(2);
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Close],
+        vec![ServerAction::Write(http_response(&response))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("temp directory");
+    let mut runner = test_runner(&server, &temp, Protocol::Unknown, Duration::from_secs(1));
+
+    runner.detect_protocol().await.expect("protocol detection");
+
+    assert_eq!(runner.detected_protocol, Protocol::OpenAiChat);
+    assert_eq!(runner.detected_auth_mode, AuthMode::Bearer);
+    assert_eq!(server.accepted_count(), 2);
+    assert_eq!(runner.protocol_probe_refs, vec!["protocol-1-a2"]);
+}
+
+#[tokio::test]
 async fn concurrent_stream_requests_are_parsed_before_ordered_audit_write() {
     let body_a = openai_chat_final_stream("first", true);
     let body_b = openai_chat_final_stream("second", true);
@@ -985,7 +1047,8 @@ async fn execute_check_manifests_every_completed_tool_turn_in_order() {
 #[tokio::test]
 async fn protocol_detection_requires_a_successful_http_status() {
     let body = br#"{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"MODEL_DOCTOR_PROTOCOL_OK\"},\"finish_reason\":\"stop\"}]}"#;
-    let scripts = (0..crate::protocol::PROBE_CANDIDATES.len())
+    let scripts = (0..crate::protocol::PROBE_CANDIDATES.len()
+        * (MAX_INTERFACE_PROTOCOL_RETRIES + 1))
         .map(|_| {
             vec![ServerAction::Write(http_response_with_declared_length(
                 "500 Internal Server Error",
@@ -1007,7 +1070,7 @@ async fn protocol_detection_requires_a_successful_http_status() {
     );
     assert_eq!(
         server.accepted_count(),
-        crate::protocol::PROBE_CANDIDATES.len()
+        crate::protocol::PROBE_CANDIDATES.len() * (MAX_INTERFACE_PROTOCOL_RETRIES + 1)
     );
 }
 
