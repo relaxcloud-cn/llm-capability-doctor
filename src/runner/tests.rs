@@ -1418,6 +1418,43 @@ async fn context_capacity_probes_bisect_downward_after_rejection() {
 }
 
 #[tokio::test]
+async fn context_capacity_never_repeats_target_after_measurement_regression() {
+    let capped_response = openai_completion_with_usage(131_072);
+    let server = RawTcpServer::spawn(vec![
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(10_000),
+        ))],
+        vec![ServerAction::Write(http_response(
+            &openai_completion_with_usage(124_000),
+        ))],
+        vec![ServerAction::Write(http_response(&capped_response))],
+        vec![ServerAction::Write(http_response(&capped_response))],
+        vec![ServerAction::Write(http_response(&capped_response))],
+    ])
+    .await;
+    let temp = TempDir::new().expect("tempdir");
+    let mut runner = test_runner(
+        &server,
+        &temp,
+        Protocol::OpenAiChat,
+        Duration::from_secs(30),
+    );
+
+    runner
+        .execute_check(catalog_test("018"))
+        .await
+        .expect("context capacity check should degrade safely");
+
+    assert_eq!(
+        server.accepted_count(),
+        3,
+        "calibration + two unique probes"
+    );
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
+    assert!(!log.contains("REQUEST test-018-probe-262144-a1 BEGIN"));
+}
+
+#[tokio::test]
 async fn context_capacity_stops_immediately_when_declared_limit_fails_the_bar() {
     // 服务端在报错里声明上限 96K（不足 128K 档）：主探针被拒后无需夹逼。
     let rejection = serde_json::json!({
@@ -1458,4 +1495,29 @@ async fn context_capacity_stops_immediately_when_declared_limit_fails_the_bar() 
     let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
     assert!(log.contains("========== REQUEST test-018-probe-124000-a1 BEGIN =========="));
     assert!(!log.contains("test-018-probe-6"));
+}
+
+#[tokio::test]
+async fn one_failed_check_does_not_abort_later_checks() {
+    static INVALID_TEST: TestCase = TestCase {
+        id: "999",
+        category: "接口与协议",
+        name: "故意触发的检测错误",
+    };
+    let response = openai_completion_with_usage(2);
+    let server =
+        RawTcpServer::spawn(vec![vec![ServerAction::Write(http_response(&response))]]).await;
+    let temp = TempDir::new().expect("tempdir");
+    let mut runner = test_runner(&server, &temp, Protocol::OpenAiChat, Duration::from_secs(1));
+    runner.selected = vec![&INVALID_TEST, catalog_test("004")];
+
+    runner
+        .execute()
+        .await
+        .expect("one check must not abort the run");
+
+    assert_eq!(server.accepted_count(), 1);
+    let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
+    assert!(log.contains("TEST-999 BEGIN"));
+    assert!(log.contains("TEST-004 BEGIN"));
 }

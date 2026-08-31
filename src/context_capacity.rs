@@ -410,6 +410,9 @@ pub fn classify_probe(
     let body_non_empty = std::str::from_utf8(response_body)
         .map(|text| !text.trim().is_empty())
         .unwrap_or(!response_body.is_empty());
+    if response_is_length_limited(protocol, response_body) {
+        return ProbeOutcome::RejectedOther;
+    }
     if http_success && transport_success && body_non_empty {
         return ProbeOutcome::Accepted {
             measured_tokens: extract_prompt_tokens(protocol, response_body),
@@ -424,6 +427,40 @@ pub fn classify_probe(
         };
     }
     ProbeOutcome::RejectedOther
+}
+
+fn response_is_length_limited(protocol: Protocol, response_body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(response_body) else {
+        return false;
+    };
+    match protocol {
+        Protocol::OpenAiChat => {
+            value
+                .pointer("/choices/0/finish_reason")
+                .and_then(serde_json::Value::as_str)
+                == Some("length")
+        }
+        Protocol::OpenAiResponses => {
+            value.get("status").and_then(serde_json::Value::as_str) == Some("incomplete")
+                || value
+                    .pointer("/incomplete_details/reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("max_output_tokens")
+        }
+        Protocol::AnthropicMessages => {
+            value.get("stop_reason").and_then(serde_json::Value::as_str) == Some("max_tokens")
+        }
+        Protocol::GeminiGenerateContent => {
+            value
+                .pointer("/candidates/0/finishReason")
+                .and_then(serde_json::Value::as_str)
+                == Some("MAX_TOKENS")
+        }
+        Protocol::OllamaChat => {
+            value.get("done_reason").and_then(serde_json::Value::as_str) == Some("length")
+        }
+        Protocol::Unknown => false,
+    }
 }
 
 /// 把 token 数格式化为报告用语（124012 → "124K"，15500 → "15.5K"）。
@@ -750,6 +787,22 @@ mod tests {
             br#"{"error":"internal"}"#,
         );
         assert_eq!(crashed, ProbeOutcome::RejectedOther);
+    }
+
+    #[test]
+    fn length_limited_response_is_not_treated_as_accepted_probe() {
+        let response = br#"{
+            "choices":[{
+                "message":{"role":"assistant","content":"partial"},
+                "finish_reason":"length"
+            }],
+            "usage":{"prompt_tokens":131072}
+        }"#;
+
+        assert_eq!(
+            classify_probe(Protocol::OpenAiChat, Some(200), "completed_eof", response,),
+            ProbeOutcome::RejectedOther
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -305,10 +306,30 @@ impl Runner {
             }
             if test.id != "001" && !self.protocol_checked {
                 self.protocol_checked = true;
-                self.detect_protocol().await?;
+                if let Err(error) = self.detect_protocol().await {
+                    if matches!(error, RunnerError::Interrupted) {
+                        return Err(error);
+                    }
+                    eprintln!("协议识别未完成，继续后续检测：{error}");
+                }
             }
-            self.execute_check_with_progress(test, Some(collection_progress))
-                .await?;
+            match self
+                .execute_check_with_progress(test, Some(collection_progress))
+                .await
+            {
+                Ok(()) => {}
+                Err(RunnerError::Interrupted) => return Err(RunnerError::Interrupted),
+                Err(error) => {
+                    eprintln!("检测项 {} 未完成，已跳过：{error}", test.id);
+                    self.audit.append_manifest(&TestManifest {
+                        id: test.id.to_owned(),
+                        name: test.name.to_owned(),
+                        category: test.category.to_owned(),
+                        completed_at: Local::now(),
+                        request_refs: Vec::new(),
+                    })?;
+                }
+            }
         }
         Ok(())
     }
@@ -489,16 +510,26 @@ impl Runner {
         let mut low = calibration_tokens;
         let mut high: Option<u64> = None;
         let mut outcomes: Vec<(u64, ProbeOutcome)> = Vec::new();
+        let mut attempted_targets = HashSet::new();
         for probe_index in 0..context_capacity::MAX_CAPACITY_PROBES {
             self.ensure_not_cancelled()?;
             let Some(target) = next_target(low, high, probe_index) else {
                 break;
             };
+            if !attempted_targets.insert(target) {
+                break;
+            }
             let outcome = self
                 .send_capacity_probe(target, density, &mut evidence)
                 .await?;
             match outcome {
                 ProbeOutcome::Accepted { measured_tokens } => {
+                    if measured_tokens.is_some_and(|measured| {
+                        measured.saturating_add(context_capacity::MIN_INTERVAL_TOKENS) < target
+                    }) {
+                        outcomes.push((target, outcome));
+                        break;
+                    }
                     let effective = measured_tokens.unwrap_or(target);
                     low = Some(low.map_or(effective, |current| current.max(effective)));
                 }
