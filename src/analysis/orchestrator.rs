@@ -245,6 +245,7 @@ struct GatewayCompatibility {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct ConcurrencyWave {
     concurrency: usize,
     total_requests: usize,
@@ -255,6 +256,7 @@ struct ConcurrencyWave {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct ConcurrencyFailure {
     request_id: String,
     error: String,
@@ -1003,11 +1005,99 @@ fn missing_result_reason(test: &crate::catalog::TestCase) -> String {
     format!("{} {}：分析不可用（结果缺失）", test.id, test.name)
 }
 
-fn non_pass_reason(test: &crate::catalog::TestCase, result: Option<&AnalysisTestResult>) -> String {
-    match result {
-        Some(result) => format!("{} {}：{}", test.id, test.name, result_reason(result)),
-        None => missing_result_reason(test),
+fn normalized_category_failure(reason: &str) -> String {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("transport_error")
+        || lower.contains("tls handshake eof")
+        || lower.contains("timeout")
+        || reason.contains("超时")
+        || reason.contains("连接中断")
+        || reason.contains("空响应")
+        || reason.contains("未获得任何响应")
+    {
+        return "请求连接中断或未返回有效响应".into();
     }
+    if lower.contains("auto tool choice") || reason.contains("自动工具选择") {
+        return "接口不支持当前自动工具选择配置".into();
+    }
+    if lower.contains("tool loop")
+        || lower.contains("tool envelope")
+        || reason.contains("工具闭环")
+        || reason.contains("结果关联")
+    {
+        return "工具调用流程未完成".into();
+    }
+    if lower.contains("analysis unavailable")
+        || reason.contains("分析不可用")
+        || reason.contains("结果缺失")
+    {
+        return "本轮分析未完成，无法判断该项能力".into();
+    }
+    if lower.contains("passcriteria")
+        || reason.contains("期望")
+        || reason.contains("字段")
+        || reason.contains("参数")
+        || reason.contains("类型")
+        || reason.contains("格式")
+    {
+        return "模型返回结果与检测要求不一致".into();
+    }
+    clean_category_failure(reason)
+}
+
+fn clean_category_failure(reason: &str) -> String {
+    let mut cleaned = reason.replace("stderrExcerpt", "");
+    cleaned = cleaned.replace("responseBodyExcerpt", "");
+    cleaned = cleaned.replace("request_id", "请求");
+    if let Some((prefix, _)) = cleaned.split_once("url (") {
+        cleaned = prefix.trim_end_matches([' ', ':', '(', '"']).to_owned();
+    }
+    let first_sentence = cleaned
+        .split(['。', '.', ';', '；'])
+        .next()
+        .unwrap_or(cleaned.as_str())
+        .trim();
+    let bounded: String = first_sentence.chars().take(96).collect();
+    if bounded.is_empty() {
+        "存在未通过项".into()
+    } else {
+        bounded
+    }
+}
+
+fn category_failure_summary(
+    members: &[&crate::catalog::TestCase],
+    non_pass: &[&crate::catalog::TestCase],
+    artifact: &SelfAnalysisArtifact,
+) -> String {
+    let passed = members.len().saturating_sub(non_pass.len());
+    let mut causes = BTreeMap::<String, usize>::new();
+    for test in non_pass {
+        let reason = result_for(artifact, test.id)
+            .map(result_reason)
+            .unwrap_or_else(|| missing_result_reason(test));
+        *causes
+            .entry(normalized_category_failure(&reason))
+            .or_default() += 1;
+    }
+    let mut causes: Vec<_> = causes.into_iter().collect();
+    causes.sort_by(|(left_reason, left_count), (right_reason, right_count)| {
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_reason.cmp(right_reason))
+    });
+    let causes = causes
+        .into_iter()
+        .map(|(reason, count)| format!("{reason}（{count} 项）"))
+        .collect::<Vec<_>>()
+        .join("；");
+    format!(
+        "{} 项，{} 项通过、{} 项未通过。主要问题包括：{}。",
+        members.len(),
+        passed,
+        non_pass.len(),
+        causes
+    )
 }
 
 fn derive_gateway_compatibility(
@@ -1320,6 +1410,7 @@ fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String)
             .collect();
         let non_pass: Vec<_> = members
             .iter()
+            .copied()
             .filter(|test| {
                 result_for(artifact, test.id)
                     .map(|result| result_status(result) != "PASS")
@@ -1334,11 +1425,7 @@ fn render_category_summary(artifact: &SelfAnalysisArtifact, output: &mut String)
         let reason = if non_pass.is_empty() {
             verified_category_conclusion(category).into()
         } else {
-            non_pass
-                .iter()
-                .map(|test| non_pass_reason(test, result_for(artifact, test.id)))
-                .collect::<Vec<_>>()
-                .join("；")
+            category_failure_summary(&members, &non_pass, artifact)
         };
         writeln!(
             output,
@@ -1369,32 +1456,6 @@ fn render_concurrency_summary(artifact: &SelfAnalysisArtifact, output: &mut Stri
             output,
             "| {} | {} | {} | {} | {} |",
             wave.concurrency, wave.total_requests, wave.succeeded, wave.failed, average
-        )
-        .unwrap();
-    }
-    output.push('\n');
-
-    let failures: Vec<_> = artifact
-        .concurrency_waves
-        .iter()
-        .flat_map(|wave| {
-            wave.failures
-                .iter()
-                .map(move |failure| (wave.concurrency, failure))
-        })
-        .collect();
-    if failures.is_empty() {
-        output.push_str("失败请求：无。\n\n");
-        return;
-    }
-    output.push_str("失败请求：\n\n");
-    for (concurrency, failure) in failures {
-        writeln!(
-            output,
-            "- {} 并发，request_id={}：{}",
-            concurrency,
-            markdown_cell(&failure.request_id),
-            markdown_cell(&failure.error)
         )
         .unwrap();
     }
@@ -2626,8 +2687,11 @@ mod tests {
         assert!(markdown.contains("| 8 | 8 | 7 | 1 | 880.0 ms |"));
         assert!(markdown.contains("| 16 | 16 | 16 | 0 | 1240.0 ms |"));
         assert!(markdown.contains("| 32 | 32 | 31 | 1 | - |"));
-        assert!(markdown.contains("request_id=test-057-c8-3：HTTP 500: upstream unavailable"));
-        assert!(markdown.contains("request_id=test-057-c32-9：timeout"));
+        assert!(!markdown.contains("失败请求："));
+        assert!(!markdown.contains("request_id=test-057-c8-3"));
+        assert!(!markdown.contains("request_id=test-057-c32-9"));
+        assert!(!markdown.contains("HTTP 500: upstream unavailable"));
+        assert!(!markdown.contains("timeout"));
     }
 
     #[test]
@@ -2647,9 +2711,53 @@ mod tests {
         let markdown = render_markdown(&markdown_fixture(results));
 
         assert!(markdown.contains("| 工具调用 | 不通过 |"));
-        assert!(markdown.contains("046 官方工具协议结构合规：tool envelope incomplete"));
+        assert!(markdown.contains("11 项，10 项通过、1 项未通过"));
+        assert!(markdown.contains("工具调用流程未完成（1 项）"));
         assert!(markdown.contains("### 046 官方工具协议结构合规"));
         assert!(markdown.contains("tool envelope incomplete"));
+    }
+
+    #[test]
+    fn markdown_category_failure_summary_aggregates_distinct_causes() {
+        let mut results = crate::catalog::CATALOG
+            .iter()
+            .map(|test| available_markdown_result(test.id, CandidateStatus::Pass, None))
+            .collect::<Vec<_>>();
+        for (id, cause) in [
+            (
+                "040",
+                "请求发生 transport_error：tls handshake eof，url=https://example.test",
+            ),
+            (
+                "041",
+                "stderrExcerpt=transport_error，request_id=test-041，tls handshake eof",
+            ),
+            (
+                "043",
+                "BadRequestError: auto tool choice requires --enable-auto-tool-choice",
+            ),
+        ] {
+            let result = results
+                .iter_mut()
+                .find(|result| result.test_id == id)
+                .unwrap();
+            result.candidate_status = Some(CandidateStatus::Fail);
+            result.validated_status = Some(ValidatedStatus::Fail);
+            result.failure_cause = Some(cause.into());
+        }
+
+        let markdown = render_markdown(&markdown_fixture(results));
+        let category_row = markdown
+            .lines()
+            .find(|line| line.starts_with("| 工具调用 |"))
+            .unwrap();
+
+        assert!(category_row.contains("11 项，8 项通过、3 项未通过"));
+        assert!(category_row.contains("请求连接中断或未返回有效响应（2 项）"));
+        assert!(category_row.contains("接口不支持当前自动工具选择配置（1 项）"));
+        assert!(!category_row.contains("https://example.test"));
+        assert!(!category_row.contains("request_id"));
+        assert!(!category_row.contains("transportOutcome"));
     }
 
     #[test]
@@ -2671,7 +2779,10 @@ mod tests {
         let markdown = render_markdown(&markdown_fixture(results));
 
         assert!(markdown.contains("| 工具调用 | 不通过 |"));
-        assert!(markdown.contains("049 工具失败恢复：分析不可用：offline"));
+        assert!(markdown.contains("11 项，10 项通过、1 项未通过"));
+        assert!(markdown.contains("本轮分析未完成，无法判断该项能力（1 项）"));
+        assert!(markdown.contains("049 工具失败恢复"));
+        assert!(markdown.contains("- 原因：分析不可用：offline"));
         assert!(markdown.contains("| ANALYSIS_UNAVAILABLE |"));
         assert!(markdown.contains("分析不可用：offline"));
         assert!(!markdown.contains("049 工具失败恢复：模型失败"));
