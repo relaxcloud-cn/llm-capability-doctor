@@ -1,3 +1,0 @@
-data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hidden","thought":true,"thoughtSignature":"sig-hidden"},{"text":"MODEL_DOCTOR_"}]}}]}
-
-data: {"candidates":[{"index":0,"content":{"parts":[{"text":"CASE_046_OK"},{"text":"","thoughtSignature":"sig-final-empty"}]},"finishReason":"STOP"}]}

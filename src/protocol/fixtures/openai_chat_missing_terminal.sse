@@ -1,3 +1,0 @@
-data: {"id":"chatcmpl-missing","object":"chat.completion.chunk","created":1787041142,"model":"gpt-test","choices":[{"index":0,"delta":{"role":"assistant","content":"MODEL_DOCTOR_CASE_046_OK"},"finish_reason":null}]}
-
-data: {"id":"chatcmpl-missing","object":"chat.completion.chunk","created":1787041142,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}

@@ -1,5 +1,0 @@
-data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"private reasoning","thought":true,"thoughtSignature":"sig-thought"}]}}]}
-
-data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_weather_046","name":"get_weather","args":{"city":"Beijing"}},"thoughtSignature":"sig-call"}]}}]}
-
-data: {"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"","thoughtSignature":"sig-empty"}]},"finishReason":"STOP"}]}

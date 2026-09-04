@@ -1,0 +1,42 @@
+name: PR Acceptance
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Prettier Check
+        run: npx prettier --check . --ignore-unknown
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # Drives the whole pipeline against the mock engine in src/fixtures —
+      # no GPU, no network, no engine required.
+      - name: Test
+        run: npm test
+
+      # The published artifact is the esbuild bundle, which vitest never loads.
+      # Prove it at least starts — a CJS dependency inlined into the ESM output
+      # throws "Dynamic require of ..." at import time, before any flag parses.
+      - name: CLI Bundle Smoke
+        run: npm run build:cli && node bin/dist/llmprobe.mjs --help

@@ -1,12 +1,30 @@
-/docs/
-/skills/creating-model-doctor-reports/
-/model-capability-doctor.sh
-/tests/
-/dist/
-.worktrees/
-target/
+node_modules/
+.idea/
+dist/
+bin/dist/
+.astro/
+__pycache__/
+.env.local
 .DS_Store
+.claude/
+.superpowers/
+.worktrees/
+tmp/
 *.log
-*-assessment.json
-*-customer-readiness-report.html
-*-model-capability-report.html
+*.zip
+
+# Standalone reports and probe saves generated at the repository root
+/*.html
+/*.json
+!/package.json
+!/package-lock.json
+!/tsconfig.json
+
+# Local probe dumps under runs/ (keep personal results out of git)
+runs/**/*.json
+runs/**/*.html
+
+# Product library stub — only docs + rebuild wrapper are tracked
+runs/report-card/*
+!runs/report-card/README.md
+!runs/report-card/generate.mjs

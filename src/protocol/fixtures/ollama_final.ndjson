@@ -1,2 +1,0 @@
-{"model":"qwen3","created_at":"2026-08-18T00:01:00Z","message":{"role":"assistant","thinking":"hidden","content":"MODEL_DOCTOR_","images":null},"done":false}
-{"model":"qwen3","created_at":"2026-08-18T00:01:01Z","message":{"role":"assistant","thinking":"","content":"CASE_046_OK","future_message":"kept"},"done":true,"future_top_level":true}
