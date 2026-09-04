@@ -29,6 +29,19 @@ export function fmtTokensK(n: number): string {
 
 export function chartJsBundle(): string {
   const require = createRequire(import.meta.url);
+  try {
+    const sea = require("node:sea") as {
+      getAsset(name: string, encoding: string): string;
+      isSea(): boolean;
+    };
+    if (sea.isSea()) {
+      return sea
+        .getAsset("chart.umd.js", "utf8")
+        .replace(/<\/script/g, "<\\/script");
+    }
+  } catch {
+    // The regular Node.js CLI reads Chart.js from node_modules below.
+  }
   const path = join(dirname(require.resolve("chart.js")), "chart.umd.js");
   return readFileSync(path, "utf8").replace(/<\/script/g, "<\\/script");
 }

@@ -1,13 +1,40 @@
 # llmprobe
 
-**A conformance and capability suite for LLM inference engines.**
+**面向 All-in-One 的大模型基础能力和协议检测工具。**
+
+## 离线单文件交付
+
+客户机器不需要安装 Node.js、npm 或项目依赖。按操作系统取得一个可执行文件后，直接运行一个命令：
+
+```bash
+./llmprobe-linux-x64 https://model.example/v1 \
+  --model your-model \
+  --api-key your-api-key \
+  --html model-report.html \
+  --save model-report.json
+```
+
+Windows：
+
+```powershell
+.\llmprobe-win32-x64.exe https://model.example/v1 --model your-model --api-key your-api-key --html model-report.html --save model-report.json
+```
+
+一个文件会完成 llmprobe 基础检测，并生成中文 HTML 和 JSON 报告。报告同时列出后续 Pi Agent 真实任务的检测清单；真实 Agent 执行逻辑由 Issue #10 后续实现，当前版本不会用模拟 Agent 任务冒充真实结果。
+
+维护者在各目标系统上执行以下命令生成对应的单文件：
+
+```bash
+npm ci
+npm run build:single
+```
+
+输出位于 `dist/llmprobe-<系统>-<架构>`。GitHub 的 `Build Single-File CLI` 工作流会分别构建 Linux、Windows 和 macOS 文件。
 
 Point it at any OpenAI-compatible endpoint — llama.cpp, LM Studio, mlx-serve, vLLM, Ollama, OpenRouter — and it answers two questions that are usually tangled together:
 
 1. **How complete and correct is your engine?** Does it implement Responses? Messages? Embeddings, vision, logprobs, structured outputs? And of what it _does_ implement, is it actually right?
 2. **Does the model clear the floor?** Not an intelligence benchmark, a floor check with three grades (below floor / capable / strong). Does it call tools correctly, follow instructions, produce valid JSON, remember what you told it?
-
-Above the floor there is a third, harder question: **can the model actually run an agent loop?** Three multi-step tool tasks in a simulated file workspace, scored as their own card.
 
 ```bash
 npx llmprobe localhost:8080          # llama.cpp
@@ -35,11 +62,6 @@ MODEL CAPABILITY                                       78.4%   capable ✓
   Tool restraint         4/6     66.7%  ███████░░░
   JSON discipline        6/6      100%  ██████████
 
-AGENTIC                                                          2/3 tasks
-  ✓ reads the config instead of answering from priors      2 steps
-  ✓ finds where the port really lives and edits only that  5 steps
-  ✗ follows the pointer in build.cfg instead of guessing   8 steps
-      → edited version.txt, the pointer in build.cfg names VERSION
 ```
 
 ## The three numbers, and why they are three
@@ -51,20 +73,6 @@ AGENTIC                                                          2/3 tasks
 **Capability** — whether the model clears the floor, graded below floor / capable / strong. Deterministic grading only: no LLM judge, no second API key, reproducible.
 
 They are never averaged. A weak model cannot drag down the engine's score, and a strong one cannot rescue it. That separation is enforced by tests, not by convention.
-
-## Agentic tasks
-
-The capability card asks whether a single tool call comes out right. The agentic card asks the question you actually have about a local model: can it run a loop? Read the right file, act on what it found, stop.
-
-Three tasks against a simulated file workspace (`list_files`, `read_file`, `write_file`, executed in-process by llmprobe, no sandbox). Each has a trap for a characteristic agent failure:
-
-1. **Read**: the answer is in `config.json`, and a decoy README suggests a different, more plausible value. Catches models that answer from priors instead of looking.
-2. **Find and edit**: change a port that lives in one of three files, touch nothing else. Catches models that edit the plausible file, clobber sibling settings, or rewrite files they were told to leave alone.
-3. **Indirection**: `build.cfg` names the file that holds the version; a decoy `version.txt` sits right there. Catches models that guess by filename instead of following the pointer.
-
-Grading is the same deal as everywhere else in this suite: deterministic, temperature 0, final state compared by string. Failures are classified (`no-tool-call`, `wrong-answer`, `step-limit`, `engine-error`) so a 1/3 tells you _how_ it failed, not just that it did. The step cap is about twice the optimal path, and a model that did the work but never stopped calling tools still fails, with the detail saying exactly that.
-
-This card is deliberately harder than the floor and never blended into the capability verdict. A capable model that scores 0/3 here reads as exactly that: fine as a chatbot, not ready to be an agent.
 
 ## This suite is normative
 
@@ -220,8 +228,9 @@ Each model gets its own card, library row and exit-code verdict; the command exi
 
 Every probe is recorded in `~/.llmprobe` — no flag needed. That directory is
 your **model library**: a ranking table of every run, a compare workbench, and a
-self-contained **report card** per run (Coverage / Conformance / Capability
-first, plus Agentic and Fidelity, with drill-downs and Light/Dark/Cyber themes).
+self-contained **report card** per run, including overall conclusion, hard
+requirements, soft requirements, Pi Agent checklist, technical details, and
+Light/Dark/Cyber themes.
 
 ```bash
 llmprobe 127.0.0.1:8080 -k pass --model <id> --open
@@ -240,7 +249,7 @@ llama.cpp and on Ollama gives you two rows to compare, not one overwriting the
 other.
 
 The table sorts newest-first by default — the run you just did is row 1 — and
-every column is sortable: coverage, conformance, capability, agentic, and the
+every column is sortable: coverage, conformance, capability, and the
 `--bench` numbers (decode tok/s, prefill tok/s, TTFT). Picking a metric sorts it
 best-first, which for TTFT means ascending. Runs with no benchmark read `—` and
 sink to the bottom rather than ranking as the slowest engine you own. Click a
@@ -261,7 +270,7 @@ model name (or **View**) to open its report card.
 llmprobe localhost:8080 --bench --html report.html
 ```
 
-`--bench-only` runs the benchmark and nothing else — no conformance, evals, agentic or fidelity. Surface discovery still runs, because it costs no tokens and the benchmark needs to know which chat-shaped surface to measure through. The terminal prints the PERFORMANCE block alone rather than three empty cards, and a saved report from such a run reports its unrun sections as _not measured_ rather than as zero, so a comparison never crowns the run that simply did more of the suite.
+`--bench-only` runs the benchmark and nothing else — no conformance, evals, or fidelity. Surface discovery still runs, because it costs no tokens and the benchmark needs to know which chat-shaped surface to measure through. The terminal prints the PERFORMANCE block alone rather than three empty cards, and a saved report from such a run reports its unrun sections as _not measured_ rather than as zero, so a comparison never crowns the run that simply did more of the suite.
 
 ```bash
 llmprobe localhost:8080 --bench-only --full --save mtp.json
@@ -299,7 +308,7 @@ The page is a pure function of the JSON — `--save` and `--html` render from th
 llmprobe --compare llama-cpp.json vllm.json mlx.json --html compare.html
 ```
 
-Two engines on one model, one engine across models, or the same pair before and after a change. You get a scorecard with every run as a column — coverage per tier, conformance, capability, agentic, fidelity, then decode, prefill, speculative ratio, tokens per step, prefix cache, concurrency and sustained load — and the context curves **overlaid**, one coloured line per run, for decode, first-token latency, prefill and tokens per decode step.
+Two engines on one model, one engine across models, or the same pair before and after a change. You get a scorecard with every run as a column — coverage per tier, conformance, capability, fidelity, then decode, prefill, speculative ratio, tokens per step, prefix cache, concurrency and sustained load — and the context curves **overlaid**, one coloured line per run, for decode, first-token latency, prefill and tokens per decode step.
 
 Every scorecard row is ranked: the winner is green with a ▲, the loser red with a ▼, and a row where the runs agree goes grey with an `=`. Rank never rides on colour alone, so it survives a greyscale print and a reader who can't separate the hues. Rows are ranked in the right direction — first-token latency is won by the _smallest_ number — and a row only one run measured isn't ranked at all, because that isn't a comparison.
 
@@ -363,7 +372,7 @@ src/core/         outcome types, scoring, probe, registry, runner, reports
 src/surfaces/     one adapter per API surface (chat, responses, messages)
 src/conformance/  tests, written once against the adapter contract
 src/evals/        the nine capability categories + deterministic graders
-src/agentic/      the simulated workspace, tasks and driver loop
+src/agentic/      upstream llmprobe test fixtures; not executed by the product CLI
 src/fixtures/     mock engine + end-to-end pipeline tests
 schema/           OpenAPI documents → generated Zod schemas
 ```

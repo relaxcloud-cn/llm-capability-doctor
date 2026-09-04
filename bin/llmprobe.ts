@@ -67,13 +67,11 @@ import {
   scoreConformance,
   scoreCoverage,
 } from "../src/core/score";
-import { runAgentic } from "../src/agentic/index";
 import { SAMPLING_PRESETS, parseRungs, runBenchmark } from "../src/bench/index";
 import { runFidelity } from "../src/fidelity/index";
 import { runReasoning } from "../src/reasoning/index";
 import { ALL_EVALS } from "../src/evals/index";
 import {
-  translateAgenticTaskName,
   translateCapabilityLabel,
   translateConformanceName,
   translateConsoleLine,
@@ -351,13 +349,13 @@ const HELP = `llmprobe v${pkg.version} — 大模型接口兼容性与能力检�
 
 用法：llmprobe <接口地址> [选项]
 
-检测 OpenAI 兼容接口的实现情况，并分别评估接口正确性、模型能力、Agent
-任务和性能。每次检测默认记录到 ~/.llmprobe，生成模型列表和检测报告。
+检测 OpenAI 兼容接口的实现情况，并分别评估接口正确性、模型能力和性能。
+每次检测默认记录到 ~/.llmprobe，生成模型列表和检测报告。
 
   覆盖情况   接口和功能支持了多少（核心 / 扩展 / 前沿）
   协议正确性 已实现接口是否正确遵循协议（只统计 MUST 必须项）
   模型能力   未达到最低要求 / 具备基本能力 / 能力较强
-  Agent 任务 在模拟工作区中执行多步工具任务
+  Agent 实测 展示真实 Pi Agent 检查清单；当前版本不运行模拟 Agent 任务
 
 选项：
   -k, --api-key <key>       API Key（本地引擎可不填）
@@ -542,7 +540,7 @@ function perModelPath(path: string, model: string, multi: boolean): string {
 }
 
 /**
- * One model, end to end: conformance, capability, agentic, fidelity, benchmark,
+ * One model, end to end: conformance, capability, fidelity, benchmark,
  * then every requested output. Surface discovery is shared and already done —
  * probing four models on one endpoint maps it once, not four times.
  */
@@ -731,60 +729,9 @@ async function probeModel(
     }
   }
 
-  // ── 4b. Agentic — multi-step tool use in a simulated workspace ──────────
-  // A harder bar than the capability floor, reported as its own card and never
-  // blended into the verdict: a capable model with zero agentic tasks should
-  // read as exactly that.
+  const agentic: RunReport["agentic"] = undefined;
 
-  let agentic: RunReport["agentic"];
-  if (
-    !budgetHit &&
-    !incomplete &&
-    !onlyMode &&
-    args.depth !== "quick" &&
-    ctx.evalSurface
-  ) {
-    if (featureSupport.get("tools")?.supported === true) {
-      log();
-      log(
-        `${c.gray("agentic (multi-step tool tasks in a simulated workspace)...")}`,
-      );
-      try {
-        agentic = await runAgentic(ctx, (result) => {
-          const icon = result.passed ? c.green("✓") : c.red("✗");
-          const steps = c.gray(
-            `${result.steps} step${result.steps === 1 ? "" : "s"}`,
-          );
-          log(
-            `  ${icon} ${translateAgenticTaskName(result.id, result.name)} ${steps}`,
-          );
-          if (!result.passed && result.detail) {
-            log(`      ${c.red("→")} ${c.gray(result.detail)}`);
-          }
-        });
-      } catch (err) {
-        if (err instanceof BudgetExceededError) {
-          budgetHit = true;
-          log(`${c.yellow("⚠")} ${err.message}`);
-        } else if (err instanceof TargetUnreachableError) {
-          incomplete = err.message;
-          agentic = undefined;
-          log(`${c.red("✗")} ${err.message}`);
-        } else {
-          log(
-            `${c.yellow("⚠")} agentic failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    } else {
-      log();
-      log(
-        `${c.gray("agentic skipped — tool calling not available on this engine")}`,
-      );
-    }
-  }
-
-  // ── 4c. Fidelity — how faithfully the engine reproduces the model ───────
+  // ── 4b. Fidelity — how faithfully the engine reproduces the model ───────
   // Scored (a single rankable number) but never gates the exit code: a lossy
   // quant is a legitimate config, not a broken engine. Runs by default; a
   // --quick smoke run skips it.
@@ -1089,29 +1036,8 @@ async function probeModel(
                 : "no capability evals",
       ),
       agentic: phase(
-        agentic
-          ? "measured"
-          : onlyMode || args.depth === "quick"
-            ? "not-run"
-            : budgetHit
-              ? "interrupted"
-              : !ctx.evalSurface ||
-                  featureSupport.get("tools")?.supported !== true
-                ? "unavailable"
-                : "failed",
-        agentic
-          ? undefined
-          : onlyMode
-            ? onlyReason
-            : args.depth === "quick"
-              ? "quick depth omits agentic tasks"
-              : budgetHit
-                ? "token budget exhausted"
-                : !ctx.evalSurface
-                  ? "no chat-shaped evaluation surface"
-                  : featureSupport.get("tools")?.supported !== true
-                    ? "tool calling unavailable"
-                    : "agentic phase did not produce a score",
+        "not-run",
+        "llmprobe simulated Agent tasks removed; real Pi Agent tests are not implemented yet",
       ),
       fidelity: phase(
         fidelity

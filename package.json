@@ -35,6 +35,7 @@
   "scripts": {
     "prettier": "prettier",
     "build:cli": "esbuild bin/llmprobe.ts --bundle --platform=node --format=esm --target=node20 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=bin/dist/llmprobe.mjs && chmod +x bin/dist/llmprobe.mjs",
+    "build:single": "node scripts/build-single.mjs",
     "prepare": "npm run build:cli",
     "prepublishOnly": "npm run build:cli",
     "probe": "npm run build:cli && node bin/dist/llmprobe.mjs",
@@ -47,6 +48,7 @@
   "devDependencies": {
     "@types/node": "^26.1.1",
     "esbuild": "^0.28.0",
+    "postject": "^1.0.0-alpha.6",
     "prettier": "^3.6.2",
     "typescript": "^5.9.3",
     "vitest": "^4.1.10",

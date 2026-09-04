@@ -40,3 +40,6 @@ jobs:
       # throws "Dynamic require of ..." at import time, before any flag parses.
       - name: CLI Bundle Smoke
         run: npm run build:cli && node bin/dist/llmprobe.mjs --help
+
+      - name: Single-File CLI Smoke
+        run: npm run build:single && ./dist/llmprobe-linux-x64 --help
