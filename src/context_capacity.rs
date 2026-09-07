@@ -14,8 +14,8 @@ use crate::protocol::{Protocol, RequestSpec, basic_request};
 
 /// 智能体部署要求的最低上下文（token）。
 pub const CONTEXT_REQUIREMENT_TOKENS: u64 = 128_000;
-/// 主探针目标：要求的 97%，给恰好 128K 上限的模型留出回复余量。
-pub const CONTEXT_MAIN_TARGET_TOKENS: u64 = 124_000;
+/// 主探针与刚性门槛一致，不再以 124K 代替 128K。
+pub const CONTEXT_MAIN_TARGET_TOKENS: u64 = CONTEXT_REQUIREMENT_TOKENS;
 /// 向上探测的上限（token）。主探针通过后按 2 倍向上试，到此为止。
 pub const CONTEXT_UPWARD_CAP_TOKENS: u64 = 496_000;
 /// 校准请求的填充字符数。同质填充下小请求测得的密度可直接外推。
@@ -517,6 +517,7 @@ pub fn conclusion_sentence(conclusion: &ContextConclusion) -> String {
 /// 由全部探针结果推导最终结论。这是采集端和分析端共用的唯一判定入口。
 pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
     let mut floor: Option<(u64, bool)> = None;
+    let mut measured_floor: Option<u64> = None;
     let mut target_ceiling: Option<u64> = None;
     let mut declared_min: Option<u64> = None;
     let mut truncation: Option<(u64, u64)> = None;
@@ -526,6 +527,10 @@ pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
     for &(target, outcome) in outcomes {
         match outcome {
             ProbeOutcome::Accepted { measured_tokens } => {
+                if let Some(measured) = measured_tokens {
+                    measured_floor =
+                        Some(measured_floor.map_or(measured, |value| value.max(measured)));
+                }
                 let effective = measured_tokens.unwrap_or(target);
                 if floor.is_none_or(|(current, _)| effective > current) {
                     floor = Some((effective, measured_tokens.is_some()));
@@ -564,21 +569,29 @@ pub fn conclude(outcomes: &[(u64, ProbeOutcome)]) -> ContextConclusion {
             format_tokens_k(measured)
         ));
     }
-    if floor.is_some_and(|(tokens, _)| tokens >= CONTEXT_MAIN_TARGET_TOKENS) {
-        let (tokens, measured) = floor.expect("checked above");
+    if measured_floor.is_some_and(|tokens| tokens >= CONTEXT_REQUIREMENT_TOKENS) {
+        let tokens = measured_floor.expect("checked above");
         let (ceiling_tokens, ceiling_is_declared) =
             ceiling.map_or((None, false), |(value, declared)| (Some(value), declared));
         return ContextConclusion::satisfied_with(
             tokens,
-            measured,
+            true,
             ceiling_tokens,
             ceiling_is_declared,
         );
     }
-    // 未达标：有被拒上限就能给出实测区间。
-    if let Some((ceiling, ceiling_is_declared)) = ceiling {
+    // 只有上界位于门槛以下才能证明容量不足；跨越门槛的区间仍需补测。
+    if let Some((ceiling, ceiling_is_declared)) = ceiling
+        && (ceiling < CONTEXT_REQUIREMENT_TOKENS
+            || (ceiling == CONTEXT_REQUIREMENT_TOKENS && !ceiling_is_declared))
+    {
         let floor_tokens = floor.map(|(tokens, _)| tokens);
         return ContextConclusion::not_satisfied(floor_tokens, ceiling, ceiling_is_declared);
+    }
+    if floor.is_some_and(|(_, measured)| !measured) {
+        return ContextConclusion::indeterminate(
+            "容量探针缺少服务端 usage，按构造值估计不能证明达到 128000 Token",
+        );
     }
     // 没有被拒上限：按失败方式解释为什么无法判断。
     if let Some(target) = timed_out_at {
@@ -825,7 +838,7 @@ mod tests {
             (
                 248_000,
                 ProbeOutcome::Accepted {
-                    measured_tokens: None,
+                    measured_tokens: Some(248_000),
                 },
             ),
             (
@@ -842,7 +855,7 @@ mod tests {
         let sentence = conclusion_sentence(&conclusion);
         assert_eq!(
             sentence,
-            "经检测，上下文在248K-496K左右，满足智能体部署所需要的128K的要求（服务端未返回 usage，按构造值估计）。"
+            "经检测，上下文在248K-496K左右，满足智能体部署所需要的128K的要求。"
         );
     }
 
@@ -865,17 +878,65 @@ mod tests {
     }
 
     #[test]
-    fn conclude_marks_estimated_floor_when_usage_is_missing() {
+    fn conclude_cannot_certify_capacity_without_usage() {
         let conclusion = conclude(&[(
-            124_000,
+            256_000,
             ProbeOutcome::Accepted {
                 measured_tokens: None,
             },
         )]);
 
-        assert_eq!(conclusion.status, ContextStatus::Satisfied);
-        assert!(!conclusion.floor_is_measured);
-        assert!(conclusion_sentence(&conclusion).contains("按构造值估计"));
+        assert_eq!(conclusion.status, ContextStatus::Indeterminate);
+        assert!(conclusion_sentence(&conclusion).contains("缺少服务端 usage"));
+    }
+
+    #[test]
+    fn context_requirement_has_no_124k_tolerance() {
+        assert_eq!(CONTEXT_MAIN_TARGET_TOKENS, 128_000);
+        for tokens in [124_000, 126_431, 127_999, 128_000, 128_001] {
+            let conclusion = conclude(&[
+                (
+                    tokens,
+                    ProbeOutcome::Accepted {
+                        measured_tokens: Some(tokens),
+                    },
+                ),
+                (
+                    256_000,
+                    ProbeOutcome::RejectedTooLong {
+                        declared_limit: Some(tokens),
+                    },
+                ),
+            ]);
+            assert_eq!(
+                conclusion.status,
+                if tokens < 128_000 {
+                    ContextStatus::NotSatisfied
+                } else {
+                    ContextStatus::Satisfied
+                },
+                "{tokens}"
+            );
+        }
+    }
+
+    #[test]
+    fn interval_crossing_requirement_cannot_prove_failure_or_success() {
+        let conclusion = conclude(&[
+            (
+                124_000,
+                ProbeOutcome::Accepted {
+                    measured_tokens: Some(124_000),
+                },
+            ),
+            (
+                256_000,
+                ProbeOutcome::RejectedTooLong {
+                    declared_limit: Some(192_000),
+                },
+            ),
+        ]);
+        assert_eq!(conclusion.status, ContextStatus::Indeterminate);
     }
 
     #[test]

@@ -233,7 +233,8 @@ fn concurrency_level(request_id: &str) -> Option<usize> {
     let (concurrency, index) = suffix.split_once('-')?;
     let concurrency = concurrency.parse::<usize>().ok()?;
     let index = index.parse::<usize>().ok()?;
-    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0).then_some(concurrency)
+    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0 && index <= concurrency)
+        .then_some(concurrency)
 }
 
 pub fn batch_packets(

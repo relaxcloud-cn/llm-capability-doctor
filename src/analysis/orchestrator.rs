@@ -31,14 +31,13 @@ use crate::protocol::{AuthMode, Protocol};
 use crate::redaction::Redactor;
 use crate::terminal;
 
-pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v3";
-pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS";
+pub const SELF_ANALYSIS_SCHEMA_VERSION: &str = "llm-capability-doctor.self-analysis.v4";
+pub const SELF_ANALYSIS_PROVENANCE: &str = "TARGET_MODEL_SELF_ANALYSIS_WITH_EVIDENCE_RULES";
 const MAX_ANALYSIS_TRANSPORT_ATTEMPTS: usize = 3;
 const MAX_ANALYSIS_SCHEMA_REPAIRS: usize = 5;
 const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
     ["002", "004", "005", "006", "040", "041", "043", "047"];
 const MINIMUM_CONCURRENCY: usize = 4;
-const MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS: f64 = 30.0;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -118,6 +117,7 @@ struct SelfAnalysisArtifact {
     prompt_version: &'static str,
     provenance: &'static str,
     tests: Vec<AnalysisTestResult>,
+    requirement_levels: BTreeMap<&'static str, crate::catalog::RequirementLevel>,
     batches: Vec<BatchResult>,
     counts: AnalysisCounts,
     gateway_compatibility: GatewayCompatibility,
@@ -414,10 +414,18 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
 
     let tests = consolidate_report_results(tests);
     let evidence_degradations = collect_evidence_degradations(&evidence);
-    let tests = tests
+    let mut tests = tests
         .into_iter()
         .chain(degraded_test_results(&evidence.degraded_tests))
         .collect::<Vec<_>>();
+    let concurrency_waves = summarize_concurrency(&evidence);
+    let context_conclusion = summarize_context(&evidence);
+    apply_hard_evidence_rules(
+        &mut tests,
+        &evidence,
+        &context_conclusion,
+        &concurrency_waves,
+    );
     let counts = AnalysisCounts {
         pass: tests
             .iter()
@@ -434,8 +442,6 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
     };
     let collector_version = evidence.run["script_version"].clone();
     let evidence_schema_version = evidence.run["log_schema"].clone();
-    let concurrency_waves = summarize_concurrency(&evidence);
-    let context_conclusion = summarize_context(&evidence);
     let detected_protocol = settings.protocol.to_string();
     let gateway_compatibility = derive_gateway_compatibility(&detected_protocol, &tests);
     let mut source = evidence.source.clone();
@@ -456,6 +462,7 @@ async fn analyze_with_client_and_progress<C: AnalysisClient>(
         prompt_version: PROMPT_VERSION,
         provenance: SELF_ANALYSIS_PROVENANCE,
         tests,
+        requirement_levels: requirement_levels(),
         batches: batch_results,
         counts,
         gateway_compatibility,
@@ -716,6 +723,27 @@ fn consolidate_report_results(results: Vec<AnalysisTestResult>) -> Vec<AnalysisT
 }
 
 fn merge_report_results(mut results: Vec<AnalysisTestResult>) -> AnalysisTestResult {
+    if results
+        .first()
+        .is_some_and(|result| result.report_test_id == "057")
+        && let Some(index) = results
+            .iter()
+            .position(|result| result.test_id == "057-wave-4")
+    {
+        let mut primary = results.remove(index);
+        primary.test_id = "057".into();
+        for reference in results {
+            primary.limitations.push(format!(
+                "{}（仅性能参考）：{}，{}",
+                wave_label(&reference.test_id),
+                result_status(&reference),
+                result_reason(&reference)
+            ));
+            primary.observations.extend(reference.observations);
+            primary.evidence_refs.extend(reference.evidence_refs);
+        }
+        return primary;
+    }
     if results.len() == 1 {
         let mut result = results.pop().expect("one result exists");
         result.test_id = result.report_test_id.clone();
@@ -805,6 +833,13 @@ fn summarize_concurrency(evidence: &ParsedEvidence) -> Vec<ConcurrencyWave> {
     let mut requests_by_wave: std::collections::BTreeMap<usize, Vec<&ParsedRequest>> =
         std::collections::BTreeMap::new();
     for request in evidence.requests.values() {
+        if !evidence
+            .tests
+            .get("057")
+            .is_some_and(|test| test.request_refs.contains(&request.request_id))
+        {
+            continue;
+        }
         if let Some(concurrency) = concurrency_level(&request.request_id) {
             requests_by_wave
                 .entry(concurrency)
@@ -853,7 +888,8 @@ fn concurrency_level(request_id: &str) -> Option<usize> {
     let (concurrency, index) = suffix.split_once('-')?;
     let concurrency = concurrency.parse::<usize>().ok()?;
     let index = index.parse::<usize>().ok()?;
-    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0).then_some(concurrency)
+    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0 && index <= concurrency)
+        .then_some(concurrency)
 }
 
 /// 从证据日志还原上下文容量实测结论（与采集端共用同一套判定函数）。
@@ -861,6 +897,13 @@ fn summarize_context(evidence: &ParsedEvidence) -> ContextConclusion {
     // 同一目标可能因超时重试出现多条记录（-a1/-a2），保留最后一次尝试。
     let mut outcomes: BTreeMap<u64, ProbeOutcome> = BTreeMap::new();
     for request in evidence.requests.values() {
+        if !evidence
+            .tests
+            .get("018")
+            .is_some_and(|test| test.request_refs.contains(&request.request_id))
+        {
+            continue;
+        }
         if is_calibration_request(&request.request_id) {
             continue;
         }
@@ -906,7 +949,88 @@ fn concurrency_request_succeeded(request: &ParsedRequest) -> bool {
         .metadata
         .get("transport_outcome")
         .is_some_and(|outcome| matches!(outcome.as_str(), "completed_eof" | "protocol_terminated"));
-    http_success && transport_success && !request.response_body.trim().is_empty()
+    let protocol = protocol_from_wire_name(
+        request
+            .metadata
+            .get("protocol")
+            .map(String::as_str)
+            .unwrap_or(""),
+    );
+    http_success
+        && transport_success
+        && crate::protocol::matches_response(protocol, request.response_body.as_bytes())
+}
+
+fn requirement_levels() -> BTreeMap<&'static str, crate::catalog::RequirementLevel> {
+    crate::catalog::CATALOG
+        .iter()
+        .map(|test| (test.id, test.requirement_level()))
+        .collect()
+}
+
+fn apply_hard_evidence_rules(
+    tests: &mut [AnalysisTestResult],
+    evidence: &ParsedEvidence,
+    context: &ContextConclusion,
+    waves: &[ConcurrencyWave],
+) {
+    for result in tests
+        .iter_mut()
+        .filter(|result| matches!(result.test_id.as_str(), "018" | "057"))
+    {
+        if evidence
+            .degraded_tests
+            .iter()
+            .any(|test| test.id == result.test_id)
+        {
+            continue;
+        }
+        let (status, detail) = if result.test_id == "018" {
+            let status = match context.status {
+                ContextStatus::Satisfied => Some(ValidatedStatus::Pass),
+                ContextStatus::NotSatisfied => Some(ValidatedStatus::Fail),
+                ContextStatus::Indeterminate => None,
+            };
+            (status, conclusion_sentence(context))
+        } else {
+            let wave = waves
+                .iter()
+                .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY);
+            match wave {
+                Some(wave) if wave.failed > 0 => (
+                    Some(ValidatedStatus::Fail),
+                    format!(
+                        "4 并发要求 4/4 成功，实际 {}/{} 成功、{} 失败。",
+                        wave.succeeded, wave.total_requests, wave.failed
+                    ),
+                ),
+                Some(wave) if wave.total_requests == 4 && wave.succeeded == 4 => (
+                    Some(ValidatedStatus::Pass),
+                    "4 并发 4/4 成功；延迟及 8–32 并发仅作性能参考。".into(),
+                ),
+                _ => (None, "4 并发请求证据不完整，无法判定。".into()),
+            }
+        };
+        result.validated_status = status;
+        result.analysis_state = if status.is_some() {
+            AnalysisState::Available
+        } else {
+            AnalysisState::AnalysisUnavailable
+        };
+        result.decision_source = Some(DecisionSource::EvidenceRule);
+        result.failure_cause = (status == Some(ValidatedStatus::Fail)).then(|| detail.clone());
+        result.validation_notes.push(detail.clone());
+        if status.is_none() {
+            result.limitations.push(detail);
+        }
+        if let Some(test) = evidence.tests.get(&result.test_id) {
+            result.evidence_refs = test
+                .request_refs
+                .iter()
+                .map(|id| format!("request:{id}"))
+                .collect();
+        }
+    }
 }
 
 fn concurrency_failure_reason(request: &ParsedRequest) -> String {
@@ -928,6 +1052,17 @@ fn concurrency_failure_reason(request: &ParsedRequest) -> String {
     }
     if request.response_body.trim().is_empty() {
         reasons.push("response body empty".into());
+    } else {
+        let protocol = protocol_from_wire_name(
+            request
+                .metadata
+                .get("protocol")
+                .map(String::as_str)
+                .unwrap_or(""),
+        );
+        if !crate::protocol::matches_response(protocol, request.response_body.as_bytes()) {
+            reasons.push("响应协议无效或模型回复为空".into());
+        }
     }
     if !request.stderr.trim().is_empty() {
         reasons.push(format!(
@@ -966,6 +1101,7 @@ fn result_status(result: &AnalysisTestResult) -> &'static str {
 fn decision_source_label(source: Option<DecisionSource>) -> &'static str {
     match source {
         Some(DecisionSource::TargetModel) => "TARGET_MODEL",
+        Some(DecisionSource::EvidenceRule) => "EVIDENCE_RULE",
         None => "-",
     }
 }
@@ -1218,7 +1354,7 @@ fn verified_category_conclusion(category: &str) -> &'static str {
             "支持单工具、工具选择、参数校验、嵌套参数、并行调用、串行调用、工具结果关联、失败重试和大工具目录。"
         }
         "性能与稳定性" => {
-            "本轮首字节时间、完整响应耗时和并发响应指标均有有效观测；重复请求均成功，P50/P95 可计算，4-32 并发样本均返回有效响应，具体数值见检测明细。"
+            "本轮首字节时间、完整响应耗时均有有效观测；重复请求均成功，P50/P95 可计算，4 并发全部成功；8-32 并发与延迟仅作参考，具体数值见检测明细。"
         }
         "护栏与词汇" => {
             "中文和英文安全业务词场景均能按要求返回指定业务字段和值；该结论只覆盖本轮词汇与业务字段测试，不代表完整安全能力。"
@@ -1312,6 +1448,8 @@ fn render_overall_conclusion(artifact: &SelfAnalysisArtifact, output: &mut Strin
     output.push_str("## 关键检测项结论\n\n");
     output.push_str("| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n");
     render_minimum_model_requirements(artifact, output);
+    output.push('\n');
+    output.push_str("刚性 11 项，柔性 31 项。刚性项用于接入及部署门槛；柔性项影响质量与体验，不单独阻断使用。128K 按 128000 Token 判定；4 并发必须全部成功，延迟及更高并发仅作参考。\n\n");
 }
 
 fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &mut String) {
@@ -1337,7 +1475,7 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
         .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY)
     else {
         return (
-            "不通过",
+            "无法判断",
             "未采集到 4 并发结果，无法验证最低并发要求。".into(),
         );
     };
@@ -1348,32 +1486,26 @@ fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static
     let all_succeeded = wave.total_requests == MINIMUM_CONCURRENCY
         && wave.succeeded == MINIMUM_CONCURRENCY
         && wave.failed == 0;
-    let within_limit = wave
-        .average_response_time_seconds
-        .is_some_and(|seconds| seconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS);
-
-    if all_succeeded && within_limit {
+    if all_succeeded {
         return (
             "通过",
-            format!(
-                "4/4 成功，平均响应时间 {:.1} ms，不高于 30000 ms。",
-                average_milliseconds.expect("within_limit requires an average")
+            average_milliseconds.map_or_else(
+                || "4/4 成功；平均响应时间缺失，不影响通过。".into(),
+                |milliseconds| format!("4/4 成功，平均响应时间 {milliseconds:.1} ms（仅供参考）。"),
             ),
         );
     }
 
     let average_detail = average_milliseconds.map_or_else(
         || "平均响应时间缺失".into(),
-        |milliseconds| {
-            if milliseconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS * 1000.0 {
-                format!("平均响应时间 {:.1} ms，不高于 30000 ms", milliseconds)
-            } else {
-                format!("平均响应时间 {:.1} ms，超过 30000 ms", milliseconds)
-            }
-        },
+        |milliseconds| format!("平均响应时间 {milliseconds:.1} ms（仅供参考）"),
     );
     (
-        "不通过",
+        if wave.failed > 0 {
+            "不通过"
+        } else {
+            "无法判断"
+        },
         format!(
             "4 并发结果为 {}/{} 成功、{} 失败，{}。",
             wave.succeeded, wave.total_requests, wave.failed, average_detail
@@ -1467,7 +1599,8 @@ fn render_test_table(artifact: &SelfAnalysisArtifact, output: &mut String) {
         "## {} 项检测明细\n\n",
         crate::catalog::CATALOG.len()
     ));
-    output.push_str("| 编号 | 分类 | 检测项 | 结果 | 原因 |\n|---|---|---|---|---|\n");
+    output
+        .push_str("| 编号 | 分类 | 检测项 | 刚柔属性 | 结果 | 原因 |\n|---|---|---|---|---|---|\n");
     for test in crate::catalog::CATALOG {
         let result = result_for(artifact, test.id);
         let status = result.map(result_status).unwrap_or("ANALYSIS_UNAVAILABLE");
@@ -1476,10 +1609,11 @@ fn render_test_table(artifact: &SelfAnalysisArtifact, output: &mut String) {
             .unwrap_or_else(|| "分析不可用（结果缺失）".into());
         writeln!(
             output,
-            "| {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} |",
             markdown_cell(test.id),
             markdown_cell(test.category),
             markdown_cell(test.name),
+            test.requirement_level().label(),
             status,
             markdown_cell(&reason)
         )
@@ -1837,12 +1971,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 42);
+        // 通用 fixture 没有容量/并发探针，模型声称 PASS 不能补足证据。
+        assert_eq!(outcome.unavailable_count, 2);
+        assert_eq!(outcome.available_count, 40);
         assert_eq!(client.call_count(), batches.len() + 1);
         assert!(client.prompts()[1].contains("missing reviews"));
         let output = std::fs::read_to_string(&outcome.path).unwrap();
-        assert!(output.contains("llm-capability-doctor.self-analysis.v3"));
+        assert!(output.contains(SELF_ANALYSIS_SCHEMA_VERSION));
+        let artifact: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(artifact["requirementLevels"]["004"], "hard");
+        assert_eq!(artifact["requirementLevels"]["018"], "hard");
+        assert_eq!(artifact["requirementLevels"]["041"], "hard");
+        assert_eq!(artifact["requirementLevels"]["057"], "hard");
+        assert_eq!(artifact["requirementLevels"]["043"], "soft");
         assert!(output.contains(PROMPT_VERSION));
         assert!(output.contains("\"gatewayCompatibility\""));
         assert!(!output.contains("openCodexCompatibility"));
@@ -1852,7 +1993,7 @@ mod tests {
         assert!(!failed_curls.contains("========== FAILED TEST"));
         let markdown = std::fs::read_to_string(&outcome.markdown_path).unwrap();
         assert!(markdown.contains("## 能力分类检测结论"));
-        assert_eq!(markdown.matches("| PASS |").count(), 42);
+        assert_eq!(markdown.matches("| PASS |").count(), 40);
         assert!(!markdown.contains("secret-key"));
         drop(directory);
     }
@@ -1875,8 +2016,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 42);
+        assert_eq!(outcome.unavailable_count, 2);
+        assert_eq!(outcome.available_count, 40);
         assert_eq!(client.call_count(), batches.len() + 5);
         assert!(client.prompts()[5].contains("missing testId"));
     }
@@ -1897,7 +2038,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(outcome.unavailable_count, 2);
         assert_eq!(client.call_count(), batches.len() + 1);
         assert!(client.prompts()[1].contains("no protocol-native assistant content"));
     }
@@ -1918,8 +2059,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.unavailable_count, 0);
-        assert_eq!(outcome.available_count, 42);
+        assert_eq!(outcome.unavailable_count, 2);
+        assert_eq!(outcome.available_count, 40);
         assert_eq!(client.call_count(), batches.len() + 1);
     }
 
@@ -1945,7 +2086,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(outcome.unavailable_count, 0);
+        assert_eq!(outcome.unavailable_count, 2);
         assert_eq!(
             lines[0],
             format!(
@@ -1981,7 +2122,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(outcome.unavailable_count, batches[0].len());
+        assert_eq!(outcome.unavailable_count, batches[0].len() + 2);
         assert!(lines.contains(&"[自分析 01/11] 接口与协议 | 分析不可用".into()));
     }
 
@@ -2061,8 +2202,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(outcome.unavailable_count, batches[0].len());
-        assert_eq!(outcome.available_count, 42 - batches[0].len());
+        assert_eq!(outcome.unavailable_count, batches[0].len() + 2);
+        assert_eq!(outcome.available_count, 40 - batches[0].len());
         assert_eq!(client.call_count(), batches.len() + 2);
     }
 
@@ -2475,15 +2616,15 @@ mod tests {
             failures: Vec::new(),
         }];
         artifact.context_conclusion =
-            crate::context_capacity::ContextConclusion::satisfied_with(126_431, true, None, false);
+            crate::context_capacity::ContextConclusion::satisfied_with(128_000, true, None, false);
 
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
-        assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms，不高于 30000 ms"));
+        assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms（仅供参考）"));
         assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
-        assert!(overall.contains("经检测，上下文不低于126K，满足智能体部署所需要的128K的要求。"));
+        assert!(overall.contains("经检测，上下文不低于128K，满足智能体部署所需要的128K的要求。"));
     }
 
     #[test]
@@ -2496,7 +2637,7 @@ mod tests {
         );
         artifact.context_conclusion = crate::context_capacity::ContextConclusion::satisfied_with(
             248_000,
-            false,
+            true,
             Some(496_000),
             false,
         );
@@ -2505,7 +2646,9 @@ mod tests {
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
-        assert!(overall.contains("经检测，上下文在248K-496K左右，满足智能体部署所需要的128K的要求（服务端未返回 usage，按构造值估计）。"));
+        assert!(
+            overall.contains("经检测，上下文在248K-496K左右，满足智能体部署所需要的128K的要求。")
+        );
     }
 
     #[test]
@@ -2527,7 +2670,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_overall_conclusion_reports_unsatisfied_minimum_requirements() {
+    fn slow_successful_concurrency_passes_even_when_context_fails() {
         let mut artifact = markdown_fixture(
             crate::catalog::CATALOG
                 .iter()
@@ -2548,8 +2691,8 @@ mod tests {
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
-        assert!(overall.contains("| 模型最低并发要求（4 并发） | 不通过 |"));
-        assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms"));
+        assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
+        assert!(overall.contains("平均响应时间 30100.0 ms（仅供参考）"));
         assert!(overall.contains("| 模型最低上下文要求（128K） | 不通过 |"));
         assert!(
             overall.contains("经检测，上下文在62.1K-93K左右，不满足智能体部署所需要的128K的要求。")
@@ -2836,11 +2979,161 @@ mod tests {
 
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].test_id, "057");
-        assert_eq!(merged[0].validated_status, Some(ValidatedStatus::Fail));
-        assert_eq!(
-            merged[0].failure_cause.as_deref(),
-            Some("16 并发：16 个并发请求中有 1 个请求超时。")
+        assert_eq!(merged[0].validated_status, Some(ValidatedStatus::Pass));
+        assert!(merged[0].failure_cause.is_none());
+        assert!(
+            merged[0]
+                .limitations
+                .iter()
+                .any(|detail| detail.contains("16 并发（仅性能参考）") && detail.contains("FAIL"))
         );
+    }
+
+    #[tokio::test]
+    async fn four_concurrent_requests_require_four_valid_replies_despite_model_pass() {
+        let (_directory, settings, _) = fixture().await;
+        let mut evidence = read(
+            &settings.log_path,
+            &Redactor::new("secret-key", &settings.url),
+        )
+        .unwrap();
+        let template = evidence.requests["test-shared"].clone();
+        let refs = (1..=4)
+            .map(|index| format!("test-057-c4-{index}"))
+            .collect::<Vec<_>>();
+        evidence.tests.get_mut("057").unwrap().request_refs = refs.clone();
+        for id in &refs {
+            let mut request = template.clone();
+            request.request_id = id.clone();
+            request.response_body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.into();
+            request.metrics.insert("time_total".into(), "45".into());
+            evidence.requests.insert(id.clone(), request);
+        }
+        let context = ContextConclusion::indeterminate("no context probes");
+        let waves = summarize_concurrency(&evidence);
+        let mut results = vec![available_markdown_result(
+            "057",
+            CandidateStatus::Fail,
+            Some("模型误判"),
+        )];
+        apply_hard_evidence_rules(&mut results, &evidence, &context, &waves);
+        assert_eq!(results[0].validated_status, Some(ValidatedStatus::Pass));
+        assert_eq!(
+            results[0].decision_source,
+            Some(DecisionSource::EvidenceRule)
+        );
+
+        for failed_index in 0..4 {
+            for body in [
+                "not JSON",
+                r#"{"choices":[{"message":{"content":""}}]}"#,
+                r#"{"error":{"message":"failed"}}"#,
+            ] {
+                evidence
+                    .requests
+                    .get_mut(&refs[failed_index])
+                    .unwrap()
+                    .response_body = body.into();
+                let waves = summarize_concurrency(&evidence);
+                assert_eq!(waves[0].succeeded, 3);
+                assert_eq!(waves[0].failed, 1);
+                let mut results = vec![available_markdown_result(
+                    "057",
+                    CandidateStatus::Pass,
+                    None,
+                )];
+                apply_hard_evidence_rules(&mut results, &evidence, &context, &waves);
+                assert_eq!(results[0].validated_status, Some(ValidatedStatus::Fail));
+                assert_eq!(results[0].candidate_status, Some(CandidateStatus::Pass));
+                let mut artifact = markdown_fixture(results);
+                artifact.concurrency_waves = waves;
+                assert_eq!(minimum_concurrency_requirement(&artifact).0, "不通过");
+            }
+            evidence
+                .requests
+                .get_mut(&refs[failed_index])
+                .unwrap()
+                .response_body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.into();
+        }
+
+        evidence
+            .requests
+            .get_mut(&refs[0])
+            .unwrap()
+            .metadata
+            .insert("transport_outcome".into(), "timeout".into());
+        assert_eq!(summarize_concurrency(&evidence)[0].failed, 1);
+        evidence
+            .requests
+            .get_mut(&refs[0])
+            .unwrap()
+            .metadata
+            .insert("transport_outcome".into(), "completed_eof".into());
+        evidence
+            .requests
+            .get_mut(&refs[0])
+            .unwrap()
+            .metrics
+            .insert("http_status".into(), "500".into());
+        assert_eq!(summarize_concurrency(&evidence)[0].failed, 1);
+
+        evidence.requests.remove(&refs[0]);
+        let mut results = vec![available_markdown_result(
+            "057",
+            CandidateStatus::Pass,
+            None,
+        )];
+        apply_hard_evidence_rules(
+            &mut results,
+            &evidence,
+            &context,
+            &summarize_concurrency(&evidence),
+        );
+        assert_eq!(results[0].validated_status, None);
+    }
+
+    #[tokio::test]
+    async fn context_evidence_rule_overrides_model_pass_below_128k() {
+        let (_directory, settings, _) = fixture().await;
+        let evidence = read(
+            &settings.log_path,
+            &Redactor::new("secret-key", &settings.url),
+        )
+        .unwrap();
+        for tokens in [124_000, 127_999, 128_000] {
+            let context = crate::context_capacity::conclude(&[
+                (
+                    tokens,
+                    ProbeOutcome::Accepted {
+                        measured_tokens: Some(tokens),
+                    },
+                ),
+                (
+                    256_000,
+                    ProbeOutcome::RejectedTooLong {
+                        declared_limit: Some(tokens),
+                    },
+                ),
+            ]);
+            let mut results = vec![available_markdown_result(
+                "018",
+                CandidateStatus::Pass,
+                None,
+            )];
+            apply_hard_evidence_rules(&mut results, &evidence, &context, &[]);
+            assert_eq!(
+                results[0].validated_status,
+                Some(if tokens < 128_000 {
+                    ValidatedStatus::Fail
+                } else {
+                    ValidatedStatus::Pass
+                })
+            );
+            assert_eq!(
+                results[0].decision_source,
+                Some(DecisionSource::EvidenceRule)
+            );
+        }
     }
 
     #[test]
@@ -2896,6 +3189,7 @@ mod tests {
             prompt_version: PROMPT_VERSION,
             provenance: SELF_ANALYSIS_PROVENANCE,
             tests,
+            requirement_levels: requirement_levels(),
             batches: Vec::new(),
             counts: AnalysisCounts {
                 pass: 0,
@@ -2906,7 +3200,7 @@ mod tests {
             evidence_degradations: Vec::new(),
             concurrency_waves: Vec::new(),
             context_conclusion: crate::context_capacity::ContextConclusion::satisfied_with(
-                126_431,
+                128_000,
                 true,
                 Some(496_000),
                 false,

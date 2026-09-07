@@ -1,8 +1,36 @@
+use serde::Serialize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequirementLevel {
+    Hard,
+    Soft,
+}
+
+impl RequirementLevel {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Hard => "刚性",
+            Self::Soft => "柔性",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TestCase {
     pub id: &'static str,
     pub category: &'static str,
     pub name: &'static str,
+}
+
+impl TestCase {
+    pub fn requirement_level(&self) -> RequirementLevel {
+        match self.id {
+            "001" | "002" | "003" | "004" | "005" | "006" | "018" | "040" | "041" | "046"
+            | "057" => RequirementLevel::Hard,
+            _ => RequirementLevel::Soft,
+        }
+    }
 }
 
 macro_rules! test_case {
@@ -68,6 +96,8 @@ pub fn render() -> String {
         output.push_str(test.category);
         output.push('\t');
         output.push_str(test.name);
+        output.push('\t');
+        output.push_str(test.requirement_level().label());
         output.push('\n');
     }
     output
@@ -82,6 +112,23 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+
+    #[test]
+    fn catalog_has_eleven_hard_and_thirty_one_soft_checks() {
+        let hard: Vec<_> = CATALOG
+            .iter()
+            .filter(|test| test.requirement_level() == RequirementLevel::Hard)
+            .map(|test| test.id)
+            .collect();
+        assert_eq!(
+            hard,
+            [
+                "001", "002", "003", "004", "005", "006", "018", "040", "041", "046", "057"
+            ]
+        );
+        assert_eq!(CATALOG.len() - hard.len(), 31);
+        assert!(render().contains("004\t接口与协议\t同步生成\t刚性"));
+    }
 
     #[test]
     fn catalog_has_42_unique_checks_without_the_char_ladder() {

@@ -2,13 +2,13 @@ use serde_json::json;
 
 use super::packet::EvidencePacket;
 
-pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v5";
+pub const PROMPT_VERSION: &str = "model-doctor-self-analysis-prompt.v6";
 
 pub fn build_prompt(packets: &[EvidencePacket]) -> Result<String, serde_json::Error> {
     let payload = json!({
         "analysisProtocolVersion": PROMPT_VERSION,
         "rules": {
-            "status": "You are the sole decision maker for PASS or FAIL. Return PASS only when all observable evidence satisfies passCriteria; otherwise return FAIL.",
+            "status": "Propose PASS only when all observable evidence satisfies passCriteria; otherwise propose FAIL. Local evidence rules determine the final status of checks 018 and 057; preserve all observations and limitations for audit.",
             "evidence": "Use only allowedEvidenceRefs from the current packet.",
             "uncertainty": "Ambiguous, missing, malformed, or incomplete evidence is your decision to interpret and must be explained in limitations.",
             "diagnostics": "Transport, protocol, tool, and metric fields are observations, not authoritative verdicts.",

@@ -39,6 +39,7 @@ pub enum ValidatedStatus {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DecisionSource {
     TargetModel,
+    EvidenceRule,
 }
 
 #[derive(Clone, Debug, Serialize)]

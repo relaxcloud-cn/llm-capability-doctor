@@ -1294,10 +1294,10 @@ async fn context_capacity_probes_calibrate_density_then_double_upward() {
             &openai_completion_with_usage(10_000),
         ))],
         vec![ServerAction::Write(http_response(
-            &openai_completion_with_usage(124_000),
+            &openai_completion_with_usage(128_000),
         ))],
         vec![ServerAction::Write(http_response(
-            &openai_completion_with_usage(248_000),
+            &openai_completion_with_usage(256_000),
         ))],
         vec![ServerAction::Write(http_response_with_declared_length(
             "400 Bad Request",
@@ -1345,8 +1345,8 @@ async fn context_capacity_probes_calibrate_density_then_double_upward() {
     let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
     for id in [
         "test-018-calibration",
-        "test-018-probe-124000-a1",
-        "test-018-probe-248000-a1",
+        "test-018-probe-128000-a1",
+        "test-018-probe-256000-a1",
         "test-018-probe-496000-a1",
     ] {
         assert!(
@@ -1355,7 +1355,7 @@ async fn context_capacity_probes_calibrate_density_then_double_upward() {
         );
     }
     assert!(log.contains(
-        "request_refs: test-018-calibration,test-018-probe-124000-a1,test-018-probe-248000-a1,test-018-probe-496000-a1"
+        "request_refs: test-018-calibration,test-018-probe-128000-a1,test-018-probe-256000-a1,test-018-probe-496000-a1"
     ));
 }
 
@@ -1404,11 +1404,11 @@ async fn context_capacity_probes_bisect_downward_after_rejection() {
 
     let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
     for id in [
-        "test-018-probe-124000-a1",
-        "test-018-probe-67000-a1",
-        "test-018-probe-95500-a1",
-        "test-018-probe-81250-a1",
-        "test-018-probe-88375-a1",
+        "test-018-probe-128000-a1",
+        "test-018-probe-69000-a1",
+        "test-018-probe-97500-a1",
+        "test-018-probe-82250-a1",
+        "test-018-probe-89375-a1",
     ] {
         assert!(
             log.contains(&format!("========== REQUEST {id} BEGIN ==========")),
@@ -1493,7 +1493,7 @@ async fn context_capacity_stops_immediately_when_declared_limit_fails_the_bar() 
     let requests = server.recorded_requests().await;
     assert_eq!(requests.len(), 2, "calibration + rejected main probe only");
     let log = std::fs::read_to_string(temp.path().join("audit.log")).unwrap();
-    assert!(log.contains("========== REQUEST test-018-probe-124000-a1 BEGIN =========="));
+    assert!(log.contains("========== REQUEST test-018-probe-128000-a1 BEGIN =========="));
     assert!(!log.contains("test-018-probe-6"));
 }
 
