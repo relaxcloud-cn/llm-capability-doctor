@@ -52,13 +52,13 @@ fn default_cli_run_creates_self_analysis_artifacts() {
     assert!(markdown_path.exists());
     assert!(response.calls() > 0);
 
-    // Mock 不返回 usage，估计容量不能通过刚性门槛。
+    // 恢复旧逻辑：缺失 usage 时按构造值估计，并明确标注估计来源。
     let markdown = std::fs::read_to_string(&markdown_path).unwrap();
-    assert!(markdown.contains("| 模型最低上下文要求（128K） | 无法判断 |"));
-    assert!(markdown.contains("缺少服务端 usage"));
+    assert!(markdown.contains("| 模型最低上下文要求（128K） | 通过 |"));
+    assert!(markdown.contains("经检测，上下文不低于496K（服务端未返回 usage，按构造值估计），满足智能体部署所需要的128K的要求。"));
     assert!(markdown.contains("刚性 11 项，柔性 31 项"));
     let log = std::fs::read_to_string(&log_path).unwrap();
     assert!(log.contains("========== REQUEST test-018-calibration BEGIN =========="));
-    assert!(log.contains("========== REQUEST test-018-probe-128000-a1 BEGIN =========="));
+    assert!(log.contains("========== REQUEST test-018-probe-124000-a1 BEGIN =========="));
     assert!(log.contains("========== REQUEST test-018-probe-496000-a1 BEGIN =========="));
 }

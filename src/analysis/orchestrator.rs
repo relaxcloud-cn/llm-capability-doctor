@@ -38,6 +38,7 @@ const MAX_ANALYSIS_SCHEMA_REPAIRS: usize = 5;
 const GATEWAY_COMPATIBILITY_TEST_IDS: [&str; 8] =
     ["002", "004", "005", "006", "040", "041", "043", "047"];
 const MINIMUM_CONCURRENCY: usize = 4;
+const MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS: f64 = 30.0;
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -848,7 +849,7 @@ fn summarize_concurrency(evidence: &ParsedEvidence) -> Vec<ConcurrencyWave> {
         }
     }
 
-    [4, 8, 16, 32]
+    [4, 8, 16]
         .into_iter()
         .map(|concurrency| {
             let requests = requests_by_wave.remove(&concurrency).unwrap_or_default();
@@ -875,7 +876,7 @@ fn summarize_concurrency(evidence: &ParsedEvidence) -> Vec<ConcurrencyWave> {
                 total_requests: requests.len(),
                 succeeded,
                 failed: requests.len().saturating_sub(succeeded),
-                average_response_time_seconds: (!times.is_empty())
+                average_response_time_seconds: (!times.is_empty() && times.len() == requests.len())
                     .then(|| times.iter().sum::<f64>() / times.len() as f64),
                 failures,
             }
@@ -888,8 +889,7 @@ fn concurrency_level(request_id: &str) -> Option<usize> {
     let (concurrency, index) = suffix.split_once('-')?;
     let concurrency = concurrency.parse::<usize>().ok()?;
     let index = index.parse::<usize>().ok()?;
-    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0 && index <= concurrency)
-        .then_some(concurrency)
+    (matches!(concurrency, 4 | 8 | 16) && index > 0 && index <= concurrency).then_some(concurrency)
 }
 
 /// 从证据日志还原上下文容量实测结论（与采集端共用同一套判定函数）。
@@ -993,23 +993,7 @@ fn apply_hard_evidence_rules(
             };
             (status, conclusion_sentence(context))
         } else {
-            let wave = waves
-                .iter()
-                .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY);
-            match wave {
-                Some(wave) if wave.failed > 0 => (
-                    Some(ValidatedStatus::Fail),
-                    format!(
-                        "4 并发要求 4/4 成功，实际 {}/{} 成功、{} 失败。",
-                        wave.succeeded, wave.total_requests, wave.failed
-                    ),
-                ),
-                Some(wave) if wave.total_requests == 4 && wave.succeeded == 4 => (
-                    Some(ValidatedStatus::Pass),
-                    "4 并发 4/4 成功；延迟及 8–32 并发仅作性能参考。".into(),
-                ),
-                _ => (None, "4 并发请求证据不完整，无法判定。".into()),
-            }
+            evaluate_minimum_concurrency(waves)
         };
         result.validated_status = status;
         result.analysis_state = if status.is_some() {
@@ -1354,7 +1338,7 @@ fn verified_category_conclusion(category: &str) -> &'static str {
             "支持单工具、工具选择、参数校验、嵌套参数、并行调用、串行调用、工具结果关联、失败重试和大工具目录。"
         }
         "性能与稳定性" => {
-            "本轮首字节时间、完整响应耗时均有有效观测；重复请求均成功，P50/P95 可计算，4 并发全部成功；8-32 并发与延迟仅作参考，具体数值见检测明细。"
+            "本轮首字节时间、完整响应耗时均有有效观测；重复请求均成功，P50/P95 可计算，4 并发全部成功且平均响应时间不超过 30 秒；8、16 并发仅作参考，具体失败数与平均时间见检测明细。"
         }
         "护栏与词汇" => {
             "中文和英文安全业务词场景均能按要求返回指定业务字段和值；该结论只覆盖本轮词汇与业务字段测试，不代表完整安全能力。"
@@ -1449,7 +1433,7 @@ fn render_overall_conclusion(artifact: &SelfAnalysisArtifact, output: &mut Strin
     output.push_str("| 检测项 | 检测结果 | 说明 |\n|---|---|---|\n");
     render_minimum_model_requirements(artifact, output);
     output.push('\n');
-    output.push_str("刚性 11 项，柔性 31 项。刚性项用于接入及部署门槛；柔性项影响质量与体验，不单独阻断使用。128K 按 128000 Token 判定；4 并发必须全部成功，延迟及更高并发仅作参考。\n\n");
+    output.push_str("刚性 11 项，柔性 31 项。刚性项用于接入及部署门槛；柔性项影响质量与体验，不单独阻断使用。上下文沿用 124000 Token 的通过阈值，为 128K 要求保留余量；4 并发必须全部成功且平均响应时间不超过 30 秒，8、16 并发仅作参考。\n\n");
 }
 
 fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &mut String) {
@@ -1469,48 +1453,57 @@ fn render_minimum_model_requirements(artifact: &SelfAnalysisArtifact, output: &m
 }
 
 fn minimum_concurrency_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
-    let Some(wave) = artifact
-        .concurrency_waves
+    let (status, detail) = evaluate_minimum_concurrency(&artifact.concurrency_waves);
+    let label = match status {
+        Some(ValidatedStatus::Pass) => "通过",
+        Some(ValidatedStatus::Fail) => "不通过",
+        None => "无法判断",
+    };
+    (label, detail)
+}
+
+fn evaluate_minimum_concurrency(waves: &[ConcurrencyWave]) -> (Option<ValidatedStatus>, String) {
+    let Some(wave) = waves
         .iter()
         .find(|wave| wave.concurrency == MINIMUM_CONCURRENCY)
     else {
-        return (
-            "无法判断",
-            "未采集到 4 并发结果，无法验证最低并发要求。".into(),
-        );
+        return (None, "未采集到 4 并发结果，无法验证最低并发要求。".into());
     };
-
-    let average_milliseconds = wave
+    let average = wave
         .average_response_time_seconds
-        .map(|seconds| seconds * 1000.0);
-    let all_succeeded = wave.total_requests == MINIMUM_CONCURRENCY
-        && wave.succeeded == MINIMUM_CONCURRENCY
-        && wave.failed == 0;
-    if all_succeeded {
-        return (
-            "通过",
-            average_milliseconds.map_or_else(
-                || "4/4 成功；平均响应时间缺失，不影响通过。".into(),
-                |milliseconds| format!("4/4 成功，平均响应时间 {milliseconds:.1} ms（仅供参考）。"),
-            ),
-        );
-    }
-
-    let average_detail = average_milliseconds.map_or_else(
-        || "平均响应时间缺失".into(),
-        |milliseconds| format!("平均响应时间 {milliseconds:.1} ms（仅供参考）"),
-    );
-    (
-        if wave.failed > 0 {
-            "不通过"
-        } else {
-            "无法判断"
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0);
+    let average_detail = average.map_or_else(
+        || "平均响应时间缺失或无效，无法验证 30 秒门槛".into(),
+        |seconds| {
+            format!(
+                "平均响应时间 {:.1} ms，{} 30000 ms（30 秒）",
+                seconds * 1000.0,
+                if seconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS {
+                    "不超过"
+                } else {
+                    "超过"
+                }
+            )
         },
-        format!(
-            "4 并发结果为 {}/{} 成功、{} 失败，{}。",
-            wave.succeeded, wave.total_requests, wave.failed, average_detail
-        ),
-    )
+    );
+    let detail = format!(
+        "4 并发结果为 {}/{} 成功、{} 失败，{}。",
+        wave.succeeded, wave.total_requests, wave.failed, average_detail
+    );
+    let status = if wave.failed > 0 {
+        Some(ValidatedStatus::Fail)
+    } else if wave.total_requests != MINIMUM_CONCURRENCY || wave.succeeded != MINIMUM_CONCURRENCY {
+        None
+    } else {
+        average.map(|seconds| {
+            if seconds <= MINIMUM_CONCURRENCY_MAX_AVERAGE_SECONDS {
+                ValidatedStatus::Pass
+            } else {
+                ValidatedStatus::Fail
+            }
+        })
+    };
+    (status, detail)
 }
 
 fn minimum_context_requirement(artifact: &SelfAnalysisArtifact) -> (&'static str, String) {
@@ -2622,7 +2615,9 @@ mod tests {
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
         assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
-        assert!(overall.contains("4/4 成功，平均响应时间 1200.0 ms（仅供参考）"));
+        assert!(
+            overall.contains("4/4 成功、0 失败，平均响应时间 1200.0 ms，不超过 30000 ms（30 秒）")
+        );
         assert!(overall.contains("| 模型最低上下文要求（128K） | 通过 |"));
         assert!(overall.contains("经检测，上下文不低于128K，满足智能体部署所需要的128K的要求。"));
     }
@@ -2670,7 +2665,7 @@ mod tests {
     }
 
     #[test]
-    fn slow_successful_concurrency_passes_even_when_context_fails() {
+    fn slow_successful_concurrency_fails_the_thirty_second_requirement() {
         let mut artifact = markdown_fixture(
             crate::catalog::CATALOG
                 .iter()
@@ -2691,8 +2686,8 @@ mod tests {
         let markdown = render_markdown(&artifact);
         let overall = markdown.split("## 能力分类检测结论").next().unwrap();
 
-        assert!(overall.contains("| 模型最低并发要求（4 并发） | 通过 |"));
-        assert!(overall.contains("平均响应时间 30100.0 ms（仅供参考）"));
+        assert!(overall.contains("| 模型最低并发要求（4 并发） | 不通过 |"));
+        assert!(overall.contains("平均响应时间 30100.0 ms，超过 30000 ms（30 秒）"));
         assert!(overall.contains("| 模型最低上下文要求（128K） | 不通过 |"));
         assert!(
             overall.contains("经检测，上下文在62.1K-93K左右，不满足智能体部署所需要的128K的要求。")
@@ -2811,13 +2806,13 @@ mod tests {
                 failures: Vec::new(),
             },
             ConcurrencyWave {
-                concurrency: 32,
-                total_requests: 32,
-                succeeded: 31,
+                concurrency: 16,
+                total_requests: 16,
+                succeeded: 15,
                 failed: 1,
                 average_response_time_seconds: None,
                 failures: vec![ConcurrencyFailure {
-                    request_id: "test-057-c32-9".into(),
+                    request_id: "test-057-c16-9".into(),
                     error: "timeout".into(),
                 }],
             },
@@ -2829,10 +2824,10 @@ mod tests {
         assert!(markdown.contains("| 4 | 4 | 4 | 0 | 420.0 ms |"));
         assert!(markdown.contains("| 8 | 8 | 7 | 1 | 880.0 ms |"));
         assert!(markdown.contains("| 16 | 16 | 16 | 0 | 1240.0 ms |"));
-        assert!(markdown.contains("| 32 | 32 | 31 | 1 | - |"));
+        assert!(markdown.contains("| 16 | 16 | 15 | 1 | - |"));
         assert!(!markdown.contains("失败请求："));
         assert!(!markdown.contains("request_id=test-057-c8-3"));
-        assert!(!markdown.contains("request_id=test-057-c32-9"));
+        assert!(!markdown.contains("request_id=test-057-c16-9"));
         assert!(!markdown.contains("HTTP 500: upstream unavailable"));
         assert!(!markdown.contains("timeout"));
     }
@@ -2955,7 +2950,7 @@ mod tests {
 
     #[test]
     fn concurrency_wave_results_merge_into_one_report_item() {
-        let mut wave_results = [4, 8, 16, 32]
+        let mut wave_results = [4, 8, 16]
             .into_iter()
             .map(|concurrency| {
                 let mut result = available_markdown_result(
@@ -3002,15 +2997,19 @@ mod tests {
             .map(|index| format!("test-057-c4-{index}"))
             .collect::<Vec<_>>();
         evidence.tests.get_mut("057").unwrap().request_refs = refs.clone();
-        for id in &refs {
+        for (id, seconds) in refs.iter().zip([10, 20, 30, 60]) {
             let mut request = template.clone();
             request.request_id = id.clone();
             request.response_body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.into();
-            request.metrics.insert("time_total".into(), "45".into());
+            request
+                .metrics
+                .insert("time_total".into(), seconds.to_string());
             evidence.requests.insert(id.clone(), request);
         }
         let context = ContextConclusion::indeterminate("no context probes");
         let waves = summarize_concurrency(&evidence);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0].average_response_time_seconds, Some(30.0));
         let mut results = vec![available_markdown_result(
             "057",
             CandidateStatus::Fail,
@@ -3090,17 +3089,27 @@ mod tests {
             &summarize_concurrency(&evidence),
         );
         assert_eq!(results[0].validated_status, None);
+
+        let mut restored = template;
+        restored.request_id = refs[0].clone();
+        restored.response_body = r#"{"choices":[{"message":{"content":"ok"}}]}"#.into();
+        restored.metrics.remove("time_total");
+        evidence.requests.insert(refs[0].clone(), restored);
+        let waves = summarize_concurrency(&evidence);
+        assert_eq!(waves[0].succeeded, 4);
+        assert_eq!(waves[0].average_response_time_seconds, None);
+        assert_eq!(evaluate_minimum_concurrency(&waves).0, None);
     }
 
     #[tokio::test]
-    async fn context_evidence_rule_overrides_model_pass_below_128k() {
+    async fn context_evidence_rule_preserves_124k_threshold() {
         let (_directory, settings, _) = fixture().await;
         let evidence = read(
             &settings.log_path,
             &Redactor::new("secret-key", &settings.url),
         )
         .unwrap();
-        for tokens in [124_000, 127_999, 128_000] {
+        for tokens in [123_999, 124_000, 127_999, 128_000] {
             let context = crate::context_capacity::conclude(&[
                 (
                     tokens,
@@ -3123,7 +3132,7 @@ mod tests {
             apply_hard_evidence_rules(&mut results, &evidence, &context, &[]);
             assert_eq!(
                 results[0].validated_status,
-                Some(if tokens < 128_000 {
+                Some(if tokens < 124_000 {
                     ValidatedStatus::Fail
                 } else {
                     ValidatedStatus::Pass
@@ -3132,6 +3141,70 @@ mod tests {
             assert_eq!(
                 results[0].decision_source,
                 Some(DecisionSource::EvidenceRule)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrency_gate_and_markdown_share_the_thirty_second_boundary() {
+        let (_directory, settings, _) = fixture().await;
+        let evidence = read(
+            &settings.log_path,
+            &Redactor::new("secret-key", &settings.url),
+        )
+        .unwrap();
+        let context = ContextConclusion::indeterminate("no context probes");
+        for (average, expected) in [
+            (Some(29.999), Some(ValidatedStatus::Pass)),
+            (Some(30.0), Some(ValidatedStatus::Pass)),
+            (Some(30.001), Some(ValidatedStatus::Fail)),
+            (Some(45.0), Some(ValidatedStatus::Fail)),
+            (None, None),
+            (Some(f64::NAN), None),
+            (Some(f64::INFINITY), None),
+        ] {
+            let waves = vec![
+                ConcurrencyWave {
+                    concurrency: 4,
+                    total_requests: 4,
+                    succeeded: 4,
+                    failed: 0,
+                    average_response_time_seconds: average,
+                    failures: Vec::new(),
+                },
+                ConcurrencyWave {
+                    concurrency: 8,
+                    total_requests: 8,
+                    succeeded: 0,
+                    failed: 8,
+                    average_response_time_seconds: Some(60.0),
+                    failures: Vec::new(),
+                },
+                ConcurrencyWave {
+                    concurrency: 16,
+                    total_requests: 16,
+                    succeeded: 0,
+                    failed: 16,
+                    average_response_time_seconds: Some(90.0),
+                    failures: Vec::new(),
+                },
+            ];
+            let mut results = vec![available_markdown_result(
+                "057",
+                CandidateStatus::Pass,
+                None,
+            )];
+            apply_hard_evidence_rules(&mut results, &evidence, &context, &waves);
+            assert_eq!(results[0].validated_status, expected);
+            let mut artifact = markdown_fixture(results);
+            artifact.concurrency_waves = waves;
+            assert_eq!(
+                minimum_concurrency_requirement(&artifact).0,
+                match expected {
+                    Some(ValidatedStatus::Pass) => "通过",
+                    Some(ValidatedStatus::Fail) => "不通过",
+                    None => "无法判断",
+                }
             );
         }
     }

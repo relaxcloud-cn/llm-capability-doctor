@@ -144,7 +144,7 @@ async fn build_concurrency_packets(
         .get("057")
         .ok_or_else(|| PacketError::UnknownTest("057".into()))?;
     let mut packets = Vec::new();
-    for concurrency in [4, 8, 16, 32] {
+    for concurrency in [4, 8, 16] {
         let request_refs = test
             .request_refs
             .iter()
@@ -233,8 +233,7 @@ fn concurrency_level(request_id: &str) -> Option<usize> {
     let (concurrency, index) = suffix.split_once('-')?;
     let concurrency = concurrency.parse::<usize>().ok()?;
     let index = index.parse::<usize>().ok()?;
-    (matches!(concurrency, 4 | 8 | 16 | 32) && index > 0 && index <= concurrency)
-        .then_some(concurrency)
+    (matches!(concurrency, 4 | 8 | 16) && index > 0 && index <= concurrency).then_some(concurrency)
 }
 
 pub fn batch_packets(
@@ -522,11 +521,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrency_check_is_split_into_four_wave_packets() {
+    async fn concurrency_check_is_split_into_three_wave_packets() {
         let mut parsed = parsed_fixture_with_two_requests();
         parsed.requests.clear();
         let mut request_refs = Vec::new();
-        for concurrency in [4, 8, 16, 32] {
+        for concurrency in [4, 8, 16] {
             for index in 1..=concurrency {
                 let request_id = format!("test-057-c{concurrency}-{index}");
                 parsed.requests.insert(
@@ -540,7 +539,7 @@ mod tests {
             "057".into(),
             ParsedTest {
                 id: "057".into(),
-                name: "4-32 并发响应时间".into(),
+                name: "4/8/16 并发响应时间".into(),
                 category: "性能与稳定性".into(),
                 request_refs,
             },
@@ -552,20 +551,20 @@ mod tests {
             .filter(|packet| packet.report_test_id == "057")
             .collect::<Vec<_>>();
 
-        assert_eq!(waves.len(), 4);
+        assert_eq!(waves.len(), 3);
         assert_eq!(
             waves
                 .iter()
                 .map(|packet| packet.requests.len())
                 .collect::<Vec<_>>(),
-            [4, 8, 16, 32]
+            [4, 8, 16]
         );
         assert_eq!(
             waves
                 .iter()
                 .map(|packet| packet.test_id.as_str())
                 .collect::<Vec<_>>(),
-            ["057-wave-4", "057-wave-8", "057-wave-16", "057-wave-32"]
+            ["057-wave-4", "057-wave-8", "057-wave-16"]
         );
         assert!(waves.iter().all(|packet| {
             packet
@@ -580,7 +579,7 @@ mod tests {
         let mut parsed = parsed_fixture_with_two_requests();
         parsed.requests.clear();
         let mut request_refs = Vec::new();
-        for concurrency in [4, 8, 16, 32] {
+        for concurrency in [4, 8, 16] {
             for index in 1..=concurrency {
                 let request_id = format!("test-057-c{concurrency}-{index}");
                 parsed
@@ -593,7 +592,7 @@ mod tests {
             "057".into(),
             ParsedTest {
                 id: "057".into(),
-                name: "4-32 并发响应时间".into(),
+                name: "4/8/16 并发响应时间".into(),
                 category: "性能与稳定性".into(),
                 request_refs,
             },
@@ -601,18 +600,13 @@ mod tests {
 
         let packets = build_concurrency_packets(&parsed).await.unwrap();
 
-        assert_eq!(packets.len(), 4);
+        assert_eq!(packets.len(), 3);
         assert_eq!(
             packets
                 .iter()
                 .map(|packet| (packet.test_id.as_str(), packet.requests.len()))
                 .collect::<Vec<_>>(),
-            [
-                ("057-wave-4", 4),
-                ("057-wave-8", 8),
-                ("057-wave-16", 16),
-                ("057-wave-32", 32),
-            ]
+            [("057-wave-4", 4), ("057-wave-8", 8), ("057-wave-16", 16),]
         );
         assert!(packets.iter().all(|packet| packet.report_test_id == "057"));
     }

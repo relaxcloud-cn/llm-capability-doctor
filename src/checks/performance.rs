@@ -35,7 +35,7 @@ pub(super) fn plan(id: &str, context: &PlanContext<'_>) -> Result<CheckPlan, Che
             }
         }
         "057" => {
-            let groups = [4_usize, 8, 16, 32]
+            let groups = [4_usize, 8, 16]
                 .into_iter()
                 .map(|concurrency| {
                     let requests = (1..=concurrency)
@@ -89,8 +89,8 @@ mod tests {
         };
 
         let plan = plan("057", &context).expect("057 plan");
-        assert_eq!(plan.groups.len(), 4);
-        for (group, expected_concurrency) in plan.groups.iter().zip([4, 8, 16, 32]) {
+        assert_eq!(plan.groups.len(), 3);
+        for (group, expected_concurrency) in plan.groups.iter().zip([4, 8, 16]) {
             assert!(
                 matches!(group, RequestGroup::Concurrent(requests) if requests.len() == expected_concurrency)
             );
@@ -101,7 +101,7 @@ mod tests {
             .flat_map(RequestGroup::requests)
             .collect::<Vec<_>>();
 
-        assert_eq!(requests.len(), 60);
+        assert_eq!(requests.len(), 28);
         for request in requests {
             let prompt = request.body.json()["messages"][0]["content"]
                 .as_str()
