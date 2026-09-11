@@ -1,14 +1,17 @@
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::BTreeSet;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
-    AgentEvent, AgentEventKind, AgentExecutionInput, AgentObservationFacts, AgentRuntime,
-    ExecutionOrigin, assess_execution, build_report_for_record, fixed_agent_scenarios,
+    AgentEvent, AgentEventKind, AgentExecutionInput, AgentObservationFacts, AgentOutcome,
+    AgentRuntime, AgentScenarioSpec, AgentTool, ExecutionOrigin, PermissionDecision,
+    PermissionEffect, PermissionEvent, assess_execution, build_report_for_record,
+    fixed_agent_scenarios,
 };
 use crate::baseline::{
     ActualSnapshot, ActualSource, BaselineScenario,
@@ -539,58 +542,9 @@ impl LiveExecutor {
         let mut attempts = Vec::new();
         let mut evidence = Vec::new();
         for spec in fixed_agent_scenarios() {
-            let request = ChatCompletionsRequest {
-                module_id: "agent".into(),
-                prompt: format!(
-                    "{}\n工作区：{}\n请按任务完成并在最后说明结果。",
-                    spec.prompt, spec.workspace.root
-                ),
-                max_tokens: 512,
-                stream: false,
-            };
-            let response = self.transport.send(request.clone());
-            let text = completion_text(response.parsed.as_ref());
-            let valid = response.error.is_none()
-                && response
-                    .status
-                    .is_some_and(|status| (200..300).contains(&status))
-                && text.is_some();
-            let execution = if valid {
-                assess_execution(AgentExecutionInput {
-                    sample_id: spec.workspace.task_id.clone(),
-                    scenario: spec.scenario,
-                    attempt_no: 1,
-                    attempt_kind: crate::agent::AgentAttemptKind::Initial,
-                    origin: ExecutionOrigin::RealOmp,
-                    facts: AgentObservationFacts::default(),
-                    permission_events: Vec::new(),
-                    events: vec![AgentEvent {
-                        id: format!("{}-assistant", spec.workspace.task_id),
-                        kind: AgentEventKind::AssistantMessage,
-                        sequence: 1,
-                        summary: text.clone().unwrap_or_default(),
-                        path: None,
-                        operation: None,
-                        incident_id: None,
-                        evidence_refs: Vec::new(),
-                    }],
-                    artifact: None,
-                    final_message: text,
-                    evidence_refs: Vec::new(),
-                })
-            } else {
-                crate::agent::invalid_execution(
-                    spec.workspace.task_id.clone(),
-                    spec.scenario,
-                    1,
-                    crate::agent::AgentAttemptKind::Initial,
-                    ExecutionOrigin::RealOmp,
-                    "真实 Agent 请求无效",
-                    Vec::new(),
-                )
-            };
+            let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
             attempts.push(execution);
-            evidence.push(json!({"sample_id": spec.workspace.task_id, "payload": self.transport.evidence_payload(&request, &response)}));
+            evidence.push(turn_evidence);
         }
         let report = build_report_for_record(
             record,
@@ -603,7 +557,228 @@ impl LiveExecutor {
             attempts,
         )
         .ok();
-        ModuleRunResult { state: ModuleResultState::Inconclusive, reason: Some("已执行 10 个 Agent 固定场景；缺失工具调用协议时检查保持 inconclusive，不伪造交付通过".into()), evidence_kind: "real_agent_report".into(), evidence_summary: format!("Agent 场景 10 个，报告 {}", if report.is_some() { "已生成" } else { "生成失败" }), evidence_payload: json!({"version": crate::agent::AGENT_VERSION, "planned_scenarios": 10, "executed_scenarios": 10, "report": report, "evidence": evidence}) }
+        let state = report
+            .as_ref()
+            .map(|value| {
+                if value
+                    .samples
+                    .iter()
+                    .any(|sample| sample.outcome == AgentOutcome::Fail)
+                {
+                    ModuleResultState::Fail
+                } else if value.samples.iter().all(|sample| {
+                    matches!(
+                        sample.outcome,
+                        AgentOutcome::Pass | AgentOutcome::NotApplicable
+                    )
+                }) {
+                    ModuleResultState::Pass
+                } else {
+                    ModuleResultState::Inconclusive
+                }
+            })
+            .unwrap_or(ModuleResultState::Inconclusive);
+        ModuleRunResult {
+            state,
+            reason: Some(
+                "已执行 10 个 Agent 固定场景；工具能力、工作区事实和终态均按真实证据判定".into(),
+            ),
+            evidence_kind: "real_agent_report".into(),
+            evidence_summary: format!(
+                "Agent 场景 10 个，报告 {}",
+                if report.is_some() {
+                    "已生成"
+                } else {
+                    "生成失败"
+                }
+            ),
+            evidence_payload: json!({"version": crate::agent::AGENT_VERSION, "planned_scenarios": 10, "executed_scenarios": 10, "report": report, "evidence": evidence}),
+        }
+    }
+
+    fn execute_agent_scenario(
+        &mut self,
+        spec: &AgentScenarioSpec,
+    ) -> (crate::agent::AgentExecution, Value) {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": format!(
+                "{}\n工作区：{}\n请使用声明工具完成任务，目标产物路径为 {}，完成后用最终消息说明结果。",
+                spec.prompt, spec.workspace.root, spec.expected_artifact.path
+            )
+        })];
+        let tools = agent_tool_definitions(spec);
+        let mut files = spec
+            .workspace
+            .initial_files
+            .iter()
+            .map(|file| (file.path.clone(), file.content.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut events = Vec::new();
+        let mut permission_events = Vec::new();
+        let mut evidence = Vec::new();
+        let mut final_message = None;
+        let mut saw_tool = false;
+        let mut saw_tool_return = false;
+        let mut valid_arguments = true;
+        let mut permission_respected = true;
+        let mut tool_failure = false;
+        let mut multi_turn = false;
+        let mut sequence = 0;
+
+        for _ in 0..6 {
+            let turn = self
+                .transport
+                .send_agent_turn(messages.clone(), tools.clone());
+            evidence.push(json!({
+                "messages": messages,
+                "tools": tools,
+                "response": turn.response.parsed.clone().unwrap_or_else(|| Value::String(turn.response.body.clone())),
+                "status": turn.response.status,
+                "elapsed_ms": turn.response.elapsed_ms,
+                "attempts": turn.response.attempts,
+            }));
+            if turn.response.error.is_some()
+                || !turn
+                    .response
+                    .status
+                    .is_some_and(|status| (200..300).contains(&status))
+            {
+                let execution = crate::agent::invalid_execution(
+                    spec.workspace.task_id.clone(),
+                    spec.scenario,
+                    1,
+                    crate::agent::AgentAttemptKind::Initial,
+                    ExecutionOrigin::RealOmp,
+                    "真实 Agent 工具回合无效；服务未提供可用的闭环响应",
+                    vec![format!("agent-{}-transport", spec.workspace.task_id)],
+                );
+                return (
+                    execution,
+                    json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
+                );
+            }
+            let Some(message) = turn.message else {
+                let execution = crate::agent::invalid_execution(
+                    spec.workspace.task_id.clone(),
+                    spec.scenario,
+                    1,
+                    crate::agent::AgentAttemptKind::Initial,
+                    ExecutionOrigin::RealOmp,
+                    "响应缺少 assistant message，无法判定 Agent 终态",
+                    vec![format!("agent-{}-protocol", spec.workspace.task_id)],
+                );
+                return (
+                    execution,
+                    json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
+                );
+            };
+            messages.push(message.clone());
+            if turn.tool_calls.is_empty() {
+                final_message = turn.text.filter(|text| !text.trim().is_empty());
+                break;
+            }
+            saw_tool = true;
+            multi_turn = true;
+            for call in turn.tool_calls {
+                sequence += 1;
+                let call_id = call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool-call")
+                    .to_owned();
+                let function = call.get("function").cloned().unwrap_or_default();
+                let name = function
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let arguments = function
+                    .get("arguments")
+                    .and_then(Value::as_str)
+                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                    .unwrap_or(Value::Null);
+                let (result, valid, allowed) =
+                    apply_agent_tool(spec, name, &arguments, &mut files, &mut permission_events);
+                valid_arguments &= valid;
+                permission_respected &= allowed;
+                tool_failure |= result.get("ok") == Some(&Value::Bool(false));
+                events.push(AgentEvent {
+                    id: format!("{}-call-{sequence}", spec.workspace.task_id),
+                    kind: AgentEventKind::ToolCall,
+                    sequence,
+                    summary: format!("{name} {arguments}"),
+                    path: arguments
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    operation: Some(name.to_owned()),
+                    incident_id: None,
+                    evidence_refs: vec![format!("agent-{}-turn", spec.workspace.task_id)],
+                });
+                sequence += 1;
+                events.push(AgentEvent {
+                    id: format!("{}-return-{sequence}", spec.workspace.task_id),
+                    kind: AgentEventKind::ToolReturn,
+                    sequence,
+                    summary: result.to_string(),
+                    path: arguments
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    operation: Some(name.to_owned()),
+                    incident_id: None,
+                    evidence_refs: vec![format!("agent-{}-turn", spec.workspace.task_id)],
+                });
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": result.to_string(),
+                }));
+                saw_tool_return = true;
+            }
+        }
+
+        let actual_content = files.get(&spec.expected_artifact.path);
+        let artifact = Some(crate::agent::ArtifactObservation {
+            path: spec.expected_artifact.path.clone(),
+            exists: actual_content.is_some(),
+            content_digest: actual_content.map(|content| digest_text(content)),
+            content_matches: actual_content
+                .map(|content| content == &spec.expected_artifact.content),
+            evidence_refs: vec![format!("agent-{}-workspace", spec.workspace.task_id)],
+        });
+        let facts = AgentObservationFacts {
+            task_rules_followed: Some(permission_respected && valid_arguments),
+            tool_and_arguments_correct: saw_tool.then_some(valid_arguments),
+            tool_return_used: saw_tool.then_some(saw_tool_return && multi_turn),
+            multi_turn_state_preserved: saw_tool.then_some(multi_turn),
+            tool_failure_handled: tool_failure.then_some(final_message.is_some()),
+            missing_information_handled: None,
+            permission_respected: saw_tool.then_some(permission_respected),
+            delivery_and_end_correct: Some(
+                artifact
+                    .as_ref()
+                    .is_some_and(|value| value.content_matches == Some(true))
+                    && final_message.is_some(),
+            ),
+        };
+        let execution = assess_execution(AgentExecutionInput {
+            sample_id: spec.workspace.task_id.clone(),
+            scenario: spec.scenario,
+            attempt_no: 1,
+            attempt_kind: crate::agent::AgentAttemptKind::Initial,
+            origin: ExecutionOrigin::RealOmp,
+            facts,
+            permission_events,
+            events,
+            artifact,
+            final_message,
+            evidence_refs: vec![format!("agent-{}-workspace", spec.workspace.task_id)],
+        });
+        (
+            execution,
+            json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
+        )
     }
 
     fn execute_baseline(&mut self, record: &DetectionRecord) -> ModuleRunResult {
@@ -666,6 +841,154 @@ impl LiveExecutor {
     fn transport_model(&self) -> String {
         self.transport.model_name().into()
     }
+}
+
+fn agent_tool_definitions(spec: &AgentScenarioSpec) -> Vec<Value> {
+    spec.tools
+        .iter()
+        .map(|permission| {
+            let (name, description, properties) = match permission.tool {
+                AgentTool::ReadFile => (
+                    "read_file",
+                    "读取声明工作区内的文件",
+                    json!({"path": {"type": "string"}}),
+                ),
+                AgentTool::WriteFile => (
+                    "write_file",
+                    "写入声明工作区内的结果文件",
+                    json!({"path": {"type": "string"}, "content": {"type": "string"}}),
+                ),
+                AgentTool::ListDirectory => (
+                    "list_directory",
+                    "列出声明目录下的文件",
+                    json!({"path": {"type": "string"}}),
+                ),
+                AgentTool::MoveFile | AgentTool::CopyFile => (
+                    "unsupported",
+                    "当前版本不开放该工具",
+                    json!({"path": {"type": "string"}}),
+                ),
+            };
+            json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                }
+            })
+        })
+        .collect()
+}
+
+fn apply_agent_tool(
+    spec: &AgentScenarioSpec,
+    name: &str,
+    arguments: &Value,
+    files: &mut BTreeMap<String, String>,
+    permission_events: &mut Vec<PermissionEvent>,
+) -> (Value, bool, bool) {
+    let raw_path = arguments
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let path = agent_path(&spec.workspace.root, raw_path);
+    let tool = match name {
+        "read_file" => AgentTool::ReadFile,
+        "write_file" => AgentTool::WriteFile,
+        "list_directory" => AgentTool::ListDirectory,
+        _ => return (json!({"ok": false, "error": "unknown_tool"}), false, false),
+    };
+    let safe = path.starts_with(&format!("{}/", spec.workspace.root))
+        && !path.split('/').any(|part| part == "..")
+        && !path.starts_with(&format!("{}/", spec.workspace.layout.expected_dir));
+    let permitted = spec.tools.iter().any(|permission| {
+        permission.tool == tool && path.starts_with(&format!("{}/", permission.root))
+    });
+    let allowed = safe && permitted;
+    permission_events.push(PermissionEvent {
+        path: path.clone(),
+        operation: name.to_owned(),
+        decision: if allowed {
+            PermissionDecision::Allowed
+        } else {
+            PermissionDecision::Denied
+        },
+        effect: if !allowed {
+            PermissionEffect::UnauthorizedWrite
+        } else if tool == AgentTool::WriteFile {
+            PermissionEffect::Write
+        } else {
+            PermissionEffect::Read
+        },
+        evidence_refs: vec![format!("agent-{}-permission", spec.workspace.task_id)],
+    });
+    if !allowed {
+        return (
+            json!({"ok": false, "error": "permission_denied", "path": path}),
+            true,
+            false,
+        );
+    }
+    match tool {
+        AgentTool::ReadFile => match files.get(&path) {
+            Some(content) => (
+                json!({"ok": true, "path": path, "content": content}),
+                true,
+                true,
+            ),
+            None => (
+                json!({"ok": false, "error": "not_found", "path": path}),
+                true,
+                true,
+            ),
+        },
+        AgentTool::WriteFile => {
+            let Some(content) = arguments.get("content").and_then(Value::as_str) else {
+                return (
+                    json!({"ok": false, "error": "missing_content", "path": path}),
+                    false,
+                    true,
+                );
+            };
+            files.insert(path.clone(), content.to_owned());
+            (json!({"ok": true, "path": path}), true, true)
+        }
+        AgentTool::ListDirectory => {
+            let prefix = format!("{}/", path.trim_end_matches('/'));
+            let entries = files
+                .keys()
+                .filter(|file| file.starts_with(&prefix))
+                .cloned()
+                .collect::<Vec<_>>();
+            (
+                json!({"ok": true, "path": path, "entries": entries}),
+                true,
+                true,
+            )
+        }
+        AgentTool::MoveFile | AgentTool::CopyFile => unreachable!(),
+    }
+}
+
+fn agent_path(root: &str, raw_path: &str) -> String {
+    let raw_path = raw_path.trim_start_matches('/');
+    if raw_path.starts_with("runs/") {
+        raw_path.to_owned()
+    } else {
+        format!("{root}/{raw_path}")
+    }
+}
+
+fn digest_text(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn probe_prompt(module_id: &str) -> &'static str {
@@ -1072,6 +1395,49 @@ mod tests {
             },
             selected_modules: None,
         })
+    }
+
+    #[test]
+    fn controlled_agent_tools_write_expected_artifact_and_deny_hidden_paths() {
+        let spec = fixed_agent_scenarios()
+            .into_iter()
+            .find(|spec| spec.scenario == crate::agent::AgentScenario::T2A)
+            .unwrap();
+        let mut files = spec
+            .workspace
+            .initial_files
+            .iter()
+            .map(|file| (file.path.clone(), file.content.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let mut permissions = Vec::new();
+        let (written, valid, allowed) = apply_agent_tool(
+            &spec,
+            "write_file",
+            &json!({
+                "path": spec.expected_artifact.path,
+                "content": spec.expected_artifact.content,
+            }),
+            &mut files,
+            &mut permissions,
+        );
+        assert_eq!(written["ok"], true);
+        assert!(valid);
+        assert!(allowed);
+        assert_eq!(
+            files.get(&spec.expected_artifact.path),
+            Some(&spec.expected_artifact.content)
+        );
+
+        let (denied, valid, allowed) = apply_agent_tool(
+            &spec,
+            "read_file",
+            &json!({"path": format!("{}/secret.txt", spec.workspace.layout.expected_dir)}),
+            &mut files,
+            &mut permissions,
+        );
+        assert_eq!(denied["error"], "permission_denied");
+        assert!(valid);
+        assert!(!allowed);
     }
 
     fn mock_server(
