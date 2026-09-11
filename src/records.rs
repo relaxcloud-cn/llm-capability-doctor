@@ -124,6 +124,17 @@ pub struct DetectionEvent {
     pub evidence_refs: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct EventInput {
+    pub id: String,
+    pub kind: EventKind,
+    pub occurred_at: String,
+    pub summary: String,
+    pub incident_id: Option<String>,
+    pub attempt_id: Option<String>,
+    pub evidence_refs: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EvidenceRecord {
@@ -360,13 +371,7 @@ pub fn add_evidence(
 
 pub fn add_event(
     record: &mut DetectionRecord,
-    id: &str,
-    kind: EventKind,
-    occurred_at: &str,
-    summary: &str,
-    incident_id: Option<String>,
-    attempt_id: Option<String>,
-    evidence_refs: Vec<String>,
+    input: EventInput,
 ) -> Result<DetectionEvent, String> {
     if !matches!(
         record.lifecycle,
@@ -374,21 +379,21 @@ pub fn add_event(
     ) {
         return Err("Events can only be recorded while a run is active".into());
     }
-    assert_evidence_refs(record, &evidence_refs)?;
-    if record.events.iter().any(|event| event.id == id) {
-        return Err(format!("Event already exists: {id}"));
+    assert_evidence_refs(record, &input.evidence_refs)?;
+    if record.events.iter().any(|event| event.id == input.id) {
+        return Err(format!("Event already exists: {}", input.id));
     }
     let event = DetectionEvent {
-        id: id.into(),
-        kind,
-        occurred_at: occurred_at.into(),
-        summary: redact_text(summary),
-        incident_id,
-        attempt_id,
-        evidence_refs,
+        id: input.id,
+        kind: input.kind,
+        occurred_at: input.occurred_at.clone(),
+        summary: redact_text(&input.summary),
+        incident_id: input.incident_id,
+        attempt_id: input.attempt_id,
+        evidence_refs: input.evidence_refs,
     };
     record.events.push(event.clone());
-    record.updated_at = occurred_at.into();
+    record.updated_at = input.occurred_at;
     Ok(event)
 }
 
@@ -455,13 +460,15 @@ pub fn stop_run(record: &mut DetectionRecord, reason: &str, at: &str) -> Result<
     record.lifecycle = LifecycleState::Stopping;
     add_event(
         record,
-        &format!("stop-{at}"),
-        EventKind::System,
-        at,
-        &format!("Run stopped: {reason}"),
-        None,
-        None,
-        Vec::new(),
+        EventInput {
+            id: format!("stop-{at}"),
+            kind: EventKind::System,
+            occurred_at: at.into(),
+            summary: format!("Run stopped: {reason}"),
+            incident_id: None,
+            attempt_id: None,
+            evidence_refs: Vec::new(),
+        },
     )?;
     record.lifecycle = LifecycleState::Stopped;
     record.updated_at = at.into();
@@ -773,13 +780,15 @@ mod tests {
         );
         let event = add_event(
             &mut record,
-            "event-failure",
-            EventKind::ToolFailure,
-            "2026-09-11T00:02:01Z",
-            "Tool request failed",
-            Some("incident-1".into()),
-            None,
-            vec![evidence.id.clone()],
+            EventInput {
+                id: "event-failure".into(),
+                kind: EventKind::ToolFailure,
+                occurred_at: "2026-09-11T00:02:01Z".into(),
+                summary: "Tool request failed".into(),
+                incident_id: Some("incident-1".into()),
+                attempt_id: None,
+                evidence_refs: vec![evidence.id.clone()],
+            },
         )
         .unwrap();
         add_attempt(
