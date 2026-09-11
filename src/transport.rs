@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
@@ -30,6 +31,24 @@ pub struct ChatCompletionsResponse {
     pub error: Option<String>,
     pub attempts: u8,
     pub retry_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamEvent {
+    pub at_ms: u64,
+    pub raw: String,
+    pub content_delta: Option<String>,
+    pub reasoning_delta: Option<String>,
+    pub finish_reason: Option<String>,
+    pub done: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamResponse {
+    pub response: ChatCompletionsResponse,
+    pub events: Vec<StreamEvent>,
+    pub content: String,
+    pub terminated: bool,
 }
 
 #[derive(Clone)]
@@ -184,6 +203,130 @@ impl ChatCompletionsTransport {
         }
     }
 
+    pub fn send_stream(&self, request: ChatCompletionsRequest) -> StreamResponse {
+        let payload = json!({
+            "model": self.model,
+            "messages": [{"role": "user", "content": request.prompt}],
+            "temperature": 0,
+            "max_tokens": request.max_tokens,
+            "stream": true,
+        });
+        let started = Instant::now();
+        let mut retry_reasons = Vec::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = self.runtime.block_on(async {
+                self.client
+                    .post(&self.endpoint)
+                    .bearer_auth(&self.api_key)
+                    .json(&payload)
+                    .send()
+                    .await
+            });
+            let response = match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    match self.read_stream(response, started) {
+                        Ok((body, events, content, terminated)) => StreamResponse {
+                            response: ChatCompletionsResponse {
+                                status: Some(status),
+                                body: truncate_body(body),
+                                parsed: stream_summary(&content, &events),
+                                elapsed_ms: started.elapsed().as_millis(),
+                                error: None,
+                                attempts: attempt,
+                                retry_reasons: retry_reasons.clone(),
+                            },
+                            events,
+                            content,
+                            terminated,
+                        },
+                        Err(error) => StreamResponse {
+                            response: ChatCompletionsResponse {
+                                status: Some(status),
+                                body: String::new(),
+                                parsed: None,
+                                elapsed_ms: started.elapsed().as_millis(),
+                                error: Some(error),
+                                attempts: attempt,
+                                retry_reasons: retry_reasons.clone(),
+                            },
+                            events: Vec::new(),
+                            content: String::new(),
+                            terminated: false,
+                        },
+                    }
+                }
+                Err(error) => StreamResponse {
+                    response: ChatCompletionsResponse {
+                        status: None,
+                        body: String::new(),
+                        parsed: None,
+                        elapsed_ms: started.elapsed().as_millis(),
+                        error: Some(format!("发送 HTTP 请求失败：{error}")),
+                        attempts: attempt,
+                        retry_reasons: retry_reasons.clone(),
+                    },
+                    events: Vec::new(),
+                    content: String::new(),
+                    terminated: false,
+                },
+            };
+            let retryable = response.response.error.is_some()
+                || response
+                    .response
+                    .status
+                    .is_some_and(|status| status == 429 || status >= 500);
+            if !retryable || attempt == MAX_ATTEMPTS {
+                return response;
+            }
+            retry_reasons.push(format!(
+                "第 {attempt} 次流式请求返回 {:?}，按传输规则重试",
+                response.response.status
+            ));
+        }
+        unreachable!("MAX_ATTEMPTS is positive")
+    }
+
+    fn read_stream(
+        &self,
+        response: reqwest::Response,
+        started: Instant,
+    ) -> Result<(String, Vec<StreamEvent>, String, bool), String> {
+        self.runtime.block_on(async move {
+            let mut body = Vec::new();
+            let mut events = Vec::new();
+            let mut content = String::new();
+            let mut terminated = false;
+            let mut line_buffer = String::new();
+            let mut stream = response.bytes_stream();
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk.map_err(|error| format!("读取流式响应失败：{error}"))?;
+                line_buffer.push_str(&String::from_utf8_lossy(&chunk));
+                body.extend_from_slice(&chunk);
+                while let Some(newline) = line_buffer.find('\n') {
+                    let line = line_buffer[..newline].trim_end_matches('\r').to_owned();
+                    line_buffer.drain(..=newline);
+                    parse_stream_line(&line, started, &mut events, &mut content, &mut terminated);
+                }
+            }
+            if !line_buffer.trim().is_empty() {
+                parse_stream_line(
+                    line_buffer.trim(),
+                    started,
+                    &mut events,
+                    &mut content,
+                    &mut terminated,
+                );
+            }
+            Ok((
+                String::from_utf8_lossy(&body).into_owned(),
+                events,
+                content,
+                terminated,
+            ))
+        })
+    }
+
     fn send_payload(&self, payload: Value, module_id: &str) -> ChatCompletionsResponse {
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
@@ -275,6 +418,102 @@ impl ChatCompletionsTransport {
             },
         })
     }
+
+    pub fn stream_evidence_payload(
+        &self,
+        request: &ChatCompletionsRequest,
+        stream: &StreamResponse,
+    ) -> Value {
+        let mut payload = self.evidence_payload(request, &stream.response);
+        if let Some(response) = payload.get_mut("response") {
+            response["stream"] = json!({
+                "terminated": stream.terminated,
+                "content": stream.content,
+                "events": stream.events.iter().map(|event| json!({
+                    "at_ms": event.at_ms,
+                    "raw": event.raw,
+                    "content_delta": event.content_delta,
+                    "reasoning_delta": event.reasoning_delta,
+                    "finish_reason": event.finish_reason,
+                    "done": event.done,
+                })).collect::<Vec<_>>(),
+            });
+        }
+        payload
+    }
+}
+
+fn stream_summary(content: &str, events: &[StreamEvent]) -> Option<Value> {
+    (!events.is_empty()).then(|| {
+        json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": events.iter().rev().find_map(|event| event.finish_reason.clone()),
+            }]
+        })
+    })
+}
+
+fn parse_stream_line(
+    line: &str,
+    started: Instant,
+    events: &mut Vec<StreamEvent>,
+    content: &mut String,
+    terminated: &mut bool,
+) {
+    let Some(data) = line.strip_prefix("data:") else {
+        return;
+    };
+    let data = data.trim();
+    if data == "[DONE]" {
+        *terminated = true;
+        events.push(StreamEvent {
+            at_ms: started.elapsed().as_millis() as u64,
+            raw: data.into(),
+            content_delta: None,
+            reasoning_delta: None,
+            finish_reason: None,
+            done: true,
+        });
+        return;
+    }
+    let parsed = serde_json::from_str::<Value>(data).ok();
+    let choice = parsed
+        .as_ref()
+        .and_then(|value| value.get("choices"))
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first());
+    let delta = choice.and_then(|value| value.get("delta"));
+    let content_delta = delta
+        .and_then(|value| value.get("content"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let reasoning_delta = delta
+        .and_then(|value| {
+            value
+                .get("reasoning_content")
+                .or_else(|| value.get("reasoning"))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let Some(value) = &content_delta {
+        content.push_str(value);
+    }
+    let finish_reason = choice
+        .and_then(|value| value.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if finish_reason.is_some() {
+        *terminated = true;
+    }
+    events.push(StreamEvent {
+        at_ms: started.elapsed().as_millis() as u64,
+        raw: data.into(),
+        content_delta,
+        reasoning_delta,
+        finish_reason,
+        done: false,
+    });
 }
 
 fn truncate_body(body: String) -> String {
@@ -358,6 +597,48 @@ mod tests {
         let evidence = transport.evidence_payload(&request, &response).to_string();
         assert!(!evidence.contains("secret-value"));
         assert!(evidence.contains("choices"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn parses_stream_events_when_sse_lines_are_split_across_network_chunks() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n")
+                .unwrap();
+            stream
+                .write_all(b"data: {\"choices\":[{\"delta\":{\"content\":\"hel")
+                .unwrap();
+            stream.flush().unwrap();
+            thread::sleep(Duration::from_millis(5));
+            stream
+                .write_all(b"lo\"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        let transport = ChatCompletionsTransport::new(
+            format!("http://{address}/v1/chat/completions"),
+            "model-a",
+            "secret-value",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let stream = transport.send_stream(ChatCompletionsRequest {
+            module_id: "performance".into(),
+            prompt: "stream".into(),
+            max_tokens: 16,
+            stream: true,
+        });
+        assert_eq!(stream.response.status, Some(200));
+        assert_eq!(stream.content, "hello world");
+        assert!(stream.terminated);
+        assert!(stream.events.len() >= 3);
+        assert!(stream.response.parsed.is_some());
         server.join().unwrap();
     }
 

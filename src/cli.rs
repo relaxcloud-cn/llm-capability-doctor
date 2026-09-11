@@ -25,8 +25,8 @@ use crate::conclusion::{CustomerConclusionReport, build_default_customer_report}
 use crate::ingress::{ConnectionConfig, redact_endpoint};
 use crate::performance::{
     ErrorKind, PerformanceConditions, PerformanceSample, ResponseMode as PerformanceResponseMode,
-    RunPhase, TerminalState, Timeline, TokenCountSource, build_report as build_performance_report,
-    fixed_performance_plan,
+    RunPhase, TerminalState, Timeline, TokenCountSource,
+    build_report_for_record as build_performance_report_for_record, fixed_performance_plan,
 };
 use crate::records::{
     AttemptKind, EventInput, EventKind, ModuleResult, ModuleResultState, OverallConclusion,
@@ -38,7 +38,9 @@ use crate::specification::{
     AttemptKind as SpecificationAttemptKind, EvidenceOrigin, SpecStatus, SpecificationObservation,
     build_report, seven_category_plan,
 };
-use crate::transport::{ChatCompletionsRequest, ChatCompletionsTransport};
+use crate::transport::{
+    ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsTransport, StreamResponse,
+};
 
 pub const CLI_VERSION: &str = "cli/v1";
 
@@ -169,8 +171,13 @@ impl ModuleExecutor for LiveExecutor {
         module_id: &str,
         record: &mut DetectionRecord,
     ) -> ModuleRunResult {
-        if self.full && module_id == "agent" {
-            return self.execute_agent(record);
+        if self.full {
+            if module_id == "agent" {
+                return self.execute_agent(record);
+            }
+            if module_id == "performance" {
+                return self.execute_performance(record);
+            }
         }
         self.execute(module_id, record)
     }
@@ -268,10 +275,17 @@ impl LiveExecutor {
             let mut owned_record = record.clone();
             return self.execute_agent(&mut owned_record);
         }
+        if module_id == "performance" {
+            let mut owned_record = record.clone();
+            return self.execute_performance(&mut owned_record);
+        }
         match module_id {
             "specification" => self.execute_specification(record),
             "capability" => self.execute_capability(record),
-            "performance" => self.execute_performance(record),
+            "performance" => {
+                let mut owned_record = record.clone();
+                self.execute_performance(&mut owned_record)
+            }
             "baseline" => self.execute_baseline(record),
             _ => self.execute_smoke(module_id),
         }
@@ -446,105 +460,160 @@ impl LiveExecutor {
         }
     }
 
-    fn execute_performance(&mut self, record: &DetectionRecord) -> ModuleRunResult {
-        let started = 0_u64;
+    fn execute_performance(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
+        let run_started = std::time::Instant::now();
         let mut samples = Vec::new();
         let mut evidence = Vec::new();
         for plan in fixed_performance_plan() {
-            for index in 0..plan.formal_request_limit {
-                let request = ChatCompletionsRequest {
-                    module_id: "performance".into(),
-                    prompt: format!(
-                        "性能计划 {} 第 {} 次；输入目标 {}；输出目标 {}",
-                        plan.category.id(),
-                        index + 1,
-                        plan.input_tokens[0],
-                        plan.target_output_tokens[0]
-                    ),
-                    max_tokens: plan.target_output_tokens[0],
-                    stream: plan.modes.contains(&PerformanceResponseMode::Streaming),
-                };
-                let response = self.transport.send(request.clone());
-                let elapsed = response.elapsed_ms as u64;
-                let valid = response.error.is_none()
-                    && response
-                        .status
-                        .is_some_and(|status| (200..300).contains(&status))
-                    && is_chat_completion_shape(response.parsed.as_ref());
-                let terminal_state = if valid {
-                    TerminalState::NaturalEnd
-                } else {
-                    TerminalState::Error
-                };
-                let text = completion_text(response.parsed.as_ref());
-                samples.push(PerformanceSample {
-                    id: format!("{}-{:04}", plan.category.id(), index + 1),
-                    workload: plan.workload,
-                    mode: plan.modes[0],
-                    phase: RunPhase::Formal,
-                    input_tokens_target: plan.input_tokens[0],
-                    target_output_tokens: plan.target_output_tokens[0],
-                    actual_input_tokens: None,
-                    actual_output_tokens: None,
-                    output_chars: text.as_ref().map(|text| text.chars().count() as u32),
-                    target_concurrency: plan.concurrency_targets[0],
-                    actual_concurrency: 1,
-                    dispatched_at_ms: started,
-                    terminal_at_ms: Some(elapsed),
-                    timeline: Timeline {
-                        send_ms: started,
-                        first_event_ms: Some(elapsed),
-                        first_reasoning_ms: None,
-                        first_visible_ms: text.as_ref().map(|_| elapsed),
-                        complete_ms: Some(elapsed),
-                        error_ms: (!valid).then_some(elapsed),
-                        cancel_ms: None,
-                        visible_events_ms: text.as_ref().map(|_| vec![elapsed]).unwrap_or_default(),
-                    },
-                    terminal_state,
-                    error_kind: (!valid).then_some(ErrorKind::Service),
-                    length_target_met: text.as_ref().is_some_and(|text| !text.is_empty()),
-                    token_count_source: TokenCountSource::Unavailable,
-                    evidence_refs: Vec::new(),
-                    limitation: (!valid).then_some("请求未形成可测量的正常结束".into()),
-                });
-                evidence.push(json!({"sample_id": format!("{}-{:04}", plan.category.id(), index + 1), "payload": self.transport.evidence_payload(&request, &response)}));
+            for (mode, input_tokens, target_output_tokens, target_concurrency) in
+                performance_dimensions(&plan)
+            {
+                let dimension_started = std::time::Instant::now();
+                for warmup_index in 0..plan.warmup_count {
+                    let work = PerformanceWorkItem {
+                        sample_id: format!(
+                            "{}-{}-{}-{}-{}-warmup-{}-{}",
+                            plan.category.id(),
+                            format_workload(plan.workload),
+                            format_mode(mode),
+                            input_tokens,
+                            target_output_tokens,
+                            target_concurrency,
+                            warmup_index + 1
+                        ),
+                        request: performance_request(
+                            mode,
+                            plan.category.id(),
+                            plan.workload,
+                            warmup_index,
+                            input_tokens,
+                            target_output_tokens,
+                        ),
+                        workload: plan.workload,
+                        input_tokens,
+                        target_output_tokens,
+                        phase: RunPhase::Warmup,
+                        target_concurrency,
+                        actual_concurrency: 1,
+                        dispatched_at_ms: run_started.elapsed().as_millis() as u64,
+                    };
+                    let mut observations = self.run_performance_batch(vec![work]);
+                    let observation = observations.pop().expect("one warmup request");
+                    self.record_performance_observation(
+                        record,
+                        observation,
+                        &mut samples,
+                        &mut evidence,
+                    );
+                }
+
+                let mut remaining = plan.formal_request_limit;
+                let mut formal_index = 0_u32;
+                while remaining > 0 {
+                    if plan.max_duration_ms.is_some_and(|limit| {
+                        dimension_started.elapsed().as_millis() as u64 >= limit
+                    }) {
+                        break;
+                    }
+                    if plan.dispatch_window_ms.is_some_and(|limit| {
+                        formal_index > 0 && dimension_started.elapsed().as_millis() as u64 >= limit
+                    }) {
+                        break;
+                    }
+                    let batch_size = target_concurrency.min(remaining).max(1);
+                    let dispatched_at_ms = run_started.elapsed().as_millis() as u64;
+                    let work = (0..batch_size)
+                        .map(|batch_index| {
+                            let index = formal_index + batch_index;
+                            PerformanceWorkItem {
+                                sample_id: format!(
+                                    "{}-{}-{}-{}-{}-{}-{:04}",
+                                    plan.category.id(),
+                                    format_workload(plan.workload),
+                                    format_mode(mode),
+                                    input_tokens,
+                                    target_output_tokens,
+                                    target_concurrency,
+                                    index + 1
+                                ),
+                                request: performance_request(
+                                    mode,
+                                    plan.category.id(),
+                                    plan.workload,
+                                    index,
+                                    input_tokens,
+                                    target_output_tokens,
+                                ),
+                                workload: plan.workload,
+                                input_tokens,
+                                target_output_tokens,
+                                phase: RunPhase::Formal,
+                                target_concurrency,
+                                actual_concurrency: batch_size,
+                                dispatched_at_ms,
+                            }
+                        })
+                        .collect();
+                    for observation in self.run_performance_batch(work) {
+                        self.record_performance_observation(
+                            record,
+                            observation,
+                            &mut samples,
+                            &mut evidence,
+                        );
+                    }
+                    formal_index += batch_size;
+                    remaining -= batch_size;
+                }
             }
         }
         let end = samples
             .iter()
             .filter_map(|sample| sample.terminal_at_ms)
             .max()
-            .unwrap_or(0);
-        let report = build_performance_report(
-            record.id.as_str(),
+            .unwrap_or_else(|| run_started.elapsed().as_millis() as u64);
+        let report_result = build_performance_report_for_record(
+            record,
             PerformanceConditions {
                 model: self.transport_model(),
                 protocol: "chat-completions".into(),
                 client_version: "0.1.0".into(),
                 timeout_ms: 300_000,
                 input_range_max_tokens: None,
-                window_start_ms: started,
+                window_start_ms: 0,
                 window_end_ms: end,
             },
             samples,
-        )
-        .ok();
-        let failed = report.as_ref().is_some_and(|report| {
-            report
-                .samples
-                .iter()
-                .any(|sample| sample.terminal_state == TerminalState::Error)
+        );
+        let failed = report_result.as_ref().is_ok_and(|report| {
+            report.samples.iter().any(|sample| {
+                sample.phase == RunPhase::Formal
+                    && matches!(
+                        sample.terminal_state,
+                        TerminalState::Error | TerminalState::Timeout
+                    )
+            })
         });
+        let report = report_result.as_ref().ok();
+        let formal_count = report
+            .as_ref()
+            .map(|value| {
+                value
+                    .samples
+                    .iter()
+                    .filter(|sample| sample.phase == RunPhase::Formal)
+                    .count()
+            })
+            .unwrap_or_default();
         ModuleRunResult {
-            state: if failed {
+            state: if report.is_none() || failed {
                 ModuleResultState::Inconclusive
             } else {
                 ModuleResultState::Pass
             },
             reason: Some(format!(
                 "已执行 {} 个性能正式样本；错误样本保留为不可测量",
-                evidence.len()
+                formal_count
             )),
             evidence_kind: "real_performance_report".into(),
             evidence_summary: format!(
@@ -553,11 +622,65 @@ impl LiveExecutor {
                 if report.is_some() {
                     "已生成"
                 } else {
-                    "生成失败"
+                    "生成失败（证据引用或样本校验未通过）"
                 }
             ),
-            evidence_payload: json!({"version": crate::performance::PERFORMANCE_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "report": report, "evidence": evidence}),
+            evidence_payload: json!({"version": crate::performance::PERFORMANCE_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "report": report, "report_error": report_result.err(), "evidence": evidence}),
         }
+    }
+
+    fn run_performance_batch(&self, work: Vec<PerformanceWorkItem>) -> Vec<PerformanceObservation> {
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(work.len() + 1));
+        let handles = work
+            .into_iter()
+            .map(|item| {
+                let transport = self.transport.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let request = item.request.clone();
+                    let response = if request.stream {
+                        PerformanceResponse::Streaming(transport.send_stream(request))
+                    } else {
+                        PerformanceResponse::Standard(transport.send(request))
+                    };
+                    PerformanceObservation { item, response }
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("performance request thread")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    fn record_performance_observation(
+        &self,
+        record: &mut DetectionRecord,
+        observation: PerformanceObservation,
+        samples: &mut Vec<PerformanceSample>,
+        evidence: &mut Vec<Value>,
+    ) {
+        let evidence_id = format!("cli-performance-{}", observation.item.sample_id);
+        let (sample, payload) = performance_sample(observation, &self.transport);
+        let captured = add_evidence(
+            record,
+            &evidence_id,
+            "performance-sample",
+            "performance-execution",
+            payload.clone(),
+        );
+        let mut sample = sample;
+        sample.evidence_refs = vec![captured.id.clone()];
+        evidence
+            .push(json!({"sample_id": sample.id, "evidence_id": captured.id, "payload": payload}));
+        samples.push(sample);
     }
 
     fn execute_agent(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
@@ -889,6 +1012,244 @@ impl LiveExecutor {
     fn transport_model(&self) -> String {
         self.transport.model_name().into()
     }
+}
+
+#[derive(Debug, Clone)]
+struct PerformanceWorkItem {
+    sample_id: String,
+    request: ChatCompletionsRequest,
+    workload: crate::performance::WorkloadKind,
+    input_tokens: u32,
+    target_output_tokens: u32,
+    phase: RunPhase,
+    target_concurrency: u32,
+    actual_concurrency: u32,
+    dispatched_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+enum PerformanceResponse {
+    Standard(ChatCompletionsResponse),
+    Streaming(StreamResponse),
+}
+
+#[derive(Debug, Clone)]
+struct PerformanceObservation {
+    item: PerformanceWorkItem,
+    response: PerformanceResponse,
+}
+
+fn format_mode(mode: PerformanceResponseMode) -> &'static str {
+    match mode {
+        PerformanceResponseMode::Streaming => "stream",
+        PerformanceResponseMode::NonStreaming => "nonstream",
+    }
+}
+
+fn performance_dimensions(
+    plan: &crate::performance::PerformancePlan,
+) -> Vec<(PerformanceResponseMode, u32, u32, u32)> {
+    plan.modes
+        .iter()
+        .flat_map(|mode| {
+            plan.input_tokens.iter().flat_map(move |input_tokens| {
+                plan.target_output_tokens
+                    .iter()
+                    .flat_map(move |target_output_tokens| {
+                        plan.concurrency_targets
+                            .iter()
+                            .map(move |target_concurrency| {
+                                (
+                                    *mode,
+                                    *input_tokens,
+                                    *target_output_tokens,
+                                    *target_concurrency,
+                                )
+                            })
+                    })
+            })
+        })
+        .collect()
+}
+
+fn format_workload(workload: crate::performance::WorkloadKind) -> &'static str {
+    match workload {
+        crate::performance::WorkloadKind::ResponseWaiting => "waiting",
+        crate::performance::WorkloadKind::GenerationFluency => "fluency",
+        crate::performance::WorkloadKind::Concurrency => "concurrency",
+        crate::performance::WorkloadKind::Continuous => "continuous",
+        crate::performance::WorkloadKind::LongInput => "long-input",
+        crate::performance::WorkloadKind::LongOutput => "long-output",
+        crate::performance::WorkloadKind::HistoryGrowth => "history",
+    }
+}
+
+fn performance_request(
+    mode: PerformanceResponseMode,
+    category: &str,
+    workload: crate::performance::WorkloadKind,
+    index: u32,
+    input_tokens: u32,
+    target_output_tokens: u32,
+) -> ChatCompletionsRequest {
+    ChatCompletionsRequest {
+        module_id: "performance".into(),
+        prompt: format!(
+            "性能计划 {category} {:?} 第 {} 次；输入目标 {input_tokens}；输出目标 {target_output_tokens}；返回短文本并保持正常结束。",
+            workload,
+            index + 1
+        ),
+        max_tokens: target_output_tokens,
+        stream: mode == PerformanceResponseMode::Streaming,
+    }
+}
+
+fn performance_sample(
+    observation: PerformanceObservation,
+    transport: &ChatCompletionsTransport,
+) -> (PerformanceSample, Value) {
+    let item = observation.item;
+    let (response, events, content, terminated, payload) = match observation.response {
+        PerformanceResponse::Standard(response) => {
+            let payload = transport.evidence_payload(&item.request, &response);
+            (response, Vec::new(), String::new(), true, payload)
+        }
+        PerformanceResponse::Streaming(stream) => {
+            let payload = transport.stream_evidence_payload(&item.request, &stream);
+            (
+                stream.response,
+                stream.events,
+                stream.content,
+                stream.terminated,
+                payload,
+            )
+        }
+    };
+    let elapsed = response.elapsed_ms as u64;
+    let text = if item.request.stream {
+        (!content.is_empty()).then_some(content.clone())
+    } else {
+        completion_text(response.parsed.as_ref())
+    };
+    let usage = response
+        .parsed
+        .as_ref()
+        .and_then(|value| value.get("usage"));
+    let actual_input_tokens = usage
+        .and_then(|value| value.get("prompt_tokens"))
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let actual_output_tokens = usage
+        .and_then(|value| value.get("completion_tokens"))
+        .and_then(Value::as_u64)
+        .map(|value| value as u32);
+    let token_count_source = if actual_output_tokens.is_some() {
+        TokenCountSource::ServiceUsage
+    } else {
+        TokenCountSource::Unavailable
+    };
+    let valid = response.error.is_none()
+        && response
+            .status
+            .is_some_and(|status| (200..300).contains(&status))
+        && is_chat_completion_shape(response.parsed.as_ref())
+        && (!item.request.stream || terminated);
+    let terminal_state = if valid {
+        TerminalState::NaturalEnd
+    } else if response
+        .error
+        .as_deref()
+        .is_some_and(|error| error.to_ascii_lowercase().contains("timeout"))
+    {
+        TerminalState::Timeout
+    } else {
+        TerminalState::Error
+    };
+    let absolute = |relative: u64| item.dispatched_at_ms.saturating_add(relative);
+    let first_event = if item.request.stream {
+        events.first().map(|event| absolute(event.at_ms))
+    } else {
+        Some(absolute(elapsed))
+    };
+    let first_reasoning = events
+        .iter()
+        .find(|event| {
+            event
+                .reasoning_delta
+                .as_deref()
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+        .map(|event| absolute(event.at_ms));
+    let visible_events = if item.request.stream {
+        events
+            .iter()
+            .filter(|event| {
+                event
+                    .content_delta
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+            .map(|event| absolute(event.at_ms))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let first_visible = visible_events.first().copied();
+    let complete = valid.then(|| absolute(elapsed));
+    let length_target_met =
+        actual_output_tokens.is_some_and(|value| value >= item.request.max_tokens);
+    let limitation = if !valid {
+        Some("请求未形成可测量的正常结束".into())
+    } else if actual_output_tokens.is_none() {
+        Some("服务未返回可核验 token 数；仅展示字符和事件计量".into())
+    } else if !length_target_met {
+        Some("实际输出未达到目标长度".into())
+    } else {
+        None
+    };
+    let error_kind = (!valid).then(|| match response.status {
+        Some(401 | 403) => ErrorKind::Authentication,
+        Some(429) => ErrorKind::RateLimited,
+        Some(status) if status >= 500 => ErrorKind::Service,
+        _ if response.error.is_some() => ErrorKind::Network,
+        _ => ErrorKind::Service,
+    });
+    let sample = PerformanceSample {
+        id: item.sample_id,
+        workload: item.workload,
+        mode: if item.request.stream {
+            PerformanceResponseMode::Streaming
+        } else {
+            PerformanceResponseMode::NonStreaming
+        },
+        phase: item.phase,
+        input_tokens_target: item.input_tokens,
+        target_output_tokens: item.target_output_tokens,
+        actual_input_tokens,
+        actual_output_tokens,
+        output_chars: text.as_ref().map(|value| value.chars().count() as u32),
+        target_concurrency: item.target_concurrency,
+        actual_concurrency: item.actual_concurrency,
+        dispatched_at_ms: item.dispatched_at_ms,
+        terminal_at_ms: Some(absolute(elapsed)),
+        timeline: Timeline {
+            send_ms: item.dispatched_at_ms,
+            first_event_ms: first_event,
+            first_reasoning_ms: first_reasoning,
+            first_visible_ms: first_visible,
+            complete_ms: complete,
+            error_ms: (!valid).then_some(absolute(elapsed)),
+            cancel_ms: None,
+            visible_events_ms: visible_events,
+        },
+        terminal_state,
+        error_kind,
+        length_target_met,
+        token_count_source,
+        evidence_refs: Vec::new(),
+        limitation,
+    };
+    (sample, payload)
 }
 
 fn agent_tool_definitions(spec: &AgentScenarioSpec) -> Vec<Value> {
@@ -1427,6 +1788,17 @@ mod tests {
             run_id: "run-cli".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
         }
+    }
+
+    #[test]
+    fn performance_matrix_expands_every_declared_dimension() {
+        let plans = fixed_performance_plan();
+        let dimensions = plans
+            .iter()
+            .map(|plan| performance_dimensions(plan).len())
+            .collect::<Vec<_>>();
+        assert_eq!(dimensions, vec![2, 1, 4, 1, 3, 2, 3]);
+        assert_eq!(dimensions.into_iter().sum::<usize>(), 16);
     }
 
     fn executor_record() -> DetectionRecord {
