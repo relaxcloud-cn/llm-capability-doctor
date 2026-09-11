@@ -14,6 +14,14 @@ pub struct ChatCompletionsRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct AgentTurnResponse {
+    pub response: ChatCompletionsResponse,
+    pub message: Option<Value>,
+    pub tool_calls: Vec<Value>,
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ChatCompletionsResponse {
     pub status: Option<u16>,
     pub body: String,
@@ -138,6 +146,106 @@ impl ChatCompletionsTransport {
         unreachable!("MAX_ATTEMPTS is positive")
     }
 
+    pub fn send_agent_turn(&self, messages: Vec<Value>, tools: Vec<Value>) -> AgentTurnResponse {
+        let payload = json!({
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": "auto",
+            "temperature": 0,
+            "max_tokens": 512,
+            "stream": false,
+        });
+        let response = self.send_payload(payload, "agent");
+        let message = response
+            .parsed
+            .as_ref()
+            .and_then(|value| value.get("choices"))
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .cloned();
+        let tool_calls = message
+            .as_ref()
+            .and_then(|value| value.get("tool_calls"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let text = message
+            .as_ref()
+            .and_then(|value| value.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        AgentTurnResponse {
+            response,
+            message,
+            tool_calls,
+            text,
+        }
+    }
+
+    fn send_payload(&self, payload: Value, module_id: &str) -> ChatCompletionsResponse {
+        let started = Instant::now();
+        let mut retry_reasons = Vec::new();
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = self.runtime.block_on(async {
+                self.client
+                    .post(&self.endpoint)
+                    .bearer_auth(&self.api_key)
+                    .json(&payload)
+                    .send()
+                    .await
+            });
+            let response = match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body_result = self.runtime.block_on(async { response.text().await });
+                    match body_result {
+                        Ok(body) => ChatCompletionsResponse {
+                            status: Some(status),
+                            body: truncate_body(body.clone()),
+                            parsed: serde_json::from_str::<Value>(&body).ok(),
+                            elapsed_ms: started.elapsed().as_millis(),
+                            error: None,
+                            attempts: attempt,
+                            retry_reasons: retry_reasons.clone(),
+                        },
+                        Err(error) => ChatCompletionsResponse {
+                            status: Some(status),
+                            body: String::new(),
+                            parsed: None,
+                            elapsed_ms: started.elapsed().as_millis(),
+                            error: Some(format!("读取 HTTP 响应失败：{error}")),
+                            attempts: attempt,
+                            retry_reasons: retry_reasons.clone(),
+                        },
+                    }
+                }
+                Err(error) => ChatCompletionsResponse {
+                    status: None,
+                    body: String::new(),
+                    parsed: None,
+                    elapsed_ms: started.elapsed().as_millis(),
+                    error: Some(format!("发送 HTTP 请求失败：{error}")),
+                    attempts: attempt,
+                    retry_reasons: retry_reasons.clone(),
+                },
+            };
+            let retryable = response.error.is_some()
+                || response
+                    .status
+                    .is_some_and(|status| status == 429 || status >= 500);
+            if !retryable || attempt == MAX_ATTEMPTS {
+                return response;
+            }
+            retry_reasons.push(format!(
+                "第 {attempt} 次 {module_id} 请求返回 {:?}，按传输规则重试",
+                response.status
+            ));
+        }
+        unreachable!("MAX_ATTEMPTS is positive")
+    }
+
     pub fn model_name(&self) -> &str {
         &self.model
     }
@@ -251,6 +359,41 @@ mod tests {
         assert!(!evidence.contains("secret-value"));
         assert!(evidence.contains("choices"));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn agent_turn_sends_tools_and_parses_tool_calls() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 16 * 1024];
+            let size = stream.read(&mut request).unwrap_or(0);
+            let captured = String::from_utf8_lossy(&request[..size]).into_owned();
+            let body = r#"{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"runs/input.txt\"}"}}]}}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            captured
+        });
+        let transport = ChatCompletionsTransport::new(
+            format!("http://{address}/v1/chat/completions"),
+            "model-a",
+            "secret-value",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let turn = transport.send_agent_turn(
+            vec![json!({"role": "user", "content": "read"})],
+            vec![json!({"type": "function", "function": {"name": "read_file"}})],
+        );
+        let request = server.join().unwrap();
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0]["id"], "call-1");
+        assert!(request.contains("\"tools\""));
+        assert!(request.contains("\"tool_choice\":\"auto\""));
     }
 
     #[test]
