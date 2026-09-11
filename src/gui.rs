@@ -228,7 +228,7 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
     document.querySelector("#endpoint").textContent = report.configuration.redacted_endpoint;
     document.querySelector("#record-id").textContent = report.record.id;
     document.querySelector("#origin").textContent = report.execution_origin;
-    document.querySelector("#conclusion").textContent = `整体结论：${{statusLabel(report.overall || "not_measured")}} · 运行状态：${{report.record.lifecycle}}`;
+    document.querySelector("#conclusion").textContent = `${{report.customer_conclusion.text}} · 运行状态：${{report.record.lifecycle}}`;
     const selected = new Set(report.selected_modules);
     document.querySelectorAll(".module input").forEach(input => {{
       input.checked = selected.has(input.value);
