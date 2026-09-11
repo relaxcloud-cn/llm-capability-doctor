@@ -1,6 +1,6 @@
 use clap::Parser;
 use llm_capability_doctor::cli::{
-    CliRunRequest, OutputFormat, UnavailableExecutor, generated_run_id, generated_timestamp,
+    CliRunRequest, LiveExecutor, OutputFormat, generated_run_id, generated_timestamp,
     render_report, run_with_executor, write_report,
 };
 use llm_capability_doctor::gui::{
@@ -47,6 +47,10 @@ struct Cli {
     /// 禁止桌面环境自动打开本地工作台，保留纯 CLI 流程。
     #[arg(long)]
     no_gui: bool,
+
+    /// 单次服务请求超时时间，单位为秒。
+    #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
+    timeout_seconds: u64,
 }
 
 fn main() {
@@ -59,16 +63,35 @@ fn main() {
         eprintln!("缺少模型名称；请使用 --model 提供配置值");
         std::process::exit(2);
     };
+    let api_key = cli
+        .api_key
+        .or_else(|| std::env::var("MODEL_API_KEY").ok())
+        .filter(|key| !key.trim().is_empty());
+    let Some(api_key) = api_key else {
+        eprintln!("缺少 API 密钥；请使用 MODEL_API_KEY 提供，命令行参数仅用于兼容隐藏输入");
+        std::process::exit(2);
+    };
     let request = CliRunRequest {
         endpoint,
         model,
-        api_key: cli.api_key,
+        api_key: Some(api_key.clone()),
         selected_modules: cli.modules,
         stop_after: cli.stop_after,
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
     };
-    let mut executor = UnavailableExecutor;
+    let mut executor = match LiveExecutor::new(
+        request.endpoint.clone(),
+        request.model.clone(),
+        api_key,
+        std::time::Duration::from_secs(cli.timeout_seconds),
+    ) {
+        Ok(executor) => executor,
+        Err(error) => {
+            eprintln!("创建真实服务执行器失败：{error}");
+            std::process::exit(1);
+        }
+    };
     let report = match run_with_executor(request, &mut executor) {
         Ok(report) => report,
         Err(error) => {
