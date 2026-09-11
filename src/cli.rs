@@ -629,6 +629,7 @@ impl LiveExecutor {
                 response.body.clone(),
                 ActualSource::RealService,
                 None,
+                false,
                 Vec::new(),
             );
             observations.push(crate::baseline::BaselineObservation {
