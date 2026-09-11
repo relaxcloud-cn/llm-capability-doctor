@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod baseline;
+pub mod calibration;
 pub mod capability;
 pub mod cli;
 pub mod conclusion;
