@@ -138,6 +138,10 @@ impl ChatCompletionsTransport {
         unreachable!("MAX_ATTEMPTS is positive")
     }
 
+    pub fn model_name(&self) -> &str {
+        &self.model
+    }
+
     pub fn evidence_payload(
         &self,
         request: &ChatCompletionsRequest,
