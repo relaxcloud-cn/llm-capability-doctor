@@ -794,6 +794,7 @@ impl LiveExecutor {
         let mut valid_arguments = true;
         let mut permission_respected = true;
         let mut tool_failure = false;
+        let mut tool_failure_recovered = false;
         let mut multi_turn = false;
         let mut sequence = 0;
 
@@ -848,6 +849,9 @@ impl LiveExecutor {
             if turn.tool_calls.is_empty() {
                 final_message = turn.text.filter(|text| !text.trim().is_empty());
                 break;
+            }
+            if tool_failure {
+                tool_failure_recovered = true;
             }
             saw_tool = true;
             multi_turn = true;
@@ -919,11 +923,12 @@ impl LiveExecutor {
             evidence_refs: Vec::new(),
         });
         let facts = AgentObservationFacts {
-            task_rules_followed: Some(permission_respected && valid_arguments),
+            task_rules_followed: saw_tool.then_some(permission_respected && valid_arguments),
             tool_and_arguments_correct: saw_tool.then_some(valid_arguments),
-            tool_return_used: saw_tool.then_some(saw_tool_return && multi_turn),
-            multi_turn_state_preserved: saw_tool.then_some(multi_turn),
-            tool_failure_handled: tool_failure.then_some(final_message.is_some()),
+            tool_return_used: saw_tool.then_some(saw_tool_return),
+            multi_turn_state_preserved: multi_turn
+                .then_some(saw_tool_return && final_message.is_some()),
+            tool_failure_handled: tool_failure.then_some(tool_failure_recovered),
             missing_information_handled: None,
             permission_respected: saw_tool.then_some(permission_respected),
             delivery_and_end_correct: Some(
@@ -1329,7 +1334,7 @@ fn apply_agent_tool(
             PermissionDecision::Denied
         },
         effect: if !allowed {
-            PermissionEffect::UnauthorizedWrite
+            PermissionEffect::None
         } else if tool == AgentTool::WriteFile {
             PermissionEffect::Write
         } else {
@@ -1858,6 +1863,19 @@ mod tests {
         assert_eq!(denied["error"], "permission_denied");
         assert!(valid);
         assert!(!allowed);
+        assert_eq!(permissions.last().unwrap().effect, PermissionEffect::None);
+
+        let _ = apply_agent_tool(
+            &spec,
+            "write_file",
+            &json!({
+                "path": format!("{}/secret.txt", spec.workspace.layout.expected_dir),
+                "content": "should not be written",
+            }),
+            &mut files,
+            &mut permissions,
+        );
+        assert_eq!(permissions.last().unwrap().effect, PermissionEffect::None);
     }
 
     fn mock_server(
