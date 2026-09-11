@@ -546,7 +546,7 @@ impl LiveExecutor {
             attempts.push(execution);
             evidence.push(turn_evidence);
         }
-        let report = build_report_for_record(
+        let report_result = build_report_for_record(
             record,
             AgentRuntime {
                 omp_version: "chat-completions-agent-adapter/v1".into(),
@@ -555,8 +555,8 @@ impl LiveExecutor {
                 test_version: crate::agent::AGENT_VERSION.into(),
             },
             attempts,
-        )
-        .ok();
+        );
+        let report = report_result.as_ref().ok().cloned();
         let state = report
             .as_ref()
             .map(|value| {
@@ -578,11 +578,17 @@ impl LiveExecutor {
                 }
             })
             .unwrap_or(ModuleResultState::Inconclusive);
+        let reason = match report_result {
+            Ok(_) => {
+                "已执行 10 个 Agent 固定场景；工具能力、工作区事实和终态均按真实证据判定".into()
+            }
+            Err(error) => {
+                format!("Agent 报告构建失败：{error}；已保留原始回合证据，未伪造模块结论")
+            }
+        };
         ModuleRunResult {
             state,
-            reason: Some(
-                "已执行 10 个 Agent 固定场景；工具能力、工作区事实和终态均按真实证据判定".into(),
-            ),
+            reason: Some(reason),
             evidence_kind: "real_agent_report".into(),
             evidence_summary: format!(
                 "Agent 场景 10 个，报告 {}",
@@ -651,7 +657,7 @@ impl LiveExecutor {
                     crate::agent::AgentAttemptKind::Initial,
                     ExecutionOrigin::RealOmp,
                     "真实 Agent 工具回合无效；服务未提供可用的闭环响应",
-                    vec![format!("agent-{}-transport", spec.workspace.task_id)],
+                    Vec::new(),
                 );
                 return (
                     execution,
@@ -666,7 +672,7 @@ impl LiveExecutor {
                     crate::agent::AgentAttemptKind::Initial,
                     ExecutionOrigin::RealOmp,
                     "响应缺少 assistant message，无法判定 Agent 终态",
-                    vec![format!("agent-{}-protocol", spec.workspace.task_id)],
+                    Vec::new(),
                 );
                 return (
                     execution,
@@ -713,7 +719,7 @@ impl LiveExecutor {
                         .map(str::to_owned),
                     operation: Some(name.to_owned()),
                     incident_id: None,
-                    evidence_refs: vec![format!("agent-{}-turn", spec.workspace.task_id)],
+                    evidence_refs: Vec::new(),
                 });
                 sequence += 1;
                 events.push(AgentEvent {
@@ -727,7 +733,7 @@ impl LiveExecutor {
                         .map(str::to_owned),
                     operation: Some(name.to_owned()),
                     incident_id: None,
-                    evidence_refs: vec![format!("agent-{}-turn", spec.workspace.task_id)],
+                    evidence_refs: Vec::new(),
                 });
                 messages.push(json!({
                     "role": "tool",
@@ -745,7 +751,7 @@ impl LiveExecutor {
             content_digest: actual_content.map(|content| digest_text(content)),
             content_matches: actual_content
                 .map(|content| content == &spec.expected_artifact.content),
-            evidence_refs: vec![format!("agent-{}-workspace", spec.workspace.task_id)],
+            evidence_refs: Vec::new(),
         });
         let facts = AgentObservationFacts {
             task_rules_followed: Some(permission_respected && valid_arguments),
@@ -773,7 +779,7 @@ impl LiveExecutor {
             events,
             artifact,
             final_message,
-            evidence_refs: vec![format!("agent-{}-workspace", spec.workspace.task_id)],
+            evidence_refs: Vec::new(),
         });
         (
             execution,
@@ -926,7 +932,7 @@ fn apply_agent_tool(
         } else {
             PermissionEffect::Read
         },
-        evidence_refs: vec![format!("agent-{}-permission", spec.workspace.task_id)],
+        evidence_refs: Vec::new(),
     });
     if !allowed {
         return (
@@ -1518,6 +1524,39 @@ mod tests {
                 .unwrap()
                 .contains("secret-value")
         );
+    }
+
+    #[test]
+    fn agent_report_is_serialized_instead_of_dropped_when_module_evidence_is_added_later() {
+        let (endpoint, server) = mock_server(
+            200,
+            r#"{"choices":[{"message":{"role":"assistant","content":"已完成当前回合"},"finish_reason":"stop"}]}"#,
+            10,
+        );
+        let mut executor = LiveExecutor::new_full(
+            endpoint,
+            "model-a",
+            "secret-value",
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let result = executor.execute("agent", &executor_record());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 10);
+        assert!(result.evidence_payload["report"].is_object());
+        assert_eq!(
+            result.evidence_payload["report"]["scenarios"]
+                .as_array()
+                .map(Vec::len),
+            Some(10)
+        );
+        assert_eq!(
+            result.evidence_payload["report"]["samples"]
+                .as_array()
+                .map(Vec::len),
+            Some(10)
+        );
+        assert!(!result.evidence_payload.to_string().contains("secret-value"));
     }
 
     #[test]
