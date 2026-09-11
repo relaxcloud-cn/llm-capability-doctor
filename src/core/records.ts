@@ -14,10 +14,17 @@ export const moduleIds = [
 export type ModuleId = (typeof moduleIds)[number];
 
 export type LifecycleState =
-  "planned" | "running" | "stopping" | "stopped" | "completed";
+  | "planned"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "completed";
 
 export type ModuleSelectionState =
-  "selected" | "not_selected" | "not_applicable" | "unverified";
+  | "selected"
+  | "not_selected"
+  | "not_applicable"
+  | "unverified";
 
 export type ModuleResultState =
   | "pass"
@@ -32,10 +39,17 @@ export type ModuleResultState =
 export type AttemptKind = "initial" | "recheck" | "retry";
 
 export type EventKind =
-  "request" | "response" | "tool_failure" | "permission" | "system";
+  | "request"
+  | "response"
+  | "tool_failure"
+  | "permission"
+  | "system";
 
 export type OverallConclusion =
-  "usable" | "limited" | "blocked" | "inconclusive";
+  | "usable"
+  | "limited"
+  | "blocked"
+  | "inconclusive";
 
 export interface ServiceSnapshot {
   endpointFingerprint: string;
@@ -110,10 +124,20 @@ export interface DetectionRecord {
   events: DetectionEvent[];
   evidence: EvidenceRecord[];
   moduleResults: ModuleResult[];
+  serviceReturnedModel?: {
+    modelId: string;
+    source: "service_response";
+    observedAt: string;
+  };
   overallConclusion?: {
     state: OverallConclusion;
     evidenceRefs: string[];
   };
+}
+
+export interface ServiceReturnedModelInput {
+  modelId: string;
+  observedAt?: string;
 }
 
 export interface CreateRunInput {
@@ -345,6 +369,25 @@ export function startRun(record: DetectionRecord, at?: string): void {
   }
   record.lifecycle = "running";
   touch(record, nowIso(at));
+}
+
+export function recordServiceReturnedModel(
+  record: DetectionRecord,
+  input: ServiceReturnedModelInput,
+): void {
+  if (record.lifecycle === "stopped" || record.lifecycle === "completed") {
+    throw new Error("Service identity cannot be recorded after a run ends");
+  }
+  if (!input.modelId.trim()) {
+    throw new Error("Service-returned model ID cannot be empty");
+  }
+  const observedAt = nowIso(input.observedAt);
+  record.serviceReturnedModel = {
+    modelId: redactText(input.modelId),
+    source: "service_response",
+    observedAt,
+  };
+  touch(record, observedAt);
 }
 
 export function addEvidence(
