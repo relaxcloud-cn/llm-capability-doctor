@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::conclusion::{CustomerConclusionReport, build_default_customer_report};
 use crate::ingress::{ConnectionConfig, redact_endpoint};
 use crate::records::{
     AttemptKind, EventInput, EventKind, ModuleResult, ModuleResultState, OverallConclusion,
@@ -77,6 +78,7 @@ pub struct CliRunReport {
     pub unselected_modules: Vec<String>,
     pub record: DetectionRecord,
     pub overall: Option<OverallConclusion>,
+    pub customer_conclusion: CustomerConclusionReport,
     pub execution_origin: String,
     pub limitations: Vec<String>,
 }
@@ -232,6 +234,7 @@ pub fn run_with_executor<E: ModuleExecutor>(
         overall_evidence_refs,
         &request.started_at,
     )?;
+    let customer_conclusion = build_default_customer_report(&record)?;
     Ok(CliRunReport {
         version: CLI_VERSION.into(),
         configuration: CliConfiguration {
@@ -243,6 +246,7 @@ pub fn run_with_executor<E: ModuleExecutor>(
         unselected_modules: unselected,
         record,
         overall: Some(overall),
+        customer_conclusion,
         execution_origin: "cli_orchestration".into(),
         limitations: vec![
             "CLI 保存的是实际选择、状态和证据入口；未接入执行器的模块保持 inconclusive。".into(),
@@ -259,10 +263,7 @@ pub fn render_text(report: &CliRunReport) -> String {
         format!("选择：{}", report.selected_modules.join(", ")),
         format!("未选：{}", report.unselected_modules.join(", ")),
         format!("运行：{}", lifecycle_label(report.record.lifecycle)),
-        format!(
-            "结论：{}",
-            report.overall.map_or("not_measured", overall_label)
-        ),
+        format!("结论：{}", report.customer_conclusion.text),
     ];
     lines.extend(report.record.module_results.iter().map(|result| {
         format!(
@@ -359,15 +360,6 @@ fn module_result_label(state: ModuleResultState) -> &'static str {
         ModuleResultState::NotApplicable => "not_applicable",
         ModuleResultState::NotSelected => "not_selected",
         ModuleResultState::Unverified => "unverified",
-    }
-}
-
-fn overall_label(state: OverallConclusion) -> &'static str {
-    match state {
-        OverallConclusion::Usable => "usable",
-        OverallConclusion::Limited => "limited",
-        OverallConclusion::Blocked => "blocked",
-        OverallConclusion::Inconclusive => "inconclusive",
     }
 }
 
