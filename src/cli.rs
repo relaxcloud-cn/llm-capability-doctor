@@ -79,6 +79,14 @@ pub struct ModuleRunResult {
 pub trait ModuleExecutor {
     fn execute(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult;
 
+    fn execute_with_record(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+    ) -> ModuleRunResult {
+        self.execute(module_id, record)
+    }
+
     fn execution_origin(&self) -> &'static str {
         "custom_executor"
     }
@@ -154,6 +162,17 @@ impl ModuleExecutor for LiveExecutor {
             return self.execute_full(module_id, record);
         }
         self.execute_smoke(module_id)
+    }
+
+    fn execute_with_record(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+    ) -> ModuleRunResult {
+        if self.full && module_id == "agent" {
+            return self.execute_agent(record);
+        }
+        self.execute(module_id, record)
     }
 }
 
@@ -245,11 +264,14 @@ impl LiveExecutor {
     }
 
     fn execute_full(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult {
+        if module_id == "agent" {
+            let mut owned_record = record.clone();
+            return self.execute_agent(&mut owned_record);
+        }
         match module_id {
             "specification" => self.execute_specification(record),
             "capability" => self.execute_capability(record),
             "performance" => self.execute_performance(record),
-            "agent" => self.execute_agent(record),
             "baseline" => self.execute_baseline(record),
             _ => self.execute_smoke(module_id),
         }
@@ -538,13 +560,33 @@ impl LiveExecutor {
         }
     }
 
-    fn execute_agent(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+    fn execute_agent(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
         let mut attempts = Vec::new();
         let mut evidence = Vec::new();
         for spec in fixed_agent_scenarios() {
             let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
+            let evidence_id = format!("cli-agent-{}", spec.workspace.task_id);
+            let captured = add_evidence(
+                record,
+                &evidence_id,
+                "real_agent_scenario",
+                "agent-execution",
+                turn_evidence.clone(),
+            );
+            let mut execution = execution;
+            let evidence_ref = captured.id.clone();
+            execution.evidence_refs.push(evidence_ref.clone());
+            for event in &mut execution.events {
+                event.evidence_refs.push(evidence_ref.clone());
+            }
+            for permission in &mut execution.permission_events {
+                permission.evidence_refs.push(evidence_ref.clone());
+            }
+            if let Some(artifact) = &mut execution.artifact {
+                artifact.evidence_refs.push(evidence_ref.clone());
+            }
             attempts.push(execution);
-            evidence.push(turn_evidence);
+            evidence.push(json!({"sample_id": spec.workspace.task_id, "evidence_id": captured.id}));
         }
         let report_result = build_report_for_record(
             record,
@@ -1119,7 +1161,7 @@ pub fn run_with_executor<E: ModuleExecutor>(
         if stop_index.is_some_and(|stop_index| index > stop_index) {
             break;
         }
-        let result = executor.execute(module_id, &record);
+        let result = executor.execute_with_record(module_id, &mut record);
         let evidence = add_evidence(
             &mut record,
             &format!("cli-{module_id}-{index}"),
@@ -1540,23 +1582,38 @@ mod tests {
             std::time::Duration::from_secs(5),
         )
         .unwrap();
-        let result = executor.execute("agent", &executor_record());
+        let report = run_with_executor(
+            CliRunRequest {
+                selected_modules: Some(vec!["agent".into()]),
+                ..request(None)
+            },
+            &mut executor,
+        )
+        .unwrap();
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 10);
-        assert!(result.evidence_payload["report"].is_object());
+        let evidence = report
+            .record
+            .evidence
+            .iter()
+            .find(|item| item.id == "cli-agent-0")
+            .unwrap();
+        let payload = &evidence.payload["payload"];
+        assert!(payload["report"].is_object());
         assert_eq!(
-            result.evidence_payload["report"]["scenarios"]
-                .as_array()
-                .map(Vec::len),
+            payload["report"]["scenarios"].as_array().map(Vec::len),
             Some(10)
         );
         assert_eq!(
-            result.evidence_payload["report"]["samples"]
-                .as_array()
-                .map(Vec::len),
+            payload["report"]["samples"].as_array().map(Vec::len),
             Some(10)
         );
-        assert!(!result.evidence_payload.to_string().contains("secret-value"));
+        assert_eq!(report.record.evidence.len(), 11);
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains("secret-value")
+        );
     }
 
     #[test]
