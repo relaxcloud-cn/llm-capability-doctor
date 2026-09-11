@@ -80,7 +80,7 @@ fn main() {
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
     };
-    let mut executor = match LiveExecutor::new(
+    let mut executor = match LiveExecutor::new_full(
         request.endpoint.clone(),
         request.model.clone(),
         api_key,

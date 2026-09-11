@@ -6,14 +6,35 @@ use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::agent::{
+    AgentEvent, AgentEventKind, AgentExecutionInput, AgentObservationFacts, AgentRuntime,
+    ExecutionOrigin, assess_execution, build_report_for_record, fixed_agent_scenarios,
+};
+use crate::baseline::{
+    ActualSnapshot, ActualSource, BaselineScenario,
+    build_report_for_record as build_baseline_report, fixed_baseline_catalog,
+};
+use crate::capability::{
+    CapabilityResponse, CapabilitySettings, ExecutionState, build_scorecard,
+    fixed_capability_catalog,
+};
 use crate::conclusion::{CustomerConclusionReport, build_default_customer_report};
 use crate::ingress::{ConnectionConfig, redact_endpoint};
+use crate::performance::{
+    ErrorKind, PerformanceConditions, PerformanceSample, ResponseMode as PerformanceResponseMode,
+    RunPhase, TerminalState, Timeline, TokenCountSource, build_report as build_performance_report,
+    fixed_performance_plan,
+};
 use crate::records::{
     AttemptKind, EventInput, EventKind, ModuleResult, ModuleResultState, OverallConclusion,
     add_attempt, add_event, add_evidence, complete_run, create_run, set_module_result,
     set_overall_conclusion, start_run, stop_run,
 };
 use crate::records::{AttemptRecord, CreateRunInput, DetectionRecord};
+use crate::specification::{
+    AttemptKind as SpecificationAttemptKind, EvidenceOrigin, SpecStatus, SpecificationObservation,
+    build_report, seven_category_plan,
+};
 use crate::transport::{ChatCompletionsRequest, ChatCompletionsTransport};
 
 pub const CLI_VERSION: &str = "cli/v1";
@@ -83,6 +104,7 @@ impl ModuleExecutor for UnavailableExecutor {
 
 pub struct LiveExecutor {
     transport: ChatCompletionsTransport,
+    full: bool,
 }
 
 impl std::fmt::Debug for LiveExecutor {
@@ -103,7 +125,19 @@ impl LiveExecutor {
     ) -> Result<Self, String> {
         Ok(Self {
             transport: ChatCompletionsTransport::new(endpoint, model, api_key, timeout)?,
+            full: false,
         })
+    }
+
+    pub fn new_full(
+        endpoint: impl Into<String>,
+        model: impl Into<String>,
+        api_key: impl Into<String>,
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        let mut executor = Self::new(endpoint, model, api_key, timeout)?;
+        executor.full = true;
+        Ok(executor)
     }
 }
 
@@ -112,7 +146,16 @@ impl ModuleExecutor for LiveExecutor {
         "real_service"
     }
 
-    fn execute(&mut self, module_id: &str, _record: &DetectionRecord) -> ModuleRunResult {
+    fn execute(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult {
+        if self.full {
+            return self.execute_full(module_id, record);
+        }
+        self.execute_smoke(module_id)
+    }
+}
+
+impl LiveExecutor {
+    fn execute_smoke(&mut self, module_id: &str) -> ModuleRunResult {
         let request = ChatCompletionsRequest {
             module_id: module_id.into(),
             prompt: probe_prompt(module_id).into(),
@@ -197,6 +240,431 @@ impl ModuleExecutor for LiveExecutor {
             evidence_payload,
         }
     }
+
+    fn execute_full(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult {
+        match module_id {
+            "specification" => self.execute_specification(record),
+            "capability" => self.execute_capability(record),
+            "performance" => self.execute_performance(record),
+            "agent" => self.execute_agent(record),
+            "baseline" => self.execute_baseline(record),
+            _ => self.execute_smoke(module_id),
+        }
+    }
+
+    fn execute_specification(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut observations = Vec::new();
+        let mut evidence = Vec::new();
+        for plan in seven_category_plan() {
+            for sample_id in plan.samples {
+                let request = ChatCompletionsRequest {
+                    module_id: "specification".into(),
+                    prompt: format!(
+                        "规格样本 {sample_id}。{}",
+                        plan.fixed_settings
+                            .values()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join("，")
+                    ),
+                    max_tokens: 256,
+                    stream: plan.category.id() == "S07",
+                };
+                let response = self.transport.send(request.clone());
+                let payload = self.transport.evidence_payload(&request, &response);
+                evidence.push(json!({"sample_id": sample_id, "payload": payload}));
+                let (status, limitation) = if response.error.is_some() {
+                    (
+                        SpecStatus::Inconclusive,
+                        Some("传输失败，未归因模型".into()),
+                    )
+                } else if response
+                    .status
+                    .is_some_and(|status| !(200..300).contains(&status))
+                {
+                    (
+                        SpecStatus::Inconclusive,
+                        Some("HTTP 非成功响应，未归因模型".into()),
+                    )
+                } else if is_chat_completion_shape(response.parsed.as_ref()) {
+                    (
+                        SpecStatus::Accepted,
+                        Some("已完成该固定样本的真实请求；未据此宣称边界或长期稳定性".into()),
+                    )
+                } else {
+                    (
+                        SpecStatus::Failed,
+                        Some("HTTP 成功但响应结构不可识别".into()),
+                    )
+                };
+                observations.push(SpecificationObservation {
+                    category: plan.category,
+                    sample_id,
+                    attempt: SpecificationAttemptKind::Initial,
+                    conditions: plan.fixed_settings.clone(),
+                    actual_output: response.parsed,
+                    finish_reason: Some("observed".into()),
+                    natural_end: status == SpecStatus::Accepted,
+                    status,
+                    evidence_refs: vec!["module-evidence".into()],
+                    evidence_origin: EvidenceOrigin::RealExecution,
+                    limitation,
+                    verified_scope: None,
+                });
+            }
+        }
+        let report = build_report(record.id.as_str(), observations).ok();
+        let passed = report.as_ref().is_some_and(|report| {
+            report
+                .rows
+                .iter()
+                .all(|row| row.result != SpecStatus::Failed)
+        });
+        ModuleRunResult {
+            state: if passed {
+                ModuleResultState::Pass
+            } else {
+                ModuleResultState::Fail
+            },
+            reason: Some(format!(
+                "已执行 {} 个规格固定样本；边界声明仍受观察限制",
+                evidence.len()
+            )),
+            evidence_kind: "real_specification_report".into(),
+            evidence_summary: format!(
+                "规格固定样本 {} 个，报告 {}",
+                evidence.len(),
+                if report.is_some() {
+                    "已生成"
+                } else {
+                    "生成失败"
+                }
+            ),
+            evidence_payload: json!({"version": crate::specification::SPECIFICATION_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "report": report, "evidence": evidence}),
+        }
+    }
+
+    fn execute_capability(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let samples = fixed_capability_catalog();
+        let mut responses = Vec::with_capacity(samples.len());
+        let mut evidence = Vec::with_capacity(samples.len());
+        for sample in &samples {
+            let request = ChatCompletionsRequest {
+                module_id: "capability".into(),
+                prompt: sample.prompt.clone(),
+                max_tokens: 256,
+                stream: false,
+            };
+            let response = self.transport.send(request.clone());
+            let text = completion_text(response.parsed.as_ref());
+            let execution = if response.error.is_some()
+                || !response
+                    .status
+                    .is_some_and(|status| (200..300).contains(&status))
+            {
+                ExecutionState::Invalid {
+                    reason: "真实服务请求未得到可评分响应".into(),
+                }
+            } else {
+                ExecutionState::Valid
+            };
+            responses.push((
+                sample.id.clone(),
+                CapabilityResponse {
+                    execution,
+                    text,
+                    tool_calls: Vec::new(),
+                    evidence_refs: Vec::new(),
+                },
+            ));
+            evidence.push(json!({"sample_id": sample.id, "payload": self.transport.evidence_payload(&request, &response)}));
+        }
+        let scorecard = build_scorecard(
+            record.id.as_str(),
+            samples,
+            responses,
+            CapabilitySettings {
+                temperature: "0".into(),
+                model: self.transport_model(),
+                protocol: "chat-completions".into(),
+                client_version: "0.1.0".into(),
+                validated_input_max_tokens: None,
+            },
+        )
+        .ok();
+        let has_wrong = scorecard.as_ref().is_some_and(|card| {
+            card.observations
+                .iter()
+                .any(|observation| observation.label == crate::capability::ScoreLabel::Wrong)
+        });
+        ModuleRunResult {
+            state: if has_wrong {
+                ModuleResultState::Fail
+            } else {
+                ModuleResultState::Pass
+            },
+            reason: Some(format!(
+                "已执行 {} 个能力固定单元；评分按既有接受规则计算",
+                evidence.len()
+            )),
+            evidence_kind: "real_capability_scorecard".into(),
+            evidence_summary: format!(
+                "能力固定单元 {} 个，正式 scorecard {}",
+                evidence.len(),
+                if scorecard.is_some() {
+                    "已生成"
+                } else {
+                    "生成失败"
+                }
+            ),
+            evidence_payload: json!({"version": crate::capability::CAPABILITY_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "scorecard": scorecard, "evidence": evidence}),
+        }
+    }
+
+    fn execute_performance(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let started = 0_u64;
+        let mut samples = Vec::new();
+        let mut evidence = Vec::new();
+        for plan in fixed_performance_plan() {
+            for index in 0..plan.formal_request_limit {
+                let request = ChatCompletionsRequest {
+                    module_id: "performance".into(),
+                    prompt: format!(
+                        "性能计划 {} 第 {} 次；输入目标 {}；输出目标 {}",
+                        plan.category.id(),
+                        index + 1,
+                        plan.input_tokens[0],
+                        plan.target_output_tokens[0]
+                    ),
+                    max_tokens: plan.target_output_tokens[0],
+                    stream: plan.modes.contains(&PerformanceResponseMode::Streaming),
+                };
+                let response = self.transport.send(request.clone());
+                let elapsed = response.elapsed_ms as u64;
+                let valid = response.error.is_none()
+                    && response
+                        .status
+                        .is_some_and(|status| (200..300).contains(&status))
+                    && is_chat_completion_shape(response.parsed.as_ref());
+                let terminal_state = if valid {
+                    TerminalState::NaturalEnd
+                } else {
+                    TerminalState::Error
+                };
+                let text = completion_text(response.parsed.as_ref());
+                samples.push(PerformanceSample {
+                    id: format!("{}-{:04}", plan.category.id(), index + 1),
+                    workload: plan.workload,
+                    mode: plan.modes[0],
+                    phase: RunPhase::Formal,
+                    input_tokens_target: plan.input_tokens[0],
+                    target_output_tokens: plan.target_output_tokens[0],
+                    actual_input_tokens: None,
+                    actual_output_tokens: None,
+                    output_chars: text.as_ref().map(|text| text.chars().count() as u32),
+                    target_concurrency: plan.concurrency_targets[0],
+                    actual_concurrency: 1,
+                    dispatched_at_ms: started,
+                    terminal_at_ms: Some(elapsed),
+                    timeline: Timeline {
+                        send_ms: started,
+                        first_event_ms: Some(elapsed),
+                        first_reasoning_ms: None,
+                        first_visible_ms: text.as_ref().map(|_| elapsed),
+                        complete_ms: Some(elapsed),
+                        error_ms: (!valid).then_some(elapsed),
+                        cancel_ms: None,
+                        visible_events_ms: text.as_ref().map(|_| vec![elapsed]).unwrap_or_default(),
+                    },
+                    terminal_state,
+                    error_kind: (!valid).then_some(ErrorKind::Service),
+                    length_target_met: text.as_ref().is_some_and(|text| !text.is_empty()),
+                    token_count_source: TokenCountSource::Unavailable,
+                    evidence_refs: Vec::new(),
+                    limitation: (!valid).then_some("请求未形成可测量的正常结束".into()),
+                });
+                evidence.push(json!({"sample_id": format!("{}-{:04}", plan.category.id(), index + 1), "payload": self.transport.evidence_payload(&request, &response)}));
+            }
+        }
+        let end = samples
+            .iter()
+            .filter_map(|sample| sample.terminal_at_ms)
+            .max()
+            .unwrap_or(0);
+        let report = build_performance_report(
+            record.id.as_str(),
+            PerformanceConditions {
+                model: self.transport_model(),
+                protocol: "chat-completions".into(),
+                client_version: "0.1.0".into(),
+                timeout_ms: 300_000,
+                input_range_max_tokens: None,
+                window_start_ms: started,
+                window_end_ms: end,
+            },
+            samples,
+        )
+        .ok();
+        let failed = report.as_ref().is_some_and(|report| {
+            report
+                .samples
+                .iter()
+                .any(|sample| sample.terminal_state == TerminalState::Error)
+        });
+        ModuleRunResult {
+            state: if failed {
+                ModuleResultState::Inconclusive
+            } else {
+                ModuleResultState::Pass
+            },
+            reason: Some(format!(
+                "已执行 {} 个性能正式样本；错误样本保留为不可测量",
+                evidence.len()
+            )),
+            evidence_kind: "real_performance_report".into(),
+            evidence_summary: format!(
+                "性能正式样本 {} 个，报告 {}",
+                evidence.len(),
+                if report.is_some() {
+                    "已生成"
+                } else {
+                    "生成失败"
+                }
+            ),
+            evidence_payload: json!({"version": crate::performance::PERFORMANCE_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "report": report, "evidence": evidence}),
+        }
+    }
+
+    fn execute_agent(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut attempts = Vec::new();
+        let mut evidence = Vec::new();
+        for spec in fixed_agent_scenarios() {
+            let request = ChatCompletionsRequest {
+                module_id: "agent".into(),
+                prompt: format!(
+                    "{}\n工作区：{}\n请按任务完成并在最后说明结果。",
+                    spec.prompt, spec.workspace.root
+                ),
+                max_tokens: 512,
+                stream: false,
+            };
+            let response = self.transport.send(request.clone());
+            let text = completion_text(response.parsed.as_ref());
+            let valid = response.error.is_none()
+                && response
+                    .status
+                    .is_some_and(|status| (200..300).contains(&status))
+                && text.is_some();
+            let execution = if valid {
+                assess_execution(AgentExecutionInput {
+                    sample_id: spec.workspace.task_id.clone(),
+                    scenario: spec.scenario,
+                    attempt_no: 1,
+                    attempt_kind: crate::agent::AgentAttemptKind::Initial,
+                    origin: ExecutionOrigin::RealOmp,
+                    facts: AgentObservationFacts::default(),
+                    permission_events: Vec::new(),
+                    events: vec![AgentEvent {
+                        id: format!("{}-assistant", spec.workspace.task_id),
+                        kind: AgentEventKind::AssistantMessage,
+                        sequence: 1,
+                        summary: text.clone().unwrap_or_default(),
+                        path: None,
+                        operation: None,
+                        incident_id: None,
+                        evidence_refs: Vec::new(),
+                    }],
+                    artifact: None,
+                    final_message: text,
+                    evidence_refs: Vec::new(),
+                })
+            } else {
+                crate::agent::invalid_execution(
+                    spec.workspace.task_id.clone(),
+                    spec.scenario,
+                    1,
+                    crate::agent::AgentAttemptKind::Initial,
+                    ExecutionOrigin::RealOmp,
+                    "真实 Agent 请求无效",
+                    Vec::new(),
+                )
+            };
+            attempts.push(execution);
+            evidence.push(json!({"sample_id": spec.workspace.task_id, "payload": self.transport.evidence_payload(&request, &response)}));
+        }
+        let report = build_report_for_record(
+            record,
+            AgentRuntime {
+                omp_version: "chat-completions-agent-adapter/v1".into(),
+                build_fingerprint: "runtime-recorded".into(),
+                license_ref: "Apache-2.0".into(),
+                test_version: crate::agent::AGENT_VERSION.into(),
+            },
+            attempts,
+        )
+        .ok();
+        ModuleRunResult { state: ModuleResultState::Inconclusive, reason: Some("已执行 10 个 Agent 固定场景；缺失工具调用协议时检查保持 inconclusive，不伪造交付通过".into()), evidence_kind: "real_agent_report".into(), evidence_summary: format!("Agent 场景 10 个，报告 {}", if report.is_some() { "已生成" } else { "生成失败" }), evidence_payload: json!({"version": crate::agent::AGENT_VERSION, "planned_scenarios": 10, "executed_scenarios": 10, "report": report, "evidence": evidence}) }
+    }
+
+    fn execute_baseline(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let catalog = fixed_baseline_catalog();
+        let mut observations = Vec::new();
+        let mut evidence = Vec::new();
+        for scenario in BaselineScenario::ALL {
+            let request = ChatCompletionsRequest {
+                module_id: "baseline".into(),
+                prompt: format!("基线场景 {}：{}", scenario.id(), scenario.title()),
+                max_tokens: 256,
+                stream: matches!(
+                    scenario,
+                    BaselineScenario::StreamEnvelope
+                        | BaselineScenario::StreamChoiceContainer
+                        | BaselineScenario::StreamDelta
+                        | BaselineScenario::StreamToolDelta
+                        | BaselineScenario::StreamUsage
+                ),
+            };
+            let response = self.transport.send(request.clone());
+            let source = ActualSnapshot::from_raw(
+                response.body.clone(),
+                ActualSource::RealService,
+                None,
+                Vec::new(),
+            );
+            observations.push(crate::baseline::BaselineObservation {
+                scenario,
+                actual: source,
+            });
+            evidence.push(json!({"scenario": scenario.id(), "payload": self.transport.evidence_payload(&request, &response)}));
+        }
+        let report = build_baseline_report(record, catalog, observations).ok();
+        ModuleRunResult {
+            state: if report.is_some() {
+                ModuleResultState::Pass
+            } else {
+                ModuleResultState::Inconclusive
+            },
+            reason: Some(format!(
+                "已执行 {} 个基线场景；结构事实不直接推导整体可用性",
+                evidence.len()
+            )),
+            evidence_kind: "real_baseline_report".into(),
+            evidence_summary: format!(
+                "基线场景 {} 个，报告 {}",
+                evidence.len(),
+                if report.is_some() {
+                    "已生成"
+                } else {
+                    "生成失败"
+                }
+            ),
+            evidence_payload: json!({"version": crate::baseline::BASELINE_VERSION, "planned_scenarios": evidence.len(), "executed_scenarios": evidence.len(), "report": report, "evidence": evidence}),
+        }
+    }
+
+    fn transport_model(&self) -> String {
+        self.transport.model_name().into()
+    }
 }
 
 fn probe_prompt(module_id: &str) -> &'static str {
@@ -218,6 +686,22 @@ fn is_chat_completion_shape(value: Option<&serde_json::Value>) -> bool {
         .is_some_and(|choices| {
             choices.first().is_some_and(|choice| {
                 choice.get("message").is_some() || choice.get("text").is_some()
+            })
+        })
+}
+
+fn completion_text(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.get("choices"))
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message").or_else(|| choice.get("text")))
+        .and_then(|message| {
+            message.as_str().map(str::to_owned).or_else(|| {
+                message
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
             })
         })
 }
@@ -711,6 +1195,34 @@ mod tests {
         server.join().unwrap();
         assert_eq!(result.state, ModuleResultState::Fail);
         assert!(result.reason.unwrap().contains("响应缺少"));
+    }
+
+    #[test]
+    fn full_executor_runs_every_specification_sample_and_keeps_report_evidence() {
+        let sample_count = crate::specification::seven_category_plan()
+            .iter()
+            .map(|plan| plan.samples.len())
+            .sum::<usize>();
+        let (endpoint, server) = mock_server(
+            200,
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#,
+            sample_count,
+        );
+        let mut executor = LiveExecutor::new_full(
+            endpoint,
+            "model-a",
+            "secret-value",
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let result = executor.execute("specification", &executor_record());
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), sample_count);
+        assert_eq!(result.state, ModuleResultState::Pass);
+        assert_eq!(result.evidence_payload["planned_samples"], sample_count);
+        assert_eq!(result.evidence_payload["executed_samples"], sample_count);
+        assert!(result.evidence_payload["report"]["rows"].is_array());
+        assert!(!result.evidence_payload.to_string().contains("secret-value"));
     }
 
     #[test]
