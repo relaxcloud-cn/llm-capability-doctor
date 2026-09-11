@@ -3,6 +3,11 @@ use llm_capability_doctor::cli::{
     CliRunRequest, OutputFormat, UnavailableExecutor, generated_run_id, generated_timestamp,
     render_report, run_with_executor, write_report,
 };
+use llm_capability_doctor::gui::{
+    SystemGuiLauncher, current_platform, detect_desktop, open_workbench,
+};
+use std::collections::BTreeMap;
+use std::env;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -38,6 +43,10 @@ struct Cli {
     /// 将报告写入文件；不提供时直接输出到终端。
     #[arg(long, value_name = "PATH")]
     output: Option<String>,
+
+    /// 禁止桌面环境自动打开本地工作台，保留纯 CLI 流程。
+    #[arg(long)]
+    no_gui: bool,
 }
 
 fn main() {
@@ -67,6 +76,21 @@ fn main() {
             std::process::exit(2);
         }
     };
+    if !cli.no_gui {
+        let environment = env::vars().collect::<BTreeMap<_, _>>();
+        let desktop = detect_desktop(current_platform(), &environment);
+        if desktop.supported {
+            let directory = env::temp_dir().join("llm-capability-doctor");
+            let mut launcher = SystemGuiLauncher;
+            let result = open_workbench(&report, directory, desktop, &mut launcher);
+            if !matches!(
+                result.state,
+                llm_capability_doctor::gui::GuiLaunchState::Launched
+            ) {
+                eprintln!("工作台未打开：{}", result.reason);
+            }
+        }
+    }
     let content = match render_report(&report, cli.format) {
         Ok(content) => content,
         Err(error) => {
