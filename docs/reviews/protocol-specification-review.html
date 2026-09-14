@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentCheck 检测项评审表</title>
+    <style>
+      :root { --ink:#17212b; --muted:#5b6875; --line:#d6dee6; --head:#eaf0f4; --bg:#f5f7f9; --warn:#fff6df; }
+      * { box-sizing:border-box; }
+      body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+      main { max-width:1500px; margin:0 auto; padding:28px 22px 60px; }
+      h1 { margin:0 0 6px; font-size:28px; }
+      .meta { margin:0 0 18px; color:var(--muted); }
+      .table-wrap { overflow:auto; background:#fff; border:1px solid var(--line); }
+      table { width:100%; min-width:1100px; border-collapse:collapse; }
+      th,td { padding:12px 14px; border:1px solid var(--line); text-align:left; vertical-align:top; }
+      th { background:var(--head); font-size:17px; }
+      td:first-child { width:190px; font-weight:700; }
+      td:nth-child(2) { width:40%; }
+      td:nth-child(3) { width:40%; }
+      tr.module td { background:#dfe8ee; font-size:17px; }
+      tr.risk td:nth-child(3) { background:var(--warn); }
+      code { padding:1px 4px; background:#eef2f5; border-radius:3px; font:13px ui-monospace,SFMono-Regular,Menlo,monospace; }
+      @media (max-width:800px) { main { padding:20px 10px 40px; } h1 { font-size:23px; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>AgentCheck 检测项评审表</h1>
+      <p class="meta">每个检测项只回答两件事：怎么检测，怎么判定。评审范围：当前 6 个模块全部检测项。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>检测项</th><th>检测逻辑</th><th>判定逻辑</th></tr></thead>
+          <tbody>
+            <tr class="module"><td colspan="3">一、入口兼容性 ingress</td></tr>
+            <tr><td>HTTP 请求与鉴权</td><td>使用配置的 URL、模型和 Bearer Key 发送最小 Chat Completions 请求。</td><td>2xx 记为请求成功，401/403 记为鉴权或权限失败，网络异常记为不可判定。</td></tr>
+            <tr><td>错误码与重试</td><td>记录请求返回的 HTTP 状态并按传输策略对 429、5xx 和网络错误重试。</td><td>429/5xx/网络错误归为可重试或不可判定，不能归因于模型能力。</td></tr>
+            <tr><td>JSON 响应解析</td><td>解析服务返回的 JSON，并读取顶层响应和首个 choice。</td><td>JSON 可解析且存在可识别响应结构记为协议通过，否则记为协议失败。</td></tr>
+            <tr><td>模型身份</td><td>记录请求模型名，并读取服务返回的 model 字段。</td><td>只报告配置模型与服务返回模型的事实差异，不因名称差异直接判模型失败。</td></tr>
+            <tr><td>响应内容提取</td><td>从 <code>choices[0].message.content</code> 或兼容的 text 字段提取内容。</td><td>能按 Agent 需要提取内容记为支持，字段缺失或类型错误记为协议失败。</td></tr>
+
+            <tr class="module"><td colspan="3">二、协议规格 specification</td></tr>
+            <tr class="risk"><td>S01 协议可接受上下文上限</td><td>从 32K 输入开始发送真实长度请求，成功后翻倍，直到达到配置上限或服务拒绝。</td><td>2xx 且响应合法记为接受，明确上下文超限记为拒绝，其他异常记为不可判定，并输出最后成功长度。</td></tr>
+            <tr class="risk"><td>S02 输出长度</td><td>使用不同的 <code>max_tokens</code> 发送可计数的长输出请求，记录实际输出长度和结束原因。</td><td>按参数是否接受、输出是否达到目标、是否自然结束或截断，分别判定支持、受限或不可判定。</td></tr>
+            <tr class="risk"><td>S03 常用参数</td><td>针对每个 Agent 依赖参数发送真实请求，每组只改变一个参数并保存请求体和响应。</td><td>参数被接受且符合协议记为支持，明确拒绝记为不支持，无法排除服务异常记为不可判定。</td></tr>
+            <tr class="risk"><td>S04 工具调用</td><td>提供真实工具 Schema，分别测试必须调用、无需调用、多工具和错误参数场景。</td><td>校验工具名、参数 Schema、调用次数和时机，协议不支持与模型选择错误分开判定。</td></tr>
+            <tr class="risk"><td>S05 结构化输出</td><td>使用 Agent 实际的 response format 或 JSON Schema 请求结构化输出。</td><td>解析并校验 JSON、必填字段、类型、枚举和嵌套结构，分别判定通过、拒绝或结构错误。</td></tr>
+            <tr class="risk"><td>S06 消息与多轮输入</td><td>按真实 Agent 顺序发送 system、user、assistant、tool 消息和多轮历史。</td><td>校验角色顺序、消息格式和请求可接受性，协议兼容与语义承接分开判定。</td></tr>
+            <tr class="risk"><td>S07 流式输出</td><td>分别发送文本流和工具调用流，读取 SSE 分块、增量内容、工具增量和终止事件。</td><td>校验分块格式、顺序、内容拼接、工具参数完整性和正常终止，断流和非法分块分别归类。</td></tr>
+
+            <tr class="module"><td colspan="3">三、基础能力 capability</td></tr>
+            <tr class="risk"><td>C01 指令遵循：材料事实</td><td>提供带明确约束的材料，要求模型只依据材料完成指定任务。</td><td>检查必需事实、格式和禁用内容；硬约束满足记为通过，遗漏或越界记为失败，语义不确定交 OhMyPi。</td></tr>
+            <tr class="risk"><td>C01 指令遵循：条件筛选</td><td>提供多条材料和筛选条件，要求只返回满足条件的对象。</td><td>用集合和条件校验结果完整性；集合正确记为通过，漏项或误选记为失败。</td></tr>
+            <tr class="risk"><td>C01 指令遵循：单约束</td><td>要求模型同时遵守一个明确输出限制并生成答案。</td><td>规则校验输出限制，OhMyPi 判断语义是否真正遵守；任一关键约束失败则失败。</td></tr>
+            <tr class="risk"><td>C01 指令遵循：多约束</td><td>要求模型同时满足多个格式、内容和禁答约束。</td><td>硬约束用代码校验，开放语义由 OhMyPi 按规则判定，证据不足记为不可判定。</td></tr>
+            <tr class="risk"><td>C01 指令遵循：信息不足</td><td>故意移除完成任务所需事实，观察模型是否识别缺失信息。</td><td>模型明确指出缺失且不编造记为通过，编造或无依据下结论记为失败。</td></tr>
+            <tr class="risk"><td>C02 信息抽取：单对象字段</td><td>提供单对象材料，要求按字段输出结构化结果。</td><td>Schema、字段值和必填项用规则校验，字段语义有歧义时由 OhMyPi 复核。</td></tr>
+            <tr class="risk"><td>C02 信息抽取：多对象关系</td><td>提供多个对象及关系，要求输出对象之间的关联。</td><td>校验对象数量、ID 和关系集合，关系解释无法形式化时由 OhMyPi 判断。</td></tr>
+            <tr class="risk"><td>C02 信息抽取：字段类型</td><td>提供含数字、日期、枚举和布尔值的材料，要求按指定类型输出。</td><td>按 Schema 和值解析判定类型，非法格式或类型转换错误记为失败。</td></tr>
+            <tr class="risk"><td>C02 信息抽取：缺失值</td><td>提供字段缺失的材料，要求使用约定的缺失表示。</td><td>缺失字段必须标记为未提供或约定值，不得猜测补全。</td></tr>
+            <tr class="risk"><td>C02 信息抽取：冲突信息</td><td>提供相互冲突的材料，要求模型指出冲突并按规则处理。</td><td>检查是否识别冲突和保留来源，未识别冲突或擅自取值记为失败。</td></tr>
+            <tr class="risk"><td>C03 工具选择：工具选择</td><td>提供多个工具和任务，要求模型选择完成任务所需工具。</td><td>工具名和调用必要性用规则校验，选择错误记为失败。</td></tr>
+            <tr class="risk"><td>C03 工具选择：参数填写</td><td>提供任务所需字段，要求模型生成工具参数。</td><td>按工具 Schema 校验参数完整性和字段值，缺失或错误记为失败。</td></tr>
+            <tr class="risk"><td>C03 工具选择：参数类型</td><td>要求模型为工具填写数字、枚举、数组等不同类型参数。</td><td>解析参数并按 Schema 校验类型、范围和枚举值。</td></tr>
+            <tr class="risk"><td>C03 工具选择：多工具</td><td>提供需要连续或并行使用多个工具的任务并记录完整轨迹。</td><td>校验工具集合、顺序或并行关系及参数，轨迹不满足要求记为失败。</td></tr>
+            <tr class="risk"><td>C03 工具选择：正确不调用</td><td>提供无需工具即可回答或禁止调用工具的任务。</td><td>没有工具调用且最终结果符合规则记为通过，误调用记为失败。</td></tr>
+            <tr class="risk"><td>C04 多轮：条件保持</td><td>第一轮设定条件，第二轮要求依据未变条件继续处理。</td><td>校验回答是否引用正确条件，语义承接由 OhMyPi 按证据判断。</td></tr>
+            <tr class="risk"><td>C04 多轮：条件更新</td><td>后续轮次修改前一轮条件，要求模型使用新条件。</td><td>检查旧条件是否被替换、新条件是否生效，混用条件记为失败。</td></tr>
+            <tr class="risk"><td>C04 多轮：条件撤销</td><td>后续轮次明确撤销前一条件，观察模型是否停止使用该条件。</td><td>最终结果不得继续依赖已撤销条件，否则失败。</td></tr>
+            <tr class="risk"><td>C04 多轮：对象切换</td><td>多轮中切换当前对象，要求模型只处理最新对象。</td><td>校验对象标识和结果归属，串用历史对象记为失败。</td></tr>
+            <tr class="risk"><td>C04 多轮：历史区分</td><td>提供多个相似历史对象，当前轮要求区分并引用指定对象。</td><td>校验引用对象和关键事实，无法仅靠结构确认时由 OhMyPi 判断。</td></tr>
+            <tr class="risk"><td>C05 长上下文：局部定位</td><td>在不同长度材料中埋入目标事实，要求模型定位并返回事实。</td><td>按事实值和输入长度校验结果，未命中记为失败，服务拒绝记为不可测协议结果。</td></tr>
+            <tr class="risk"><td>C05 长上下文：跨段关系</td><td>把完成任务所需事实分散在不同段落，要求模型合并使用。</td><td>校验必需事实和关系，遗漏或错误关联记为失败。</td></tr>
+            <tr class="risk"><td>C05 长上下文：干扰排除</td><td>加入相似但无关的干扰信息，要求模型只使用目标信息。</td><td>检查是否选中正确事实并排除干扰，语义判断交 OhMyPi。</td></tr>
+            <tr class="risk"><td>C05 长上下文：长度变化</td><td>保持任务不变，仅改变材料长度并重复执行。</td><td>比较各长度下的协议接受和任务正确性，不能把短长度结果外推到长长度。</td></tr>
+            <tr class="risk"><td>C05 长上下文：文内计算</td><td>要求模型使用长材料中的数字完成计算。</td><td>由程序复算数值并校验引用事实，结果错误记为失败。</td></tr>
+            <tr class="risk"><td>C06 推理：条件判断</td><td>提供事实、规则和条件，要求输出可验证结论。</td><td>用规则或参考答案验证结论，开放解释由 OhMyPi 辅助。</td></tr>
+            <tr class="risk"><td>C06 推理：时间顺序</td><td>提供带时间关系的事件，要求排序或判断先后。</td><td>程序比较顺序和最终答案，顺序错误记为失败。</td></tr>
+            <tr class="risk"><td>C06 推理：数量比较</td><td>提供多个数量及单位，要求比较大小或选择结果。</td><td>归一化单位后由程序计算校验，数值错误记为失败。</td></tr>
+            <tr class="risk"><td>C06 推理：基础计算</td><td>提供可独立复算的算式或数字问题。</td><td>程序计算期望值并按容差、单位校验模型结果。</td></tr>
+            <tr class="risk"><td>C06 推理：多条件推导</td><td>提供多个相互依赖条件，要求模型完成组合推导。</td><td>可形式化部分用程序校验，推导链和解释由 OhMyPi 按 rubric 判定。</td></tr>
+
+            <tr class="module"><td colspan="3">四、性能 performance</td></tr>
+            <tr><td>P01 响应等待</td><td>发送固定输入并分别测试流式、非流式请求，记录首事件、首可见内容和完成时间。</td><td>按实际时间线统计 P50/P95；超时、错误和未完成请求不进入正常延迟指标。</td></tr>
+            <tr><td>P02 生成速度与流畅度</td><td>发送目标输出长度的流式请求，记录可见 token、分块间隔和完成状态。</td><td>计算 token 速率、分块暂停和完成率；输出观测值，不脱离配置阈值判断好坏。</td></tr>
+            <tr><td>P03 并发承载</td><td>按 1、2、4、8 等并发档位同时发送请求并记录实际并发和结果。</td><td>按每档成功率、错误率、延迟和限流情况判定承载表现，限流与服务失败分开记录。</td></tr>
+            <tr><td>P04 连续运行稳定性</td><td>在受控时间窗口内连续发送固定请求，记录每次终态、错误和恢复情况。</td><td>按完成率、异常终止、超时和连续失败统计稳定性，不能用单次成功代表稳定。</td></tr>
+            <tr><td>P05 长输入性能</td><td>使用真实构造的 2K、8K、32K 等输入长度发送请求并记录 token 和耗时。</td><td>按实际输入长度、请求是否接受、延迟和完成率分别报告，未达到目标长度的样本不得归入该档。</td></tr>
+            <tr><td>P05 长输出性能</td><td>使用不同输出预算发送可计数的长输出请求并记录实际输出 token 和结束原因。</td><td>按输出长度、生成速率、截断和超时统计，参数未真正生效时记为不可测。</td></tr>
+            <tr><td>P05 历史增长性能</td><td>逐步增加多轮历史消息长度，按每个历史长度发送请求并记录耗时和终态。</td><td>按历史长度档位比较接受率、延迟和错误类型，不能把一次失败直接归因模型。</td></tr>
+
+            <tr class="module"><td colspan="3">五、Agent 兼容性 agent</td></tr>
+            <tr class="risk"><td>A1 遵守任务规则</td><td>给模型任务约束、工具和目标产物，记录完整多轮轨迹及最终结果。</td><td>代码校验硬约束和产物，OhMyPi 判断开放语义是否遵守；关键约束失败即失败。</td></tr>
+            <tr><td>A2 工具与参数正确</td><td>在工具场景中提供工具 Schema，记录模型发出的每个工具名和参数。</td><td>按允许工具、参数 Schema、必填字段和类型逐项校验。</td></tr>
+            <tr class="risk"><td>A3 使用工具返回</td><td>执行工具并返回带有可验证事实的结果，观察模型后续请求和最终答案。</td><td>代码确认返回已送达，OhMyPi 根据前后轨迹判断后续是否真正使用返回事实。</td></tr>
+            <tr class="risk"><td>A4 多轮状态保持</td><td>通过多轮工具调用改变条件或目标，记录每轮消息和状态变化。</td><td>代码校验消息链完整，OhMyPi 判断模型是否保持并正确更新任务状态。</td></tr>
+            <tr class="risk"><td>A5 工具失败处理</td><td>让工具返回可恢复错误或不可恢复错误，观察模型是否重试、调整或结束。</td><td>按错误类型和预期恢复策略校验轨迹，错误后继续错误操作或编造成功记为失败。</td></tr>
+            <tr class="risk"><td>A6 信息不足处理</td><td>隐藏完成任务所需信息或返回不完整工具结果，观察模型后续行为。</td><td>模型请求补充、明确无法判断且不编造记为通过，凭空补全记为失败。</td></tr>
+            <tr><td>A7 操作权限</td><td>配置允许和禁止的路径、工具及操作，记录权限决策和实际文件效果。</td><td>允许操作正常完成，禁止操作未产生实际副作用；任何未授权写入直接失败。</td></tr>
+            <tr class="risk"><td>A8 交付与结束</td><td>要求模型生成指定产物并结束任务，记录产物、摘要和最终消息。</td><td>代码校验产物存在、内容和结束状态，OhMyPi 判断最终说明是否与证据一致。</td></tr>
+
+            <tr class="module"><td colspan="3">六、协议基线 baseline</td></tr>
+            <tr><td>BC01 响应外层</td><td>发送非流式请求并保存完整响应 JSON。</td><td>按参考结构校验外层必需字段、类型和可选字段。</td></tr>
+            <tr><td>BC02 候选结果容器</td><td>读取响应中的 <code>choices</code> 及其元素。</td><td>校验数组、元素对象、索引和候选结构是否符合基线。</td></tr>
+            <tr><td>BC03 回复消息</td><td>读取首个候选的 message、role、content、refusal 和 finish reason。</td><td>按字段存在性、可空性和类型判定结构兼容。</td></tr>
+            <tr><td>BC04 用量汇总</td><td>读取 prompt、completion、total token 用量字段。</td><td>校验字段类型和基本一致性，缺失记为差异而不是直接判整体不可用。</td></tr>
+            <tr><td>BC05 用量明细</td><td>读取服务返回的输入、输出或缓存 token 明细。</td><td>按可选字段和类型校验，未提供记为未观察到。</td></tr>
+            <tr><td>BC06 服务元数据</td><td>读取响应中的服务附加元数据和模型标识。</td><td>按基线字段规则比较结构，动态值不参与结构判定。</td></tr>
+            <tr><td>BC07 工具调用容器</td><td>发送工具场景并读取 assistant message 中的 tool calls。</td><td>校验数组、调用对象和函数容器结构。</td></tr>
+            <tr><td>BC08 函数名称与参数</td><td>读取每个工具调用的函数名和 arguments 原始内容。</td><td>校验字段类型和参数承载形式，参数业务内容另由工具规则判定。</td></tr>
+            <tr><td>BC09 流式外层</td><td>发送流式请求并逐块解析 SSE 数据。</td><td>校验每个分块是否为合法 JSON 和流式响应外层结构。</td></tr>
+            <tr><td>BC10 流式候选容器</td><td>读取每个分块中的 choices 数组和候选对象。</td><td>校验分块候选容器、索引和字段类型。</td></tr>
+            <tr><td>BC11 流式消息增量</td><td>读取 delta 内容、role、finish reason 并按顺序拼接。</td><td>校验增量结构、顺序和最终拼接结果，非法或缺失终止分别归类。</td></tr>
+            <tr><td>BC12 流式工具增量</td><td>读取工具调用的分块增量并拼接函数名和 arguments。</td><td>校验增量顺序、索引和最终参数是否可解析。</td></tr>
+            <tr><td>BC13 流式用量</td><td>在流式结束或扩展字段中读取 usage 信息。</td><td>按字段存在性、类型和出现位置判定支持或未观察到。</td></tr>
+            <tr><td>BC14 错误对象</td><td>主动触发或捕获错误请求并保存完整错误 JSON。</td><td>校验错误对象、错误类型、消息和字段结构，不能把错误响应当正常响应。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </main>
+  </body>
+</html>
