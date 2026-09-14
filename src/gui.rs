@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,6 +38,89 @@ pub struct GuiLaunchResult {
     pub state: GuiLaunchState,
     pub path: Option<String>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeGuiRequest {
+    pub endpoint: String,
+    pub model: String,
+    pub modules: Option<Vec<String>>,
+    pub stop_after: Option<String>,
+    pub timeout_seconds: u64,
+    pub output: Option<String>,
+    pub api_key: String,
+    pub cli_path: PathBuf,
+}
+
+pub trait NativeGuiLauncher {
+    fn launch(&mut self, request: &NativeGuiRequest) -> Result<PathBuf, String>;
+}
+
+#[derive(Debug, Default)]
+pub struct SystemNativeGuiLauncher;
+
+impl NativeGuiLauncher for SystemNativeGuiLauncher {
+    fn launch(&mut self, request: &NativeGuiRequest) -> Result<PathBuf, String> {
+        let executable = native_gui_executable()?;
+        let mut command = Command::new(&executable);
+        command
+            .args(["--agentcheck-endpoint", &request.endpoint])
+            .args(["--agentcheck-model", &request.model])
+            .args([
+                "--agentcheck-cli-path",
+                &request.cli_path.display().to_string(),
+            ])
+            .args([
+                "--agentcheck-timeout-seconds",
+                &request.timeout_seconds.to_string(),
+            ])
+            .env("MODEL_API_KEY", &request.api_key);
+        if let Some(output) = &request.output {
+            command.args(["--agentcheck-output", output]);
+        }
+        if let Some(modules) = &request.modules {
+            command.args(["--agentcheck-modules", &modules.join(",")]);
+        }
+        if let Some(stop_after) = &request.stop_after {
+            command.args(["--agentcheck-stop-after", stop_after]);
+        }
+        command
+            .spawn()
+            .map_err(|error| format!("启动 AgentCheck 桌面端失败：{error}"))?;
+        Ok(executable)
+    }
+}
+
+pub fn native_gui_executable() -> Result<PathBuf, String> {
+    let candidates = if let Some(path) = env::var_os("AGENTCHECK_GUI_PATH") {
+        vec![PathBuf::from(path)]
+    } else {
+        let current = env::current_exe().map_err(|error| format!("读取 CLI 路径失败：{error}"))?;
+        let current_dir = current
+            .parent()
+            .ok_or_else(|| "CLI 没有可用的安装目录".to_string())?;
+        vec![
+            current_dir.join("AgentCheck.app"),
+            current_dir.join("AgentCheck"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("prototypes/agent-check-desktop/build/AgentCheck.app"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("desktop/AgentCheck.app"),
+        ]
+    };
+    for candidate in candidates {
+        let executable = if candidate
+            .extension()
+            .is_some_and(|extension| extension == "app")
+        {
+            candidate.join("Contents/MacOS/AgentCheck")
+        } else {
+            candidate.clone()
+        };
+        if executable.is_file() {
+            return Ok(executable);
+        }
+    }
+    Err("未找到 AgentCheck 桌面端；请先安装发行包中的 GUI，或设置 AGENTCHECK_GUI_PATH".into())
 }
 
 pub trait GuiLauncher {

@@ -1,13 +1,15 @@
 use clap::Parser;
 use llm_capability_doctor::cli::{
-    CliRunRequest, LiveExecutor, OutputFormat, generated_run_id, generated_timestamp,
-    render_report, run_with_executor, write_report,
+    CliRunRequest, JsonlProgressSink, LiveExecutor, OutputFormat, generated_run_id,
+    generated_timestamp, render_report, run_with_executor, run_with_executor_reporting,
+    write_report,
 };
 use llm_capability_doctor::gui::{
-    SystemGuiLauncher, current_platform, detect_desktop, open_workbench,
+    NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform, detect_desktop,
 };
 use std::collections::BTreeMap;
 use std::env;
+use std::fs::File;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -51,6 +53,10 @@ struct Cli {
     /// 单次服务请求超时时间，单位为秒。
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
     timeout_seconds: u64,
+
+    /// 将模块级进度以 JSON Lines 写入文件，供桌面端消费。
+    #[arg(long, hide = true, value_name = "PATH")]
+    progress_file: Option<String>,
 }
 
 fn main() {
@@ -71,12 +77,47 @@ fn main() {
         eprintln!("缺少 API 密钥；请使用 MODEL_API_KEY 提供，命令行参数仅用于兼容隐藏输入");
         std::process::exit(2);
     };
+    let selected_modules = cli.modules.clone();
+    let stop_after = cli.stop_after.clone();
+    if !cli.no_gui && cfg!(target_os = "macos") {
+        let environment = env::vars().collect::<BTreeMap<_, _>>();
+        let desktop = detect_desktop(current_platform(), &environment);
+        if desktop.supported {
+            let cli_path = match env::current_exe() {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("读取 CLI 路径失败，回退到纯 CLI：{error}");
+                    std::path::PathBuf::new()
+                }
+            };
+            if !cli_path.as_os_str().is_empty() {
+                let mut launcher = SystemNativeGuiLauncher;
+                let request = NativeGuiRequest {
+                    endpoint: endpoint.clone(),
+                    model: model.clone(),
+                    modules: selected_modules.clone(),
+                    stop_after: stop_after.clone(),
+                    timeout_seconds: cli.timeout_seconds,
+                    output: cli.output.clone(),
+                    api_key: api_key.clone(),
+                    cli_path,
+                };
+                match launcher.launch(&request) {
+                    Ok(path) => {
+                        println!("AgentCheck 桌面端已启动：{}", path.display());
+                        return;
+                    }
+                    Err(error) => eprintln!("{error}；回退到纯 CLI 执行"),
+                }
+            }
+        }
+    }
     let request = CliRunRequest {
         endpoint,
         model,
         api_key: Some(api_key.clone()),
-        selected_modules: cli.modules,
-        stop_after: cli.stop_after,
+        selected_modules,
+        stop_after,
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
     };
@@ -92,28 +133,27 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let report = match run_with_executor(request, &mut executor) {
+    let report_result = match cli.progress_file {
+        Some(path) => {
+            let file = match File::create(&path) {
+                Ok(file) => file,
+                Err(error) => {
+                    eprintln!("创建进度文件失败：{path}：{error}");
+                    std::process::exit(1);
+                }
+            };
+            let mut progress = JsonlProgressSink::new(file);
+            run_with_executor_reporting(request, &mut executor, &mut progress)
+        }
+        None => run_with_executor(request, &mut executor),
+    };
+    let report = match report_result {
         Ok(report) => report,
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
     };
-    if !cli.no_gui {
-        let environment = env::vars().collect::<BTreeMap<_, _>>();
-        let desktop = detect_desktop(current_platform(), &environment);
-        if desktop.supported {
-            let directory = env::temp_dir().join("llm-capability-doctor");
-            let mut launcher = SystemGuiLauncher;
-            let result = open_workbench(&report, directory, desktop, &mut launcher);
-            if !matches!(
-                result.state,
-                llm_capability_doctor::gui::GuiLaunchState::Launched
-            ) {
-                eprintln!("工作台未打开：{}", result.reason);
-            }
-        }
-    }
     let content = match render_report(&report, cli.format) {
         Ok(content) => content,
         Err(error) => {
