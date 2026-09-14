@@ -110,7 +110,7 @@ struct AgentDetails: View {
         }
       }
       Divider()
-      Text("受控只读任务 · 演示样本集 3 · 未包含生产业务验收")
+      Text("受控只读任务 · 检测样本集 3 · 不包含生产业务验收")
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
     }
   }

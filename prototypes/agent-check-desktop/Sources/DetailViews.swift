@@ -255,7 +255,7 @@ struct ScoreDetails: View {
             title: "实际结果 · \(sample.passed ? "正确完成" : "未正确完成")",
             text: sample.actual,
             style: sample.passed ? FindingState.pass.style : FindingState.fail.style)
-          Text("依据：逐项核对固定答案与任务要求 · 演示样本集 3。")
+          Text("依据：逐项核对固定答案与任务要求 · 检测样本集 3。")
             .font(Theme.captionFont).foregroundStyle(Theme.faint)
             .fixedSize(horizontal: false, vertical: true)
         }

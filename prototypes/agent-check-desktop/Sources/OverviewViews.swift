@@ -46,7 +46,6 @@ struct HomeView: View {
           .fixedSize(horizontal: false, vertical: true)
         HStack(spacing: 14) {
           Action(title: "开始接入前诊断", icon: "play.fill") { store.prepareRun() }
-          TextButton(title: "查看演示场景") { store.showDemoControls = true }
         }.padding(.top, 4)
       }
       HStack(alignment: .top, spacing: 16) {
@@ -257,7 +256,7 @@ struct ReportOverview: View {
               note: "保留两侧原值，不推断为假模型或不可用。")
           }
           KVRow(
-            label: "运行版本", value: "AgentCheck 演示原型 · macOS",
+            label: "运行版本", value: "AgentCheck · macOS",
             note: "本地运行信息，不是服务端部署版本。")
           KVRow(
             label: "测试条件", value: record.context?.environment ?? "尚未建立测试记录",
