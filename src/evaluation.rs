@@ -156,6 +156,17 @@ pub fn render_html(
                 .map_err(|e| format!("解析模块报告失败：{e}"))?;
         modules.push(value);
     }
+    let overall = if modules.iter().any(|module| module.verdict == "fail") {
+        "limited"
+    } else if modules.is_empty()
+        || modules
+            .iter()
+            .any(|module| module.verdict == "inconclusive")
+    {
+        "inconclusive"
+    } else {
+        "pass"
+    };
     let module_rows = modules.iter().map(|module| {
         let findings = module.findings.iter().map(|finding| format!(
             "<li><strong>{}</strong>：{}；证据：{}</li>",
@@ -169,7 +180,7 @@ pub fn render_html(
     Ok(format!(
         "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>AgentCheck 检测报告</title><style>body{{margin:0;background:#f4f6f8;color:#17212b;font:15px/1.65 -apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",sans-serif}}main{{max-width:1000px;margin:0 auto;padding:36px 20px}}section,header{{background:#fff;border:1px solid #d9e0e7;border-radius:8px;padding:20px;margin:16px 0}}h1{{margin:0 0 6px}}h2{{margin:0 0 8px}}.muted{{color:#5b6875}}.verdict{{font-weight:700;color:#1769aa}}</style></head><body><main><header><h1>AgentCheck 模型兼容性检测报告</h1><p>模型：{}</p><p>整体结论：{}</p><p class=\"muted\">本报告由 CLI 检测证据和 OhMyPi 模块分析生成。</p></header>{}</main></body></html>",
         escape(&run_report.configuration.model),
-        escape(&run_report.customer_conclusion.text),
+        overall,
         module_rows
     ))
 }
