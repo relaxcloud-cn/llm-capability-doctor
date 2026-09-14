@@ -20,12 +20,18 @@ fi
 
 install -m 0755 "$binary" "$stage_dir/llm-capability-doctor"
 install -m 0644 "$root_dir/release/README.md" "$stage_dir/README.md"
+package_items=(llm-capability-doctor README.md VERSION BUILD.txt SHA256SUMS)
+if [[ "$target" == *-apple-darwin && "$(uname -s)" == "Darwin" ]]; then
+  "$root_dir/scripts/build-desktop-gui.sh" >/dev/null
+  cp -R "$root_dir/prototypes/agent-check-desktop/build/AgentCheck.app" "$stage_dir/AgentCheck.app"
+  package_items+=(AgentCheck.app)
+fi
 printf '%s\n' "$version" > "$stage_dir/VERSION"
 printf '%s\n' "目标：$target" "构建：$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$stage_dir/BUILD.txt"
 (cd "$stage_dir" && sha256sum llm-capability-doctor > SHA256SUMS)
 
 archive="$output_dir/${package_name}.tar.gz"
-tar -C "$stage_dir" -czf "$archive" llm-capability-doctor README.md VERSION BUILD.txt SHA256SUMS
+tar -C "$stage_dir" -czf "$archive" "${package_items[@]}"
 (cd "$output_dir" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
 printf '发行包：%s\n' "$archive"
 printf '版本：%s\n' "$version"

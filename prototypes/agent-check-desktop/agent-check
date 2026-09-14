@@ -1,0 +1,18 @@
+#!/bin/bash
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+if [[ "${1:-start}" != "start" ]]; then
+    printf '%s\n' '用法：./agent-check start' '直接启动离线评审/演示模式；真实检测由 llm-capability-doctor 自动启动桌面端。' >&2
+    exit 2
+fi
+APP="$ROOT/build/AgentCheck.app"
+REBUILD=false
+if [[ ! -x "$APP/Contents/MacOS/AgentCheck" ]]; then
+    REBUILD=true
+else
+    for SOURCE in "$ROOT"/Sources/*.swift "$ROOT/Info.plist" "$ROOT/build.sh"; do
+        if [[ "$SOURCE" -nt "$APP/Contents/MacOS/AgentCheck" ]]; then REBUILD=true; fi
+    done
+fi
+if [[ "$REBUILD" == true ]]; then bash "$ROOT/build.sh"; fi
+open "$APP"

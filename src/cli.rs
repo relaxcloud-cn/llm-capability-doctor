@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1457,6 +1458,56 @@ pub struct CliRunReport {
     pub limitations: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProgressPhase {
+    RunStarted,
+    ModuleStarted,
+    ModuleCompleted,
+    RunCompleted,
+    RunStopped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgressEvent {
+    pub phase: ProgressPhase,
+    pub module_id: Option<String>,
+    pub index: usize,
+    pub total: usize,
+    pub state: Option<String>,
+    pub message: String,
+}
+
+pub trait ProgressSink {
+    fn emit(&mut self, event: ProgressEvent);
+}
+
+#[derive(Debug, Default)]
+pub struct NoopProgressSink;
+
+impl ProgressSink for NoopProgressSink {
+    fn emit(&mut self, _event: ProgressEvent) {}
+}
+
+pub struct JsonlProgressSink<W: Write> {
+    writer: W,
+}
+
+impl<W: Write> JsonlProgressSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+}
+
+impl<W: Write> ProgressSink for JsonlProgressSink<W> {
+    fn emit(&mut self, event: ProgressEvent) {
+        if let Ok(line) = serde_json::to_string(&event) {
+            let _ = writeln!(self.writer, "{line}");
+            let _ = self.writer.flush();
+        }
+    }
+}
+
 impl CliRunRequest {
     pub fn validate(&self) -> Result<(), String> {
         if self.endpoint.trim().is_empty() {
@@ -1503,6 +1554,15 @@ pub fn run_with_executor<E: ModuleExecutor>(
     request: CliRunRequest,
     executor: &mut E,
 ) -> Result<CliRunReport, String> {
+    let mut progress = NoopProgressSink;
+    run_with_executor_reporting(request, executor, &mut progress)
+}
+
+pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
+    request: CliRunRequest,
+    executor: &mut E,
+    progress: &mut S,
+) -> Result<CliRunReport, String> {
     request.validate()?;
     let selected = normalized_selection(request.selected_modules.clone())?;
     let selected_set = selected.iter().cloned().collect::<BTreeSet<_>>();
@@ -1518,6 +1578,14 @@ pub fn run_with_executor<E: ModuleExecutor>(
         selected_modules: Some(selected.clone()),
     });
     start_run(&mut record, &request.started_at)?;
+    progress.emit(ProgressEvent {
+        phase: ProgressPhase::RunStarted,
+        module_id: None,
+        index: 0,
+        total: selected.len(),
+        state: None,
+        message: "检测已开始".into(),
+    });
     let stop_index = request
         .stop_after
         .as_deref()
@@ -1527,6 +1595,14 @@ pub fn run_with_executor<E: ModuleExecutor>(
         if stop_index.is_some_and(|stop_index| index > stop_index) {
             break;
         }
+        progress.emit(ProgressEvent {
+            phase: ProgressPhase::ModuleStarted,
+            module_id: Some(module_id.clone()),
+            index,
+            total: selected.len(),
+            state: None,
+            message: format!("开始检测 {module_id}"),
+        });
         let result = executor.execute_with_record(module_id, &mut record);
         let evidence = add_evidence(
             &mut record,
@@ -1568,6 +1644,14 @@ pub fn run_with_executor<E: ModuleExecutor>(
                 evidence_refs: vec![evidence.id.clone()],
             },
         )?;
+        let progress_state = serde_json::to_value(result.state)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{:?}", result.state).to_lowercase());
+        let progress_message = result
+            .reason
+            .clone()
+            .unwrap_or_else(|| format!("{module_id} 检测完成"));
         set_module_result(
             &mut record,
             ModuleResult {
@@ -1580,6 +1664,14 @@ pub fn run_with_executor<E: ModuleExecutor>(
             },
             &request.started_at,
         )?;
+        progress.emit(ProgressEvent {
+            phase: ProgressPhase::ModuleCompleted,
+            module_id: Some(module_id.clone()),
+            index: index + 1,
+            total: selected.len(),
+            state: Some(progress_state),
+            message: progress_message,
+        });
         if stop_index == Some(index) {
             stop_run(
                 &mut record,
@@ -1587,11 +1679,27 @@ pub fn run_with_executor<E: ModuleExecutor>(
                 &request.started_at,
             )?;
             stopped = true;
+            progress.emit(ProgressEvent {
+                phase: ProgressPhase::RunStopped,
+                module_id: None,
+                index: index + 1,
+                total: selected.len(),
+                state: Some("unverified".into()),
+                message: "检测已停止，未完成项目保持未验证".into(),
+            });
             break;
         }
     }
     if !stopped {
         complete_run(&mut record, &request.started_at)?;
+        progress.emit(ProgressEvent {
+            phase: ProgressPhase::RunCompleted,
+            module_id: None,
+            index: selected.len(),
+            total: selected.len(),
+            state: None,
+            message: "检测已完成".into(),
+        });
     }
     let overall = if stopped {
         OverallConclusion::Inconclusive
@@ -1780,6 +1888,17 @@ mod tests {
                 evidence_summary: "controlled test result".into(),
                 evidence_payload: json!({"fixture": true}),
             }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingProgress {
+        events: Vec<ProgressEvent>,
+    }
+
+    impl ProgressSink for RecordingProgress {
+        fn emit(&mut self, event: ProgressEvent) {
+            self.events.push(event);
         }
     }
 
@@ -2101,6 +2220,44 @@ mod tests {
         );
         assert_eq!(report.record.lifecycle, LifecycleState::Completed);
         assert_eq!(report.overall, Some(OverallConclusion::Usable));
+    }
+
+    #[test]
+    fn progress_sink_emits_run_and_module_lifecycle() {
+        let mut executor = TestExecutor {
+            calls: Vec::new(),
+            state: ModuleResultState::Pass,
+        };
+        let mut progress = RecordingProgress::default();
+        run_with_executor_reporting(
+            request(Some(vec!["capability".into(), "agent".into()])),
+            &mut executor,
+            &mut progress,
+        )
+        .unwrap();
+        let phases = progress
+            .events
+            .iter()
+            .map(|event| event.phase.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(phases[0], ProgressPhase::RunStarted);
+        assert_eq!(phases.last(), Some(&ProgressPhase::RunCompleted));
+        assert_eq!(
+            progress
+                .events
+                .iter()
+                .filter(|event| event.phase == ProgressPhase::ModuleStarted)
+                .count(),
+            2
+        );
+        assert_eq!(
+            progress
+                .events
+                .iter()
+                .filter(|event| event.phase == ProgressPhase::ModuleCompleted)
+                .count(),
+            2
+        );
     }
 
     #[test]

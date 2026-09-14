@@ -4,6 +4,8 @@
 
 发行包只声明构建时确认的目标三元组，不默认覆盖其他操作系统或 CPU 架构。包内二进制可直接运行；运行时需要能够访问目标 Chat Completions 服务。
 
+macOS 发行包另外包含 `AgentCheck.app`。在有桌面的 macOS 环境直接运行 CLI 时，会先打开原生桌面端；桌面端负责配置确认、启动检测、显示模块进度、查看结果和导出报告。`--no-gui`、SSH、CI 或无桌面环境继续使用纯 CLI。
+
 ## 前置条件
 
 - 可执行目标平台的发行包。
@@ -18,10 +20,11 @@ export MODEL_API_KEY='授权测试密钥'
 ./llm-capability-doctor \
   --url 'https://service.example.test/v1/chat/completions' \
   --model 'model-id' \
-  --no-gui \
   --format json \
   --output ./agentcheck-run.json
 ```
+
+在 macOS 桌面环境中，上面的命令会启动 AgentCheck 桌面端；如果需要无人值守或直接生成 JSON，追加 `--no-gui`。
 
 默认执行六个正式模块。专项运行示例：
 
@@ -30,7 +33,7 @@ export MODEL_API_KEY='授权测试密钥'
   --modules ingress,baseline --no-gui --format json --output ./selected.json
 ```
 
-`--stop-after MODULE` 会保留停止前事实，后续模块为 `unverified`。桌面环境默认尝试打开工作台；`--no-gui` 强制纯 CLI。
+`--stop-after MODULE` 会保留停止前事实，后续模块为 `unverified`。桌面端的导出内容直接来自同一次 Rust CLI 检测，不重新解释模块结论。
 
 ## 结果边界
 
