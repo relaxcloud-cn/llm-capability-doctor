@@ -285,7 +285,7 @@ struct ProgressScreen: View {
         }
       }
       Text(store.isRealMode
-        ? "真实检测由 Rust CLI 执行；提前停止会保留已完成的模块状态。"
+        ? "检测程序实际执行；提前停止会保留已完成的模块状态。"
         : "结束后生成使用结论；提前停止会保留已完成的结果。")
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
     }
@@ -382,9 +382,9 @@ struct DemoControlsView: View {
         SectionHeader(title: "下次检测结果")
         Picker("使用判断", selection: $store.outcome) {
           Text("可以正常使用").tag(Outcome.usable)
-          Text("可以使用，但存在限制").tag(Outcome.limited)
+          Text("可以使用，但有使用限制").tag(Outcome.limited)
           Text("目前不能正常使用").tag(Outcome.blocked)
-          Text("目前无法判断").tag(Outcome.inconclusive)
+          Text("证据不足，暂不能判断").tag(Outcome.inconclusive)
         }.labelsHidden().pickerStyle(.radioGroup).disabled(store.running)
         if store.outcome == .limited {
           Picker("错误恢复", selection: $store.agentMode) {

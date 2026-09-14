@@ -247,10 +247,10 @@ struct ReportOverview: View {
       if store.accessExpanded {
         Rectangle().fill(Theme.line).frame(height: 1).padding(.top, 13)
         VStack(spacing: 0) {
-          KVRow(label: "接口方式", value: "OpenAI Chat Completions", note: "来源：本次接入配置")
+          KVRow(label: "接口方式", value: "对话接口（OpenAI 格式）", note: "来源：本次接入配置")
           KVRow(
             label: "响应模型名", value: record.responseModel ?? "尚无可用响应记录",
-            note: "来自响应的 model 字段；不据此确认后端模型身份。")
+            note: "来自响应的模型名称字段；不据此确认后端模型身份。")
           if let name = record.responseModel, name != record.service.model {
             KVRow(
               label: "名称差异", value: "配置名称与响应名称不同",
@@ -383,7 +383,7 @@ struct ReportOverview: View {
                   .fixedSize(horizontal: false, vertical: true)
               }
               Spacer()
-              Text(finding.unverified ? "未验证" : finding.state.rawValue)
+              Text(finding.unverified ? "尚未检测" : finding.state.rawValue)
                 .font(Theme.captionFont).foregroundStyle(finding.state.style.color)
               Image(systemName: "chevron.right")
                 .font(.system(size: 10)).foregroundStyle(Theme.faint)

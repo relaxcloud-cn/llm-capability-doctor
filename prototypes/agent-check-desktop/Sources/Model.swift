@@ -60,9 +60,9 @@ enum Outcome: String, CaseIterable, Codable, Identifiable {
   var title: String {
     switch self {
     case .usable: return "可以正常使用"
-    case .limited: return "可以使用，但存在限制"
+    case .limited: return "可以使用，但有使用限制"
     case .blocked: return "目前不能正常使用"
-    case .inconclusive: return "目前无法判断"
+    case .inconclusive: return "证据不足，暂不能判断"
     }
   }
 }
@@ -84,7 +84,7 @@ struct Service: Codable, Equatable {
 struct TestContext: Codable, Equatable {
   var rules = "产品设计 v0.6 · 演示规则 3"
   var samples = "演示样本集 3"
-  var platform = "allinone 受控任务约束 · 演示"
+  var platform = "受控任务约束 · 演示"
   var environment = "固定隔离工作区 · 演示环境 1"
   var parameters = "固定演示参数组 A"
   var baseline = "ab3dcfbbad92dba6c0a3e6e1e6b83e7b32e4d3b52a87ea868ee2835c069ad147"
@@ -556,7 +556,7 @@ final class Workbench: ObservableObject {
   }
 
   private func handleProgress(_ event: ProgressEvent) {
-    progressMessage = event.message
+    progressMessage = Self.customerProgressMessage(event.message)
     if event.phase == "module_started" {
       elapsed = max(elapsed, event.index * 2)
     } else if event.phase == "module_completed", let moduleID = event.moduleID {
@@ -565,6 +565,19 @@ final class Workbench: ObservableObject {
       }
       moduleStates[moduleID] = event.state ?? "unknown"
       elapsed = max(elapsed, event.index * 2)
+    }
+  }
+
+  private static func customerProgressMessage(_ message: String) -> String {
+    [
+      "specification": "模型规格实测",
+      "capability": "模型能力跑分",
+      "performance": "模型性能实测",
+      "baseline": "模型基线对比",
+      "ingress": "模型接入信息",
+      "agent": "智能体实测",
+    ].reduce(message) { result, item in
+      result.replacingOccurrences(of: item.key, with: item.value)
     }
   }
 

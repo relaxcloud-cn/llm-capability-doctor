@@ -221,7 +221,7 @@ func runModelTests() async throws {
     BaselineItem.all[12].title == "流式用量返回"
       && !BaselineItem.all[12].responses.contains { $0.raw.contains("[DONE]") }, "流式用量不混入结束标记")
   try expect(
-    Set(BaselineItem.all[13].responses.compactMap(\.unavailable)) == ["无适用基线", "未获得响应", "未验证"],
+    Set(BaselineItem.all[13].responses.compactMap(\.unavailable)) == ["无适用基线", "未获得响应", "尚未检测"],
     "空状态不混淆")
   let exported =
     try JSONSerialization.jsonObject(with: JSONEncoder().encode(ReportExport(record: limited)))
