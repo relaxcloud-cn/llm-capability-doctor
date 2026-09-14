@@ -7,6 +7,7 @@ pub mod conclusion;
 pub mod gui;
 pub mod ingress;
 pub mod performance;
+pub mod preflight;
 pub mod records;
 pub mod specification;
 pub mod transport;
