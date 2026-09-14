@@ -5,11 +5,13 @@ use llm_capability_doctor::cli::{
     write_report,
 };
 use llm_capability_doctor::gui::{
-    NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform, detect_desktop,
+    NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
 };
+use llm_capability_doctor::preflight::{ConnectivityState, preflight_token, run_startup_preflight};
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -61,56 +63,71 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
-    let Some(endpoint) = cli.url else {
-        eprintln!("缺少服务 URL；请使用 --url 提供目标地址");
-        std::process::exit(2);
-    };
-    let Some(model) = cli.model else {
-        eprintln!("缺少模型名称；请使用 --model 提供配置值");
-        std::process::exit(2);
-    };
     let api_key = cli
         .api_key
         .or_else(|| std::env::var("MODEL_API_KEY").ok())
         .filter(|key| !key.trim().is_empty());
-    let Some(api_key) = api_key else {
-        eprintln!("缺少 API 密钥；请使用 MODEL_API_KEY 提供，命令行参数仅用于兼容隐藏输入");
+    let environment = env::vars().collect::<BTreeMap<_, _>>();
+    let preflight = run_startup_preflight(
+        cli.url.as_deref(),
+        cli.model.as_deref(),
+        api_key.as_deref(),
+        env::var("MODEL_API_PREFLIGHT_TOKEN").ok().as_deref(),
+        Duration::from_secs(cli.timeout_seconds.min(30)),
+        current_platform(),
+        &environment,
+    );
+    print_preflight_results(&preflight);
+
+    if preflight.connectivity.state != ConnectivityState::Passed {
+        eprintln!("[启动方式] 未开始正式检测：请先修正模型配置或连接问题");
         std::process::exit(2);
+    }
+
+    let Some(endpoint) = cli.url else {
+        unreachable!("通过模型连通性检查后 URL 必然存在");
+    };
+    let Some(model) = cli.model else {
+        unreachable!("通过模型连通性检查后模型名称必然存在");
+    };
+    let Some(api_key) = api_key else {
+        unreachable!("通过模型连通性检查后 API 密钥必然存在");
     };
     let selected_modules = cli.modules.clone();
     let stop_after = cli.stop_after.clone();
-    if !cli.no_gui && cfg!(target_os = "macos") {
-        let environment = env::vars().collect::<BTreeMap<_, _>>();
-        let desktop = detect_desktop(current_platform(), &environment);
-        if desktop.supported {
-            let cli_path = match env::current_exe() {
-                Ok(path) => path,
-                Err(error) => {
-                    eprintln!("读取 CLI 路径失败，回退到纯 CLI：{error}");
-                    std::path::PathBuf::new()
-                }
+    if !cli.no_gui && cfg!(target_os = "macos") && preflight.desktop.supported {
+        let cli_path = match env::current_exe() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("[启动方式] 读取 CLI 路径失败，回退到纯 CLI：{error}");
+                std::path::PathBuf::new()
+            }
+        };
+        if !cli_path.as_os_str().is_empty() {
+            let mut launcher = SystemNativeGuiLauncher;
+            let request = NativeGuiRequest {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                modules: selected_modules.clone(),
+                stop_after: stop_after.clone(),
+                timeout_seconds: cli.timeout_seconds,
+                output: cli.output.clone(),
+                api_key: api_key.clone(),
+                cli_path,
+                preflight_token: preflight_token(&endpoint, &model, &api_key),
             };
-            if !cli_path.as_os_str().is_empty() {
-                let mut launcher = SystemNativeGuiLauncher;
-                let request = NativeGuiRequest {
-                    endpoint: endpoint.clone(),
-                    model: model.clone(),
-                    modules: selected_modules.clone(),
-                    stop_after: stop_after.clone(),
-                    timeout_seconds: cli.timeout_seconds,
-                    output: cli.output.clone(),
-                    api_key: api_key.clone(),
-                    cli_path,
-                };
-                match launcher.launch(&request) {
-                    Ok(path) => {
-                        println!("AgentCheck 桌面端已启动：{}", path.display());
-                        return;
-                    }
-                    Err(error) => eprintln!("{error}；回退到纯 CLI 执行"),
+            match launcher.launch(&request) {
+                Ok(path) => {
+                    eprintln!("[启动方式] GUI：启动成功（{}）", path.display());
+                    return;
                 }
+                Err(error) => eprintln!("[启动方式] GUI：启动失败（{error}），回退到纯 CLI"),
             }
         }
+    } else if cli.no_gui {
+        eprintln!("[启动方式] CLI：已指定 --no-gui");
+    } else {
+        eprintln!("[启动方式] CLI：当前环境不自动启动原生 GUI");
     }
     let request = CliRunRequest {
         endpoint,
@@ -170,4 +187,27 @@ fn main() {
     } else {
         println!("{content}");
     }
+}
+
+fn print_preflight_results(preflight: &llm_capability_doctor::preflight::StartupPreflight) {
+    let connectivity = &preflight.connectivity;
+    let connectivity_state = match connectivity.state {
+        ConnectivityState::Passed => "通过",
+        ConnectivityState::Failed => "失败",
+        ConnectivityState::NotRun => "未执行",
+    };
+    eprintln!(
+        "[启动检查] 模型连通性：{connectivity_state}（{}，耗时 {} ms）",
+        connectivity.reason, connectivity.elapsed_ms
+    );
+
+    let desktop_state = if preflight.desktop.supported {
+        "可用"
+    } else {
+        "不可用"
+    };
+    eprintln!(
+        "[启动检查] 桌面环境：{desktop_state}（{}）",
+        preflight.desktop.reason
+    );
 }

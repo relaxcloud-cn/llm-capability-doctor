@@ -50,6 +50,7 @@ pub struct NativeGuiRequest {
     pub output: Option<String>,
     pub api_key: String,
     pub cli_path: PathBuf,
+    pub preflight_token: String,
 }
 
 pub trait NativeGuiLauncher {
@@ -75,6 +76,7 @@ impl NativeGuiLauncher for SystemNativeGuiLauncher {
                 &request.timeout_seconds.to_string(),
             ])
             .env("MODEL_API_KEY", &request.api_key);
+        command.env("MODEL_API_PREFLIGHT_TOKEN", &request.preflight_token);
         if let Some(output) = &request.output {
             command.args(["--agentcheck-output", output]);
         }
