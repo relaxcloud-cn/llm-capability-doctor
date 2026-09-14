@@ -4,6 +4,7 @@ use llm_capability_doctor::cli::{
     generated_timestamp, render_report, run_with_executor, run_with_executor_reporting,
     write_report,
 };
+use llm_capability_doctor::evaluation::{analyze_modules, render_html, write_module_inputs};
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
 };
@@ -59,6 +60,14 @@ struct Cli {
     /// 将模块级进度以 JSON Lines 写入文件，供桌面端消费。
     #[arg(long, hide = true, value_name = "PATH")]
     progress_file: Option<String>,
+
+    /// 保存模块检测证据、OhMyPi 模块报告和最终 HTML 的目录。
+    #[arg(long, value_name = "DIR")]
+    report_dir: Option<String>,
+
+    /// 最终 HTML 报告路径；提供后自动执行 OhMyPi 模块分析。
+    #[arg(long, value_name = "PATH")]
+    html: Option<String>,
 }
 
 fn main() {
@@ -171,6 +180,80 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if cli.report_dir.is_some() || cli.html.is_some() {
+        let report_dir = cli.report_dir.clone().unwrap_or_else(|| {
+            cli.html
+                .as_deref()
+                .map(std::path::Path::new)
+                .and_then(std::path::Path::parent)
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "agentcheck-report".into())
+        });
+        let root = std::path::Path::new(&report_dir);
+        std::fs::create_dir_all(root).unwrap_or_else(|error| {
+            eprintln!("创建报告目录失败：{report_dir}：{error}");
+            std::process::exit(1);
+        });
+        let run_json = root.join("run.json");
+        let run_content = serde_json::to_vec_pretty(&report).unwrap_or_else(|error| {
+            eprintln!("序列化运行报告失败：{error}");
+            std::process::exit(1);
+        });
+        std::fs::write(&run_json, run_content).unwrap_or_else(|error| {
+            eprintln!("写入运行报告失败：{}：{error}", run_json.display());
+            std::process::exit(1);
+        });
+        let rules_path = [
+            env::current_exe().ok().and_then(|path| {
+                path.parent()
+                    .map(|parent| parent.join("rules/agentcheck-evaluation.json"))
+            }),
+            Some(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("rules/agentcheck-evaluation.json"),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("rules/agentcheck-evaluation.json")
+        });
+        let input_dir = root.join("module-input");
+        let analysis_dir = root.join("module-report");
+        let input_paths =
+            write_module_inputs(&report, &input_dir, &rules_path).unwrap_or_else(|error| {
+                eprintln!("写入模块检测证据失败：{error}");
+                std::process::exit(1);
+            });
+        let module_report_paths =
+            analyze_modules(&input_paths, &analysis_dir).unwrap_or_else(|error| {
+                eprintln!("OhMyPi 模块分析失败：{error}");
+                std::process::exit(1);
+            });
+        let html = render_html(&report, &module_report_paths).unwrap_or_else(|error| {
+            eprintln!("生成 HTML 报告失败：{error}");
+            std::process::exit(1);
+        });
+        let html_path = cli
+            .html
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.join("report.html"));
+        if let Some(parent) = html_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|error| {
+                eprintln!("创建 HTML 报告目录失败：{error}");
+                std::process::exit(1);
+            });
+        }
+        std::fs::write(&html_path, html).unwrap_or_else(|error| {
+            eprintln!("写入 HTML 报告失败：{}：{error}", html_path.display());
+            std::process::exit(1);
+        });
+        eprintln!("[报告] HTML：{}", html_path.display());
+    }
     let content = match render_report(&report, cli.format) {
         Ok(content) => content,
         Err(error) => {
