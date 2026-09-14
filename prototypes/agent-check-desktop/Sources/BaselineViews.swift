@@ -147,9 +147,9 @@ struct BaselineDetails: View {
               .textSelection(.enabled)
             Text(item.requirement).font(Theme.bodyFont)
             Text(
-              "OpenAI OpenAPI Specification · 核对日期 2026-09-08\n来源：openai/openai-openapi · openapi.json\n规范格式 3.1.0 · 文档信息版本 2.3.0（不是接口版本）"
+              "官方接口规范 · 核对日期 2026-09-08\n来源：官方公开规范文件\n规范格式 3.1.0 · 文档信息版本 2.3.0（不是接口版本）"
             ).font(Theme.captionFont).foregroundStyle(Theme.faint)
-            Text("SHA-256 \(record.context?.baseline ?? "缺失")")
+            Text("文件校验值 \(record.context?.baseline ?? "缺失")")
               .font(.system(size: 10, design: .monospaced))
               .textSelection(.enabled)
           }
@@ -168,7 +168,7 @@ struct BaselineDetails: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
       }
-      Text("红色 = 字段或结构差异，不等于模型不可用。异常响应中未执行的分支仍标记为未验证。")
+      Text("红色 = 字段或结构差异，不等于模型不可用。异常响应中未执行的分支仍标记为尚未检测。")
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
     }
   }

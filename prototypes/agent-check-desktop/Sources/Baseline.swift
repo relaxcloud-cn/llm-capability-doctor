@@ -94,7 +94,7 @@ struct BaselineItem: Codable, Identifiable {
       ]),
     .init(
       id: "BC02", group: groups[0], title: "候选回复", path: "choices[]",
-      requirement: "每个候选包含 index、message、finish_reason 和 logprobs；logprobs 必需但可为 null。",
+      requirement: "每个候选包含序号、回复消息、结束原因和概率信息；概率信息必须存在但可以为空。",
       responses: [
         sample(
           "B02-1",
@@ -323,7 +323,7 @@ struct BaselineItem: Codable, Identifiable {
       ]),
     .init(
       id: "BC10", group: groups[3], title: "增量候选", path: "chunk.choices[]",
-      requirement: "候选包含 index、delta、finish_reason；logprobs 可选。用量尾块的 choices 可为空。",
+      requirement: "候选包含序号、增量内容和结束原因；概率信息可选。用量尾块可以没有候选回复。",
       responses: [
         sample(
           "B10-1",
@@ -411,7 +411,7 @@ struct BaselineItem: Codable, Identifiable {
     .init(
       id: "BC14", group: groups[4], title: "错误对象", path: "error",
       requirement:
-        "只对照本次选定的 429 / 503 JSON 错误对象。type、message、param、code 必需，param 与 code 可为 null；不外推到所有网关错误。",
+        "只对照本次选定的 429 / 503 结构化错误对象。类型、消息、参数、错误码必须存在，参数与错误码可以为空；不外推到所有网关错误。",
       responses: [
         sample(
           "B14-1",
@@ -430,12 +430,12 @@ struct BaselineItem: Codable, Identifiable {
             "param": null,
             "code": null
           }
-          """, phase: "429 JSON 错误"),
+          """, phase: "429 结构化错误"),
         .init(
           id: "B14-2", phase: "网关 HTML 返回", actual: ["<html>gateway unavailable</html>"],
           reference: [], unavailable: "无适用基线"),
         .init(id: "B14-3", phase: "请求未获得响应", actual: [], reference: [], unavailable: "未获得响应"),
-        .init(id: "B14-4", phase: "503 场景未执行", actual: [], reference: [], unavailable: "未验证"),
+        .init(id: "B14-4", phase: "503 场景未执行", actual: [], reference: [], unavailable: "尚未检测"),
       ]),
   ]
 }

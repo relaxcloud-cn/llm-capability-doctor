@@ -39,10 +39,10 @@ struct AccessSummary: View {
       }
       if store.accessExpanded {
         VStack(spacing: 0) {
-          KVRow(label: "接口方式", value: "OpenAI Chat Completions", note: "来源：本次接入配置")
+          KVRow(label: "接口方式", value: "对话接口（OpenAI 格式）", note: "来源：本次接入配置")
           KVRow(
             label: "响应模型名", value: observed?.responseModel ?? "尚无可用响应记录",
-            note: "来自响应的 model 字段；不据此确认后端模型身份。")
+            note: "来自响应的模型名称字段；不据此确认后端模型身份。")
           if let observed, let name = observed.responseModel, name != observed.service.model {
             KVRow(
               label: "名称差异", value: "配置名称与响应名称不同",

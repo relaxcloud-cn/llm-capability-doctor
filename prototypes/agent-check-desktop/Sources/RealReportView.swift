@@ -36,12 +36,12 @@ struct RealModuleView: View {
         style: stateStyle,
         title: "\(module.title)：\(label)",
         detail: reason,
-        meta: "真实 Rust CLI 执行 · \(evidenceCount) 条统一证据"
+        meta: "检测程序实际执行 · \(evidenceCount) 条统一证据"
       ) {
         EmptyView()
       }
       VStack(alignment: .leading, spacing: 0) {
-        SectionHeader(title: "本次真实结果", caption: "GUI 只展示 Rust CLI 生成的事实，不重新解释结论")
+        SectionHeader(title: "本次真实结果", caption: "页面只展示检测程序生成的事实，不重新解释结论")
         KVRow(label: "检测项目", value: module.title)
         KVRow(label: "执行状态", value: label)
         KVRow(label: "证据条目", value: "\(evidenceCount) 条")
@@ -53,7 +53,7 @@ struct RealModuleView: View {
       .padding(18)
       .background(.white, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
       .overlay(RoundedRectangle(cornerRadius: Theme.radiusCard).stroke(Theme.line))
-      Text("完整请求、响应摘要、事件、证据引用和未验证范围请使用右上角导出报告查看。")
+      Text("完整请求、响应摘要、事件、证据引用和尚未检测范围请使用右上角导出报告查看。")
         .font(Theme.captionFont)
         .foregroundStyle(Theme.faint)
         .fixedSize(horizontal: false, vertical: true)
@@ -65,10 +65,10 @@ struct RealModuleView: View {
     case "pass": return "通过"
     case "fail": return "失败"
     case "unsupported": return "不支持"
-    case "invalid_execution": return "执行无效"
-    case "inconclusive": return "待确认"
+    case "invalid_execution": return "本次检测未完成"
+    case "inconclusive": return "证据不足，暂不能判断"
     case "not_selected": return "未选择"
-    default: return "未验证"
+    default: return "尚未检测"
     }
   }
 }

@@ -59,7 +59,7 @@ struct CatalogDetails: View {
         title: performance ? "首段等待 0.8 秒，较高并发下出现超时" : "输入测到 8K，输出测到 1,024 token",
         detail: performance
           ? "首段等待中位数 0.8 秒；并发 4 时 11/12 完成，连续运行 5 分钟内 29/30 完成。不同负载分开记录。"
-          : "没有探测到容量上限；更长输入未验证。参数被接受，但生效与否还没有对照证据。"
+          : "没有探测到容量上限；更长输入尚未检测。参数被接受，但生效与否还没有对照证据。"
       )
       HStack(alignment: .top, spacing: 20) {
         VStack(spacing: 6) {

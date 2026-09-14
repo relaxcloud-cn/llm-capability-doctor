@@ -12,9 +12,9 @@ struct EvidenceFact: Codable, Identifiable {
 enum ObservationState: String, Codable {
   case observed = "已有结果"
   case partial = "部分已验证"
-  case limited = "存在限制"
-  case unverified = "未验证"
-  case unknown = "无法判断"
+  case limited = "有使用限制"
+  case unverified = "尚未检测"
+  case unknown = "证据不足，暂不能判断"
 }
 struct CatalogItem: Codable, Identifiable {
   var id: String
@@ -34,7 +34,7 @@ enum Catalog {
       summary: "在本次输出预算下，8,192 token 输入被接收。", boundary: "没有找到容量上限；材料能否被正确理解，需要看模型能力跑分。",
       facts: [
         .init("输入档位", "2,048 / 4,096 / 8,192 token"), .init("输出预算", "每次最多 1,024 token"),
-        .init("结果", "三个输入档位均收到完整回复；更长输入未验证"),
+        .init("结果", "三个输入档位均收到完整回复；更长输入尚未检测"),
       ],
       evidence: [
         .init("S1-01", "输入 2,048 token → 请求接收，回复结束"), .init("S1-02", "输入 4,096 token → 请求接收，回复结束"),
@@ -48,9 +48,9 @@ enum Catalog {
         .init("观察方式", "分别核对实际长度和结束原因，不把自然结束当成触顶"),
       ],
       evidence: [
-        .init("S2-01", "限制 128；输出 128；finish_reason: length"),
-        .init("S2-02", "限制 512；输出 512；finish_reason: length"),
-        .init("S2-03", "限制 1,024；输出 1,024；finish_reason: length"),
+        .init("S2-01", "限制 128；输出 128；结束原因：达到长度限制"),
+        .init("S2-02", "限制 512；输出 512；结束原因：达到长度限制"),
+        .init("S2-03", "限制 1,024；输出 1,024；结束原因：达到长度限制"),
       ]),
     .init(
       id: "S3", title: "常用参数支持", value: "已接受，生效待验证", state: .unknown,
@@ -62,24 +62,24 @@ enum Catalog {
       evidence: [.init("S3-01", "temperature: 0 → 收到文本"), .init("S3-02", "temperature: 1 → 收到文本")]),
     .init(
       id: "S4", title: "工具调用支持", value: "最小闭环已完成", state: .observed,
-      summary: "发起函数调用、回传工具结果、继续回复的闭环已完成。", boundary: "不据此判断复杂工具选择质量；流式工具调用、并行调用未验证。",
+      summary: "发起函数调用、回传工具结果、继续回复的闭环已完成。", boundary: "不据此判断复杂工具选择质量；流式工具调用、并行调用尚未检测。",
       facts: [
-        .init("工具", "lookup_status；只读；对象 service-17"), .init("已验证方式", "自动选择、指定单个函数"),
-        .init("最终结果", "引用工具返回的 ready 状态后结束"),
+        .init("工具", "查询状态；只读；对象 示例对象 17"), .init("已验证方式", "自动选择、指定单个函数"),
+        .init("最终结果", "引用工具返回的已就绪状态后结束"),
       ],
       evidence: [
-        .init("S4-01", "lookup_status({id: service-17}) → ready → 回复引用 ready"),
-        .init("S4-02", "指定 lookup_status → 工具结果回传 → 完整续答"),
+        .init("S4-01", "查询状态（对象：示例对象 17）→ 已就绪 → 回复引用已就绪状态"),
+        .init("S4-02", "指定查询状态 → 工具结果回传 → 完整续答"),
       ]),
     .init(
-      id: "S5", title: "结构化输出支持", value: "JSON 与结构约束分开验证", state: .observed,
-      summary: "JSON 样例可解析，指定结构样例包含约定字段与类型。", boundary: "只覆盖本次结构；合法 JSON 不自动等于满足任意结构约束。",
+      id: "S5", title: "结构化输出支持", value: "结构化数据（JSON）与结构约束分开验证", state: .observed,
+      summary: "结构化数据（JSON）样例可解析，指定结构样例包含约定字段与类型。", boundary: "只覆盖本次结构；合法结构化数据不自动等于满足任意结构约束。",
       facts: [
-        .init("JSON 输出", "可解析为对象"), .init("指定结构", "name: string；count: integer；必需字段齐全"),
+        .init("结构化数据输出", "可解析为对象"), .init("指定结构", "名称：文本；数量：整数；必需字段齐全"),
         .init("未覆盖", "更复杂的嵌套、组合约束和全部关键字"),
       ],
       evidence: [
-        .init("S5-01", "JSON：{\"name\":\"alpha\",\"count\":2}"),
+        .init("S5-01", "结构化数据：{\"name\":\"alpha\",\"count\":2}"),
         .init("S5-02", "指定结构：字段存在、类型正确，无额外字段"),
       ]),
     .init(
@@ -94,7 +94,7 @@ enum Catalog {
       id: "S7", title: "流式输出支持", value: "普通回复完成；工具组合未测", state: .partial,
       summary: "普通文本增量可以汇集并正常结束；流式工具调用还没有执行证据。", boundary: "未覆盖部分不判失败。生成速度和断流表现另见模型性能实测。",
       facts: [
-        .init("普通回复", "三个样例均收到增量、可汇集、完整结束"), .init("工具调用组合", "未验证"),
+        .init("普通回复", "三个样例均收到增量、可汇集、完整结束"), .init("工具调用组合", "尚未检测"),
         .init("结构对照", "模型基线对比另有独立分块样例，不借作本项证据"),
       ],
       evidence: [.init("S7-01 / 02 / 03", "普通流式回复已汇集，结束标记已记录；未发起流式工具任务")]),
@@ -195,7 +195,7 @@ enum Scores {
         [
           ("甲组完成 2 项，乙组完成 3 项。只输出总数。", "5", "5"), ("仅列出红色物品：红笔、蓝杯、红盒。", "红笔、红盒", "红笔、红盒"),
           ("A 已完成，B 未开始。仅输出未开始项。", "B", "B"), ("甲于周二提交、周三通过。只输出提交日。", "周二", "周二"),
-          ("服务已恢复。用 JSON 的 status 字段返回中文状态。", "{\"status\":\"已恢复\"}", "已恢复"),
+          ("服务已恢复。用结构化数据的状态字段返回中文状态。", "{\"status\":\"已恢复\"}", "已恢复"),
         ])),
     .init(
       id: "C2", title: "信息提取与结构化填写", summary: "显式信息提取完整，缺失字段未编造", condition: "五条记录；核对字段、对象及缺失信息",
@@ -212,10 +212,10 @@ enum Scores {
       cases: cases(
         "C3",
         [
-          ("查 A 状态；工具 lookup(id)。", "lookup(A)", "lookup(A)"),
-          ("查 B 详情；工具 detail(id) 与 list()。", "detail(B)", "detail(B)"),
-          ("只用已给出的状态 ready 作答。", "不调用工具", "lookup(A)"),
-          ("查询对象未指定；不允许猜测。", "澄清对象", "lookup(default)"), ("要求修改记录，目录仅有只读工具。", "无合适工具", "无合适工具"),
+          ("查 A 状态；使用查询工具。", "查询（A）", "查询（A）"),
+          ("查 B 详情；使用详情查询和列表查询。", "查询详情（B）", "查询详情（B）"),
+          ("只用已给出的状态已就绪作答。", "不调用工具", "查询（A）"),
+          ("查询对象未指定；不允许猜测。", "澄清对象", "查询默认对象"), ("要求修改记录，目录仅有只读工具。", "无合适工具", "无合适工具"),
         ])),
     .init(
       id: "C4", title: "多轮对话与条件承接", summary: "对象保持较好；修改时间后有一次沿用旧值",
@@ -312,7 +312,7 @@ extension RunRecord {
   var agentFindings: [AgentFinding] { AgentEvidence.findings(samples: agentSamples) }
   var explanation: String {
     if isRealReport {
-      return "本页展示真实 Rust CLI 检测产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。"
+      return "本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。"
     }
     if !hasCurrentEvidence { return "旧版记录保留当时摘要：\(outcome.title)。不套用本版分类和证据。" }
     if hasConfirmedBlocker { return "只读任务中发生未经批准的写入请求；尚无已验证的可靠规避方式。" }
@@ -320,7 +320,7 @@ extension RunRecord {
     if !completed.contains(.agent) { return "本次未完成智能体实测，不能从规格、分类成绩或性能推断任务可用性。" }
     if agentMode == "pending-review" { return "已观察到一次恢复失败，规定复核尚未完成；当前不能确定使用结论。" }
     switch outcome {
-    case .usable: return "本次受控只读任务均按要求完成，异常处理与权限边界符合要求；尚未验证完整业务流程。"
+    case .usable: return "本次受控只读任务均按要求完成，异常处理与权限边界符合要求；完整业务流程尚未检测。"
     case .limited:
       return agentMode == "intermittent"
         ? "本次受控只读任务中，工具临时出错后有 1 次未能恢复，后续 2 次复核成功；仍保留这一限制。"
@@ -367,7 +367,7 @@ extension RunRecord {
     case .functions: return "信息提取 5/5；工具选择 3/5；4K 长材料 3/5，其余三类各 4/5"
     case .performance: return "首段等待 0.8 秒；并发 4 时 11/12 完成，连续 5 分钟内 29/30 完成"
     case .agent: return limitation
-    case .comparison: return "14 个结构维度，5 项包含差异；部分错误分支尚未验证"
+    case .comparison: return "14 个结构维度，5 项包含差异；部分错误分支尚未检测"
     }
   }
 }
@@ -405,7 +405,7 @@ struct ReportExport: Encodable {
     try c.encode(
       simulated
         ? "所有数据为演示；题库、规格子项、计量与负载不是正式默认。基线样例归属独立响应，不能冒充 Agent 调用证据。"
-        : "真实检测报告由 Rust CLI 生成；GUI 只负责展示和导出，不重新解释模块结论。",
+        : "真实检测报告由检测程序生成；页面只负责展示和导出，不重新解释模块结论。",
       forKey: .limitations
     )
   }

@@ -44,12 +44,12 @@ struct AgentDetails: View {
         VStack(alignment: .leading, spacing: 14) {
           VerdictBanner(
             style: Theme.informative,
-            title: "业务流程尚未验证",
+            title: "业务流程尚未检测",
             detail: "本次只检测了受控通用任务；你的真实业务任务需要单独验证。")
           VStack(spacing: 0) {
-            KVRow(label: "未验证", value: "按业务技能完成操作")
-            KVRow(label: "未验证", value: "调用工具调查并核对信息")
-            KVRow(label: "未验证", value: "形成带证据的交付结果")
+            KVRow(label: "尚未检测", value: "按业务技能完成操作")
+            KVRow(label: "尚未检测", value: "调用工具调查并核对信息")
+            KVRow(label: "尚未检测", value: "形成带证据的交付结果")
           }
         }
       } else {
@@ -58,7 +58,7 @@ struct AgentDetails: View {
             Picker("检查项筛选", selection: $store.agentFilter) {
               Text("全部").tag("all")
               Text("问题").tag("problems")
-              Text("未验证").tag("unverified")
+              Text("尚未检测").tag("unverified")
             }.labelsHidden().pickerStyle(.segmented).padding(.bottom, 6)
             ForEach(visible) { finding in
               Button {
@@ -78,7 +78,7 @@ struct AgentDetails: View {
                     .multilineTextAlignment(.leading)
                     .foregroundStyle(Theme.ink)
                   Spacer(minLength: 2)
-                  Text(finding.unverified ? "未验证" : finding.state.rawValue)
+                  Text(finding.unverified ? "尚未检测" : finding.state.rawValue)
                     .font(.system(size: 10.5, weight: .medium))
                     .foregroundStyle(finding.state.style.color)
                 }
@@ -138,7 +138,7 @@ struct AgentFindingView: View {
       SectionHeader(title: finding.name, caption: "检查项 A\(finding.id + 1)")
       HStack(alignment: .top, spacing: 10) {
         Pill(
-          text: finding.unverified ? "未验证" : finding.state.rawValue,
+          text: finding.unverified ? "尚未检测" : finding.state.rawValue,
           style: finding.state.style)
         Text(finding.observation)
           .font(Theme.bodyFont)
