@@ -4,7 +4,9 @@ use llm_capability_doctor::cli::{
     generated_timestamp, render_report, run_with_executor, run_with_executor_reporting,
     write_report,
 };
-use llm_capability_doctor::evaluation::{analyze_modules, render_html, write_module_inputs};
+use llm_capability_doctor::evaluation::{
+    AnalyzerConfig, analyze_modules, render_html, write_module_inputs,
+};
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
 };
@@ -139,8 +141,8 @@ fn main() {
         eprintln!("[启动方式] CLI：当前环境不自动启动原生 GUI");
     }
     let request = CliRunRequest {
-        endpoint,
-        model,
+        endpoint: endpoint.clone(),
+        model: model.clone(),
         api_key: Some(api_key.clone()),
         selected_modules,
         stop_after,
@@ -150,7 +152,7 @@ fn main() {
     let mut executor = match LiveExecutor::new_full(
         request.endpoint.clone(),
         request.model.clone(),
-        api_key,
+        api_key.clone(),
         std::time::Duration::from_secs(cli.timeout_seconds),
     ) {
         Ok(executor) => executor,
@@ -229,11 +231,19 @@ fn main() {
                 eprintln!("写入模块检测证据失败：{error}");
                 std::process::exit(1);
             });
-        let module_report_paths =
-            analyze_modules(&input_paths, &analysis_dir).unwrap_or_else(|error| {
-                eprintln!("OhMyPi 模块分析失败：{error}");
-                std::process::exit(1);
-            });
+        let module_report_paths = analyze_modules(
+            &input_paths,
+            &analysis_dir,
+            &AnalyzerConfig {
+                endpoint: endpoint.clone(),
+                model: model.clone(),
+                api_key: api_key.clone(),
+            },
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("OhMyPi 模块分析失败：{error}");
+            std::process::exit(1);
+        });
         let html = render_html(&report, &module_report_paths).unwrap_or_else(|error| {
             eprintln!("生成 HTML 报告失败：{error}");
             std::process::exit(1);

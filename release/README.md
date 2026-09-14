@@ -35,10 +35,10 @@ export MODEL_API_KEY='授权测试密钥'
 
 `--stop-after MODULE` 会保留停止前事实，后续模块为 `unverified`。桌面端的导出内容直接来自同一次 Rust CLI 检测，不重新解释模块结论。
 
-完整评估流程：
+完整评估流程（发行包已包含对应平台的 OhMyPi `omp`）：
 
 ```bash
-OMP_BIN=omp ./llm-capability-doctor \
+./llm-capability-doctor \
   --url "$MODEL_URL" \
   --model "$MODEL_ID" \
   --no-gui \
@@ -46,7 +46,7 @@ OMP_BIN=omp ./llm-capability-doctor \
   --html ./agentcheck-report/report.html
 ```
 
-该流程会为每个模块保存 `module-input/*.input.json`，再由 OhMyPi 按仓库中的版本化规则生成 `module-report/*.report.json`，最后生成 `report.html`。OhMyPi 不可用或输出不符合约定时，模块报告保留为 `inconclusive`。
+该流程会为每个模块保存 `module-input/*.input.json`，CLI 会自动生成本次运行的 OhMyPi 模型配置，让 OhMyPi 使用同一个客户模型，再生成 `module-report/*.report.json` 和 `report.html`。也可以通过 `OMP_BIN` 指定外部 OhMyPi 路径。OhMyPi 不可用或输出不符合约定时，模块报告保留为 `inconclusive`。
 
 ## 结果边界
 
