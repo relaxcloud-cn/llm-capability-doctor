@@ -156,15 +156,6 @@ struct WorkbenchView: View {
       }
 
       HStack {
-        Button {
-          store.showDemoControls = true
-        } label: {
-          Label("演示场景", systemImage: "play.rectangle")
-            .font(.system(size: 11))
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(Theme.muted)
-        .help("演示场景与数据说明")
         Spacer()
         IconButton(symbol: "gearshape", help: "设置") { store.showSettings = true }
       }
@@ -319,7 +310,7 @@ struct EmptyModule: View {
 @MainActor
 func exportRecord(_ record: RunRecord, store: Workbench) {
   let panel = NSSavePanel()
-  panel.nameFieldStringValue = "agent-check-demo-\(record.id.uuidString.prefix(8)).json"
+  panel.nameFieldStringValue = "agent-check-record-\(record.id.uuidString.prefix(8)).json"
   panel.title = "导出检测记录"
   guard panel.runModal() == .OK, let url = panel.url else { return }
   do {
@@ -331,6 +322,6 @@ func exportRecord(_ record: RunRecord, store: Workbench) {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     try encoder.encode(ReportExport(record: record)).write(to: url, options: .atomic)
-    store.toast = "已导出检测记录，包含演示数据标识"
+    store.toast = "已导出检测记录"
   } catch { store.toast = "导出失败，请检查保存位置权限后重试。" }
 }

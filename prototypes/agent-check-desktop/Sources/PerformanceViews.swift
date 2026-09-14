@@ -60,7 +60,7 @@ struct PerformanceDetails: View {
       Fold(title: "逐次测量记录", expanded: $store.evidenceExpanded) {
         ForEach(selected.evidence) { KVRow(label: $0.label, value: $0.value) }
       }
-      Text("固定演示服务与参数组。当前负载是演示条件，不是生产性能承诺。")
+      Text("本页展示当前检测服务与参数组；性能结果仅对本次测试条件负责。")
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
     }
   }

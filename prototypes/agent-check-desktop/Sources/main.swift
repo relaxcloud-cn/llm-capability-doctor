@@ -78,7 +78,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     guard store.running && !automated else { return true }
     let alert = NSAlert()
     alert.messageText = "停止检测并关闭窗口？"
-    alert.informativeText = "已完成的演示项目会保存在历史记录中。"
+    alert.informativeText = "已完成的检测项目会保存在历史记录中。"
     alert.addButton(withTitle: "继续检测")
     alert.addButton(withTitle: "停止并关闭")
     if alert.runModal() == .alertSecondButtonReturn {

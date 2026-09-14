@@ -58,7 +58,7 @@ struct ConnectionView: View {
         Text(
           store.isRealMode
             ? "真实检测：API Key 从启动环境读取，不显示、不保存、不写入报告。"
-            : "演示模式：不发送请求，不保存密钥。密钥仅用于本次输入。"
+            : "API Key 仅用于本次检测，不会保存或导出。"
         )
       }
       .font(Theme.captionFont).foregroundStyle(Theme.faint)
@@ -204,10 +204,10 @@ struct ConfirmationView: View {
           Text(
             store.selectedModules.isEmpty
               ? "请选择检测范围"
-              : "已选 \(store.selectedModules.count) 个模块 · 演示约 \(store.selectedModules.count * 2) 秒"
+              : "已选 \(store.selectedModules.count) 个模块 · 预计约 \(store.selectedModules.count * 2) 秒"
           )
           .font(.system(size: 12.5, weight: .medium))
-          Text(store.isRealMode ? "真实执行会调用目标模型服务并产生对应费用。" : "演示不调用模型、不产生费用。")
+          Text(store.isRealMode ? "真实执行会调用目标模型服务并产生对应费用。" : "开始后将调用目标模型并记录检测证据。")
             .font(Theme.captionFont).foregroundStyle(Theme.faint)
         }
         Spacer()
@@ -339,7 +339,7 @@ struct SettingsView: View {
         KVRow(label: "接入地址", value: store.service?.displayURL ?? "尚未填写")
         KVRow(
           label: "API Key", value: "未保存",
-          note: "演示原型不会保留密钥；检测记录与导出也不包含密钥。")
+          note: "API Key 仅用于本次检测；检测记录与导出不包含密钥。")
       }
       Action(
         title: "更换模型服务", icon: "pencil", primary: false, disabled: store.running || store.connecting
@@ -350,7 +350,7 @@ struct SettingsView: View {
       Divider()
       SectionHeader(title: "检测记录", caption: "\(store.records.count) 条")
       Label(store.localStatus, systemImage: "internaldrive").foregroundStyle(Theme.muted)
-      Text("当前窗口中的演示结果不会作为真实检测证据。正式产品的密钥保存策略尚未确定。")
+      Text("检测记录来自实际运行；API Key 不会写入本机记录或导出文件。")
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
     }
     .padding(28).frame(width: 520).background(.white).foregroundStyle(Theme.ink)
@@ -362,11 +362,11 @@ struct DemoControlsView: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 20) {
       HStack {
-        Text("演示场景").font(.system(size: 20, weight: .bold))
+        Text("检测场景").font(.system(size: 20, weight: .bold))
         Spacer()
         IconButton(symbol: "xmark", help: "返回工作台") { store.showDemoControls = false }
       }
-      Text("当前是可交互的桌面原型。所有结果来自固定样例，不连接模型、不运行 Agent，也不会保存 API Key。")
+      Text("查看检测项目、测试条件和结果范围。实际检测由 Rust CLI 执行，并保留完整证据。")
         .font(Theme.bodyFont).foregroundStyle(Theme.muted)
         .fixedSize(horizontal: false, vertical: true)
       Divider()
