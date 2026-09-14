@@ -20,7 +20,9 @@ fi
 
 install -m 0755 "$binary" "$stage_dir/llm-capability-doctor"
 install -m 0644 "$root_dir/release/README.md" "$stage_dir/README.md"
-package_items=(llm-capability-doctor README.md VERSION BUILD.txt SHA256SUMS)
+mkdir -p "$stage_dir/rules"
+install -m 0644 "$root_dir/rules/agentcheck-evaluation.json" "$stage_dir/rules/agentcheck-evaluation.json"
+package_items=(llm-capability-doctor README.md VERSION BUILD.txt SHA256SUMS rules)
 if [[ "$target" == *-apple-darwin && "$(uname -s)" == "Darwin" ]]; then
   "$root_dir/scripts/build-desktop-gui.sh" >/dev/null
   cp -R "$root_dir/prototypes/agent-check-desktop/build/AgentCheck.app" "$stage_dir/AgentCheck.app"

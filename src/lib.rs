@@ -4,6 +4,7 @@ pub mod calibration;
 pub mod capability;
 pub mod cli;
 pub mod conclusion;
+pub mod evaluation;
 pub mod gui;
 pub mod ingress;
 pub mod performance;
