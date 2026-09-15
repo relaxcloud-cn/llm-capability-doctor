@@ -158,6 +158,9 @@ final class Workbench: ObservableObject {
   @Published var activeModules: [CheckModule] = []
   @Published var moduleStates: [String: String] = [:]
   @Published var progressMessage = ""
+  @Published var detailIndex = 0
+  @Published var detailTotal: Int?
+  @Published var detailID: String?
   @Published var realRunError: String?
   @Published var selectedRecordID: UUID?
   @Published var toast: String?
@@ -305,7 +308,13 @@ final class Workbench: ObservableObject {
   }
   var progress: Double {
     guard !activeModules.isEmpty else { return 0 }
-    return min(Double(elapsed) / Double(activeModules.count * 2), 1)
+    let completedFraction = Double(completed.count) / Double(activeModules.count)
+    guard completed.count < activeModules.count,
+      let detailTotal,
+      detailTotal > 0
+    else { return min(completedFraction, 1) }
+    let detailFraction = Double(detailIndex) / Double(detailTotal)
+    return min((Double(completed.count) + detailFraction) / Double(activeModules.count), 1)
   }
   var activeModule: CheckModule? {
     guard running, completed.count < activeModules.count else { return nil }
@@ -392,6 +401,9 @@ final class Workbench: ObservableObject {
       selectedModules = Set(CheckModule.testModules)
     }
     persist()
+    if launchConfiguration != nil {
+      startRun(automatic: false)
+    }
   }
 
   func prepareRun(module: CheckModule? = nil) {
@@ -419,6 +431,9 @@ final class Workbench: ObservableObject {
     elapsed = 0
     moduleStates = [:]
     progressMessage = ""
+    detailIndex = 0
+    detailTotal = nil
+    detailID = nil
     runningService = service
     runningMode = outcome == .limited ? agentMode : "standard"
     runningOutcome = runningMode == "pending-review" ? .inconclusive : outcome
@@ -564,13 +579,25 @@ final class Workbench: ObservableObject {
   private func handleProgress(_ event: ProgressEvent) {
     progressMessage = Self.customerProgressMessage(event.message)
     if event.phase == "module_started" {
-      elapsed = max(elapsed, event.index * 2)
+      guard let moduleID = event.moduleID, Self.uiModule(moduleID) != nil else { return }
+      detailIndex = 0
+      detailTotal = nil
+      detailID = nil
+      elapsed = max(elapsed, completed.count * 2)
+    } else if event.phase == "module_progress", let moduleID = event.moduleID {
+      guard Self.uiModule(moduleID) != nil else { return }
+      detailIndex = event.detailIndex ?? detailIndex
+      detailTotal = event.detailTotal ?? detailTotal
+      detailID = event.detailID
     } else if event.phase == "module_completed", let moduleID = event.moduleID {
       if let module = CheckModule.fromBackend(moduleID), !completed.contains(module) {
         completed.append(module)
+        detailIndex = 0
+        detailTotal = nil
+        detailID = nil
       }
       moduleStates[moduleID] = event.state ?? "unknown"
-      elapsed = max(elapsed, event.index * 2)
+      elapsed = max(elapsed, completed.count * 2)
     }
   }
 

@@ -275,7 +275,11 @@ struct ProgressScreen: View {
             ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
             : store.progressMessage)
           Spacer()
-          Text("\(store.completed.count) / \(store.activeModules.count) 个模块完成")
+          if let detailTotal = store.detailTotal, detailTotal > 0 {
+            Text("\(store.detailIndex) / \(detailTotal) 个检测样本")
+          } else {
+            Text("\(store.completed.count) / \(store.activeModules.count) 个模块完成")
+          }
         }
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
       }

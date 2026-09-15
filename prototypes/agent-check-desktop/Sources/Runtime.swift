@@ -43,6 +43,9 @@ struct ProgressEvent: Decodable {
   var total: Int
   var state: String?
   var message: String
+  var detailIndex: Int?
+  var detailTotal: Int?
+  var detailID: String?
 
   enum CodingKeys: String, CodingKey {
     case phase
@@ -51,6 +54,9 @@ struct ProgressEvent: Decodable {
     case total
     case state
     case message
+    case detailIndex = "detail_index"
+    case detailTotal = "detail_total"
+    case detailID = "detail_id"
   }
 }
 
