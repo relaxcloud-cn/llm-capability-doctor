@@ -28,6 +28,8 @@ export MODEL_API_KEY='客户授权的密钥'
   --html ./agentcheck-report/report.html
 ```
 
+不指定 `--report-dir` 和 `--html` 时，也会默认在当前执行目录的 `./agentcheck-report/` 下保存完整报告，包含 `run.json`、模块输入输出和 `report.html`。指定其中一个参数时，另一个路径会根据它自动补齐。
+
 Windows PowerShell：
 
 ```powershell

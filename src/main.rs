@@ -218,7 +218,7 @@ fn main() {
         }
     };
 
-    if cli.report_dir.is_some() || cli.html.is_some() {
+    {
         let report_dir = cli.report_dir.clone().unwrap_or_else(|| {
             cli.html
                 .as_deref()
