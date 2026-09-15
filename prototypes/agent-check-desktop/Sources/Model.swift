@@ -122,6 +122,14 @@ struct LocalSnapshot: Codable {
   var records: [RunRecord]
 }
 
+struct ProgressItem: Identifiable {
+  let id: String
+  let name: String
+  var completed: Int
+  let total: Int
+  var state: String
+}
+
 enum Screen: Equatable {
   case home, comparison, history, result
   case module(CheckModule)
@@ -161,6 +169,7 @@ final class Workbench: ObservableObject {
   @Published var detailIndex = 0
   @Published var detailTotal: Int?
   @Published var detailID: String?
+  @Published var progressItems: [ProgressItem] = []
   @Published var realRunError: String?
   @Published var selectedRecordID: UUID?
   @Published var toast: String?
@@ -437,6 +446,7 @@ final class Workbench: ObservableObject {
     detailIndex = 0
     detailTotal = nil
     detailID = nil
+    progressItems = []
     runningService = service
     runningMode = outcome == .limited ? agentMode : "standard"
     runningOutcome = runningMode == "pending-review" ? .inconclusive : outcome
@@ -583,6 +593,7 @@ final class Workbench: ObservableObject {
     progressMessage = Self.customerProgressMessage(event.message)
     if event.phase == "module_started" {
       guard let moduleID = event.moduleID, Self.uiModule(moduleID) != nil else { return }
+      progressItems = Self.progressItems(for: moduleID)
       detailIndex = 0
       detailTotal = nil
       detailID = nil
@@ -592,6 +603,7 @@ final class Workbench: ObservableObject {
       detailIndex = event.detailIndex ?? detailIndex
       detailTotal = event.detailTotal ?? detailTotal
       detailID = event.detailID
+      updateProgressItems(moduleID: moduleID, event: event)
     } else if event.phase == "module_completed", let moduleID = event.moduleID {
       if let module = CheckModule.fromBackend(moduleID), !completed.contains(module) {
         completed.append(module)
@@ -600,8 +612,49 @@ final class Workbench: ObservableObject {
         detailID = nil
       }
       moduleStates[moduleID] = event.state ?? "unknown"
+      progressItems = progressItems.map { item in
+        var item = item
+        item.completed = item.total
+        item.state = event.state == "pass" ? "已完成" : "已结束"
+        return item
+      }
       elapsed = max(elapsed, completed.count * 2)
     }
+  }
+
+  private func updateProgressItems(moduleID: String, event: ProgressEvent) {
+    guard let detailID = event.detailID else { return }
+    let itemID = detailID.split(separator: "-").first.map(String.init) ?? detailID
+    progressItems = progressItems.map { item in
+      var item = item
+      if item.id == itemID {
+        let categoryOffset = Int(itemID.dropFirst()).map { ($0 - 1) * item.total } ?? 0
+        item.completed = min(item.total, max(0, (event.detailIndex ?? 0) - categoryOffset))
+        item.state = item.completed >= item.total ? "已完成" : "进行中"
+      } else if item.completed > 0 && item.state == "进行中" {
+        item.state = "已完成"
+      }
+      return item
+    }
+  }
+
+  private static func progressItems(for moduleID: String) -> [ProgressItem] {
+    let names: [(String, String, Int)]
+    switch moduleID {
+    case "specification":
+      names = [("S01", "协议可接受上限", 1), ("S02", "输出长度", 1), ("S03", "常用参数", 1), ("S04", "工具调用", 1), ("S05", "结构化输出", 1), ("S06", "消息与多轮输入", 1), ("S07", "流式输出", 1)]
+    case "capability":
+      names = [("C01", "文本理解与指令执行", 20), ("C02", "信息提取与结构化填写", 20), ("C03", "工具选择与参数填写", 20), ("C04", "多轮对话与条件承接", 20), ("C05", "长材料理解与信息利用", 20), ("C06", "逻辑推理与计算", 20)]
+    case "performance":
+      names = [("P01", "首字响应时间", 1), ("P02", "完整响应时间", 1), ("P03", "并发处理能力", 1), ("P04", "持续运行稳定性", 1), ("P05", "长文本负载", 1)]
+    case "agent":
+      names = [("A01", "规则遵循", 1), ("A02", "工具运用", 1), ("A03", "错误恢复", 1), ("A04", "权限边界", 1), ("A05", "真实交付", 1), ("A06", "连续任务", 1), ("A07", "上下文承接", 1), ("A08", "结果核验", 1)]
+    case "baseline":
+      names = (1...15).map { ("B\($0)", "结构对照项目 \($0)", 1) }
+    default:
+      names = []
+    }
+    return names.map { ProgressItem(id: $0.0, name: $0.1, completed: 0, total: $0.2, state: "等待中") }
   }
 
   private static func customerProgressMessage(_ message: String) -> String {
