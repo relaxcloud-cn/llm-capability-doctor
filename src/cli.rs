@@ -537,7 +537,9 @@ impl LiveExecutor {
         let run_started = std::time::Instant::now();
         let mut samples = Vec::new();
         let mut evidence = Vec::new();
-        for plan in fixed_performance_plan() {
+        let mut consecutive_environment_failures = 0_u32;
+        let mut circuit_breaker_reason: Option<String> = None;
+        'plans: for plan in fixed_performance_plan() {
             for (mode, input_tokens, target_output_tokens, target_concurrency) in
                 performance_dimensions(&plan)
             {
@@ -572,12 +574,23 @@ impl LiveExecutor {
                     };
                     let mut observations = self.run_performance_batch(vec![work]);
                     let observation = observations.pop().expect("one warmup request");
-                    self.record_performance_observation(
+                    let error_kind = self.record_performance_observation(
                         record,
                         observation,
                         &mut samples,
                         &mut evidence,
                     );
+                    if is_environment_error(error_kind) {
+                        consecutive_environment_failures += 1;
+                    } else {
+                        consecutive_environment_failures = 0;
+                    }
+                    if consecutive_environment_failures >= 3 {
+                        circuit_breaker_reason = Some(
+                            "连续 3 次请求出现网络、认证、限流或服务错误，已停止性能检测".into(),
+                        );
+                        break 'plans;
+                    }
                 }
 
                 let mut remaining = plan.formal_request_limit;
@@ -628,12 +641,24 @@ impl LiveExecutor {
                         })
                         .collect();
                     for observation in self.run_performance_batch(work) {
-                        self.record_performance_observation(
+                        let error_kind = self.record_performance_observation(
                             record,
                             observation,
                             &mut samples,
                             &mut evidence,
                         );
+                        if is_environment_error(error_kind) {
+                            consecutive_environment_failures += 1;
+                        } else {
+                            consecutive_environment_failures = 0;
+                        }
+                        if consecutive_environment_failures >= 3 {
+                            circuit_breaker_reason = Some(
+                                "连续 3 次请求出现网络、认证、限流或服务错误，已停止性能检测"
+                                    .into(),
+                            );
+                            break 'plans;
+                        }
                     }
                     formal_index += batch_size;
                     remaining -= batch_size;
@@ -685,8 +710,16 @@ impl LiveExecutor {
                 ModuleResultState::Pass
             },
             reason: Some(format!(
-                "已执行 {} 个性能正式样本；错误样本保留为不可测量",
-                formal_count
+                "已执行 {} 个性能正式样本；{}{}",
+                formal_count,
+                circuit_breaker_reason
+                    .as_deref()
+                    .unwrap_or("未触发连续失败熔断"),
+                if failed {
+                    "；错误样本保留为不可测量"
+                } else {
+                    ""
+                }
             )),
             evidence_kind: "real_performance_report".into(),
             evidence_summary: format!(
@@ -739,7 +772,7 @@ impl LiveExecutor {
         observation: PerformanceObservation,
         samples: &mut Vec<PerformanceSample>,
         evidence: &mut Vec<Value>,
-    ) {
+    ) -> Option<crate::performance::ErrorKind> {
         let evidence_id = format!("cli-performance-{}", observation.item.sample_id);
         let (sample, payload) = performance_sample(observation, &self.transport);
         let captured = add_evidence(
@@ -753,7 +786,9 @@ impl LiveExecutor {
         sample.evidence_refs = vec![captured.id.clone()];
         evidence
             .push(json!({"sample_id": sample.id, "evidence_id": captured.id, "payload": payload}));
+        let error_kind = sample.error_kind;
         samples.push(sample);
+        error_kind
     }
 
     fn execute_agent(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
@@ -1328,6 +1363,19 @@ fn performance_sample(
         limitation,
     };
     (sample, payload)
+}
+
+fn is_environment_error(error_kind: Option<crate::performance::ErrorKind>) -> bool {
+    matches!(
+        error_kind,
+        Some(
+            crate::performance::ErrorKind::Authentication
+                | crate::performance::ErrorKind::Permission
+                | crate::performance::ErrorKind::RateLimited
+                | crate::performance::ErrorKind::Service
+                | crate::performance::ErrorKind::Network
+        )
+    )
 }
 
 fn agent_tool_definitions(spec: &AgentScenarioSpec) -> Vec<Value> {
