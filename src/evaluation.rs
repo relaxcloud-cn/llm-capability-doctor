@@ -147,8 +147,21 @@ pub fn analyze_modules(
             .and_then(|name| name.strip_suffix(".input.json"))
             .ok_or_else(|| format!("无法从输入文件识别模块：{}", input_path.display()))?;
         let output_path = report_dir.join(format!("{module}.report.json"));
+        let input: ModuleInput = serde_json::from_slice(
+            &fs::read(input_path).map_err(|e| format!("读取模块输入失败：{e}"))?,
+        )
+        .map_err(|e| format!("解析模块输入失败：{e}"))?;
+        let cli_state = input
+            .hard_facts
+            .get("module_state")
+            .and_then(Value::as_str)
+            .unwrap_or("inconclusive");
         if let Err(error) = &omp {
-            write_json(&output_path, &inconclusive_report(module, error))?;
+            let mut report = inconclusive_report(module, error);
+            report.limitations.push(format!(
+                "CLI 原始状态为 {cli_state}；OhMyPi 未完成分析，不能形成最终模块结论"
+            ));
+            write_json(&output_path, &report)?;
             paths.push(output_path);
             continue;
         }
@@ -190,10 +203,34 @@ pub fn analyze_modules(
             ),
             Err(error) => inconclusive_report(module, &format!("OhMyPi 不可用：{error}")),
         };
+        let report = merge_cli_and_analyzer_result(report, cli_state);
         write_json(&output_path, &report)?;
         paths.push(output_path);
     }
     Ok(paths)
+}
+
+fn merge_cli_and_analyzer_result(mut report: ModuleReport, cli_state: &str) -> ModuleReport {
+    if report.verdict == "inconclusive" {
+        report.limitations.push(format!(
+            "CLI 原始状态为 {cli_state}；OhMyPi 结论为 inconclusive，最终不归因于模型能力"
+        ));
+        return report;
+    }
+    if matches!(
+        cli_state,
+        "inconclusive" | "invalid_execution" | "unverified"
+    ) {
+        report.verdict = "inconclusive".into();
+        report.confidence = "none".into();
+        report.summary =
+            format!("CLI 原始状态为 {cli_state}，证据不足；OhMyPi 的结果不能扩大检测范围");
+        report.findings.clear();
+        report
+            .limitations
+            .push("CLI 执行证据不足，语义分析结果不作为模型能力结论".into());
+    }
+    report
 }
 
 struct OmpConfig {
@@ -731,5 +768,41 @@ mod tests {
         assert_eq!(report.confidence, "high");
         assert_eq!(report.findings[0].item_id, "HTTP 请求与鉴权");
         assert_eq!(report.findings[0].evidence_refs, vec!["cli-ingress-0"]);
+    }
+
+    #[test]
+    fn analyzer_inconclusive_cannot_become_model_failure() {
+        let report = inconclusive_report("capability", "OhMyPi 退出失败");
+        let merged = merge_cli_and_analyzer_result(report, "fail");
+        assert_eq!(merged.verdict, "inconclusive");
+        assert!(
+            merged
+                .limitations
+                .iter()
+                .any(|item| item.contains("不归因于模型能力"))
+        );
+    }
+
+    #[test]
+    fn insufficient_cli_evidence_overrides_analyzer_success() {
+        let report = ModuleReport {
+            schema_version: "module-eval-report/v1".into(),
+            evaluation_version: EVALUATION_VERSION.into(),
+            module: "capability".into(),
+            verdict: "pass".into(),
+            confidence: "high".into(),
+            summary: "分析通过".into(),
+            findings: Vec::new(),
+            evidence_refs: Vec::new(),
+            limitations: Vec::new(),
+            analyzer: AnalyzerInfo {
+                name: "ohmypi".into(),
+                status: "completed".into(),
+            },
+        };
+        let merged = merge_cli_and_analyzer_result(report, "inconclusive");
+        assert_eq!(merged.verdict, "inconclusive");
+        assert_eq!(merged.confidence, "none");
+        assert!(merged.findings.is_empty());
     }
 }
