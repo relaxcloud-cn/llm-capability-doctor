@@ -5,7 +5,7 @@ use llm_capability_doctor::cli::{
     write_report,
 };
 use llm_capability_doctor::evaluation::{
-    AnalyzerConfig, analyze_modules, render_html, write_module_inputs,
+    AnalyzerConfig, analyze_modules, render_html, write_bundled_module_inputs,
 };
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
@@ -18,7 +18,8 @@ use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "llm-capability-doctor",
+    name = "agentcheck",
+    bin_name = "agentcheck",
     version,
     about = "检测模型服务能力并输出有证据的使用结论"
 )]
@@ -55,6 +56,18 @@ struct Cli {
     #[arg(long)]
     no_gui: bool,
 
+    /// 请求打开桌面端；不可用时说明原因并继续纯命令行检测。
+    #[arg(long, conflicts_with = "no_gui")]
+    gui: bool,
+
+    /// 检查内置分析程序是否可运行，无需连接模型。
+    #[arg(long)]
+    runtime_check: bool,
+
+    /// 查看内置分析程序及其依赖的许可声明。
+    #[arg(long)]
+    licenses: bool,
+
     /// 单次服务请求超时时间，单位为秒。
     #[arg(long, default_value_t = 300, value_parser = clap::value_parser!(u64).range(1..))]
     timeout_seconds: u64,
@@ -74,6 +87,26 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+    if cli.licenses {
+        match llm_capability_doctor::runtime::licenses() {
+            Ok(content) => println!("{content}"),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if cli.runtime_check {
+        match llm_capability_doctor::runtime::check() {
+            Ok(value) => println!("{}", serde_json::to_string_pretty(&value).unwrap()),
+            Err(error) => {
+                eprintln!("[运行检查] {error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let api_key = cli
         .api_key
         .or_else(|| std::env::var("MODEL_API_KEY").ok())
@@ -106,7 +139,7 @@ fn main() {
     };
     let selected_modules = cli.modules.clone();
     let stop_after = cli.stop_after.clone();
-    if !cli.no_gui && cfg!(target_os = "macos") && preflight.desktop.supported {
+    if !cli.no_gui && (cli.gui || preflight.desktop.supported) {
         let cli_path = match env::current_exe() {
             Ok(path) => path,
             Err(error) => {
@@ -123,6 +156,8 @@ fn main() {
                 stop_after: stop_after.clone(),
                 timeout_seconds: cli.timeout_seconds,
                 output: cli.output.clone(),
+                report_dir: cli.report_dir.clone(),
+                html: cli.html.clone(),
                 api_key: api_key.clone(),
                 cli_path,
                 preflight_token: preflight_token(&endpoint, &model, &api_key),
@@ -207,27 +242,10 @@ fn main() {
             eprintln!("写入运行报告失败：{}：{error}", run_json.display());
             std::process::exit(1);
         });
-        let rules_path = [
-            env::current_exe().ok().and_then(|path| {
-                path.parent()
-                    .map(|parent| parent.join("rules/agentcheck-evaluation.json"))
-            }),
-            Some(
-                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("rules/agentcheck-evaluation.json"),
-            ),
-        ]
-        .into_iter()
-        .flatten()
-        .find(|path| path.is_file())
-        .unwrap_or_else(|| {
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("rules/agentcheck-evaluation.json")
-        });
         let input_dir = root.join("module-input");
         let analysis_dir = root.join("module-report");
         let input_paths =
-            write_module_inputs(&report, &input_dir, &rules_path).unwrap_or_else(|error| {
+            write_bundled_module_inputs(&report, &input_dir).unwrap_or_else(|error| {
                 eprintln!("写入模块检测证据失败：{error}");
                 std::process::exit(1);
             });
@@ -303,4 +321,25 @@ fn print_preflight_results(preflight: &llm_capability_doctor::preflight::Startup
         "[启动检查] 桌面环境：{desktop_state}（{}）",
         preflight.desktop.reason
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gui_flags_are_mutually_exclusive() {
+        assert!(Cli::try_parse_from(["agentcheck", "--gui", "--no-gui"]).is_err());
+        assert!(Cli::try_parse_from(["agentcheck", "--gui"]).unwrap().gui);
+        assert!(
+            Cli::try_parse_from(["agentcheck", "--no-gui"])
+                .unwrap()
+                .no_gui
+        );
+        assert!(
+            Cli::try_parse_from(["agentcheck", "--runtime-check"])
+                .unwrap()
+                .runtime_check
+        );
+    }
 }

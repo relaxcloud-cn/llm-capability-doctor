@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod baseline;
+mod bundle_format;
 pub mod calibration;
 pub mod capability;
 pub mod cli;
@@ -10,6 +11,7 @@ pub mod ingress;
 pub mod performance;
 pub mod preflight;
 pub mod records;
+pub mod runtime;
 pub mod specification;
 pub mod transport;
 pub mod validation;

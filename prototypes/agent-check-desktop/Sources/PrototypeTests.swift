@@ -7,6 +7,14 @@ func runModelTests() async throws {
     checks += 1
     if !condition() { throw PrototypeError.failed(message) }
   }
+  let launch = LaunchConfiguration.from(arguments: [
+    "AgentCheck", "--agentcheck-endpoint", "https://example.test/v1/chat/completions",
+    "--agentcheck-model", "fixture", "--agentcheck-cli-path", "/tmp/agentcheck",
+    "--agentcheck-report-dir", "/tmp/reports", "--agentcheck-html", "/tmp/reports/report.html",
+  ])
+  try expect(launch?.reportDirectory == "/tmp/reports", "保留 CLI 报告目录")
+  try expect(launch?.htmlPath == "/tmp/reports/report.html", "保留 CLI HTML 输出位置")
+  try expect(launch?.cliPath == "/tmp/agentcheck", "桌面端继续使用原始单文件 CLI")
   let store = Workbench()
   try expect(store.configuring && store.service == nil, "首次启动无配置")
   try expect(

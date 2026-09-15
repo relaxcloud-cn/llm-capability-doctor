@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::cli::CliRunReport;
 
@@ -48,6 +48,8 @@ pub struct NativeGuiRequest {
     pub stop_after: Option<String>,
     pub timeout_seconds: u64,
     pub output: Option<String>,
+    pub report_dir: Option<String>,
+    pub html: Option<String>,
     pub api_key: String,
     pub cli_path: PathBuf,
     pub preflight_token: String,
@@ -63,8 +65,20 @@ pub struct SystemNativeGuiLauncher;
 impl NativeGuiLauncher for SystemNativeGuiLauncher {
     fn launch(&mut self, request: &NativeGuiRequest) -> Result<PathBuf, String> {
         let executable = native_gui_executable()?;
+        let ready_directory = tempfile::Builder::new()
+            .prefix("agentcheck-gui-")
+            .tempdir()
+            .map_err(|error| format!("准备桌面端启动确认失败：{error}"))?;
+        let ready_file = ready_directory.path().join("ready");
         let mut command = Command::new(&executable);
+        // The GUI outlives the launcher and must not keep redirected CLI pipes open.
         command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+            .arg("--agentcheck-ready-file")
+            .arg(&ready_file)
             .args(["--agentcheck-endpoint", &request.endpoint])
             .args(["--agentcheck-model", &request.model])
             .args([
@@ -80,15 +94,39 @@ impl NativeGuiLauncher for SystemNativeGuiLauncher {
         if let Some(output) = &request.output {
             command.args(["--agentcheck-output", output]);
         }
+        if let Some(directory) = &request.report_dir {
+            command.args(["--agentcheck-report-dir", directory]);
+        }
+        if let Some(html) = &request.html {
+            command.args(["--agentcheck-html", html]);
+        }
         if let Some(modules) = &request.modules {
             command.args(["--agentcheck-modules", &modules.join(",")]);
         }
         if let Some(stop_after) = &request.stop_after {
             command.args(["--agentcheck-stop-after", stop_after]);
         }
-        command
+        let mut child = command
             .spawn()
             .map_err(|error| format!("启动 AgentCheck 桌面端失败：{error}"))?;
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("检查桌面端启动状态失败：{error}"))?
+            {
+                return Err(format!("桌面端启动后提前退出：{status}"));
+            }
+            if fs::read(&ready_file).is_ok_and(|content| content == b"ready") {
+                break;
+            }
+            if started.elapsed() >= std::time::Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("桌面端未在 10 秒内确认窗口已显示".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
         Ok(executable)
     }
 }
@@ -97,6 +135,12 @@ pub fn native_gui_executable() -> Result<PathBuf, String> {
     let candidates = if let Some(path) = env::var_os("AGENTCHECK_GUI_PATH") {
         vec![PathBuf::from(path)]
     } else {
+        if let Some(path) = crate::runtime::gui_path()? {
+            return Ok(path);
+        }
+        if crate::runtime::is_bundled() {
+            return Err("当前平台未内置桌面端，继续使用纯命令行检测".into());
+        }
         let current = env::current_exe().map_err(|error| format!("读取 CLI 路径失败：{error}"))?;
         let current_dir = current
             .parent()

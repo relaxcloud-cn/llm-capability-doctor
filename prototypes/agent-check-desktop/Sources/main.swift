@@ -36,6 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     } else {
       window.makeKeyAndOrderFront(nil)
       NSApp.activate(ignoringOtherApps: true)
+      if let readyIndex = args.firstIndex(of: "--agentcheck-ready-file"), args.count > readyIndex + 1 {
+        do {
+          guard window.isVisible else { throw PrototypeError.failed("窗口未显示") }
+          try Data("ready".utf8).write(to: URL(fileURLWithPath: args[readyIndex + 1]), options: .atomic)
+        } catch {
+          fputs("启动桌面端失败：\(error)\n", stderr)
+          exit(1)
+        }
+      }
     }
     if args.contains("--review-all") {
       Task {
