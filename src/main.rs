@@ -184,12 +184,15 @@ fn main() {
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
     };
+    let progress_path = cli.progress_file.clone().map(std::path::PathBuf::from);
     let mut executor = match LiveExecutor::new_full(
         request.endpoint.clone(),
         request.model.clone(),
         api_key.clone(),
         std::time::Duration::from_secs(cli.timeout_seconds),
-    ) {
+    )
+    .map(|executor| executor.with_progress_file(progress_path))
+    {
         Ok(executor) => executor,
         Err(error) => {
             eprintln!("创建真实服务执行器失败：{error}");

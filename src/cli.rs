@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
@@ -119,6 +120,7 @@ impl ModuleExecutor for UnavailableExecutor {
 pub struct LiveExecutor {
     transport: ChatCompletionsTransport,
     full: bool,
+    progress_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for LiveExecutor {
@@ -140,6 +142,7 @@ impl LiveExecutor {
         Ok(Self {
             transport: ChatCompletionsTransport::new(endpoint, model, api_key, timeout)?,
             full: false,
+            progress_file: None,
         })
     }
 
@@ -152,6 +155,33 @@ impl LiveExecutor {
         let mut executor = Self::new(endpoint, model, api_key, timeout)?;
         executor.full = true;
         Ok(executor)
+    }
+
+    pub fn with_progress_file(mut self, path: Option<PathBuf>) -> Self {
+        self.progress_file = path;
+        self
+    }
+
+    fn emit_item_progress(&self, module_id: &str, index: usize, total: usize, item: &str) {
+        let Some(path) = &self.progress_file else {
+            return;
+        };
+        let event = ProgressEvent {
+            phase: ProgressPhase::ItemCompleted,
+            module_id: Some(module_id.into()),
+            index,
+            total,
+            item_index: Some(index),
+            item_total: Some(total),
+            item_name: Some(item.into()),
+            state: None,
+            message: format!("已完成 {item}"),
+        };
+        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(line) = serde_json::to_string(&event) {
+                let _ = writeln!(file, "{line}");
+            }
+        }
     }
 }
 
@@ -339,7 +369,7 @@ impl LiveExecutor {
                 };
                 observations.push(SpecificationObservation {
                     category: plan.category,
-                    sample_id,
+                    sample_id: sample_id.clone(),
                     attempt: SpecificationAttemptKind::Initial,
                     conditions: plan.fixed_settings.clone(),
                     actual_output: response.parsed,
@@ -351,6 +381,8 @@ impl LiveExecutor {
                     limitation,
                     verified_scope: None,
                 });
+                let completed = observations.len();
+                self.emit_item_progress("specification", completed, 30, &sample_id);
             }
         }
         let report = build_report(record.id.as_str(), observations).ok();
@@ -388,7 +420,7 @@ impl LiveExecutor {
         let samples = fixed_capability_catalog();
         let mut responses = Vec::with_capacity(samples.len());
         let mut evidence = Vec::with_capacity(samples.len());
-        for sample in &samples {
+        for (sample_index, sample) in samples.iter().enumerate() {
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
                 prompt: sample.prompt.clone(),
@@ -418,6 +450,7 @@ impl LiveExecutor {
                 },
             ));
             evidence.push(json!({"sample_id": sample.id, "payload": self.transport.evidence_payload(&request, &response)}));
+            self.emit_item_progress("capability", sample_index + 1, samples.len(), &sample.id);
         }
         let scorecard = build_scorecard(
             record.id.as_str(),
@@ -1466,6 +1499,7 @@ pub enum ProgressPhase {
     ModuleCompleted,
     RunCompleted,
     RunStopped,
+    ItemCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1474,12 +1508,24 @@ pub struct ProgressEvent {
     pub module_id: Option<String>,
     pub index: usize,
     pub total: usize,
+    pub item_index: Option<usize>,
+    pub item_total: Option<usize>,
+    pub item_name: Option<String>,
     pub state: Option<String>,
     pub message: String,
 }
 
 pub trait ProgressSink {
     fn emit(&mut self, event: ProgressEvent);
+}
+
+fn module_item_total(module_id: &str) -> Option<usize> {
+    match module_id {
+        "specification" => Some(30),
+        "capability" => Some(fixed_capability_catalog().len()),
+        "baseline" => Some(14),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1583,6 +1629,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         module_id: None,
         index: 0,
         total: selected.len(),
+        item_index: None,
+        item_total: None,
+        item_name: None,
         state: None,
         message: "检测已开始".into(),
     });
@@ -1600,6 +1649,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: Some(module_id.clone()),
             index,
             total: selected.len(),
+            item_index: None,
+            item_total: module_item_total(module_id),
+            item_name: None,
             state: None,
             message: format!("开始检测 {module_id}"),
         });
@@ -1669,6 +1721,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: Some(module_id.clone()),
             index: index + 1,
             total: selected.len(),
+            item_index: module_item_total(module_id),
+            item_total: module_item_total(module_id),
+            item_name: None,
             state: Some(progress_state),
             message: progress_message,
         });
@@ -1684,6 +1739,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 module_id: None,
                 index: index + 1,
                 total: selected.len(),
+                item_index: None,
+                item_total: None,
+                item_name: None,
                 state: Some("unverified".into()),
                 message: "检测已停止，未完成项目保持未验证".into(),
             });
@@ -1697,6 +1755,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: None,
             index: selected.len(),
             total: selected.len(),
+            item_index: None,
+            item_total: None,
+            item_name: None,
             state: None,
             message: "检测已完成".into(),
         });

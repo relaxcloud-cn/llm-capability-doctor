@@ -41,6 +41,9 @@ struct ProgressEvent: Decodable {
   var moduleID: String?
   var index: Int
   var total: Int
+  var itemIndex: Int?
+  var itemTotal: Int?
+  var itemName: String?
   var state: String?
   var message: String
 
@@ -49,8 +52,24 @@ struct ProgressEvent: Decodable {
     case moduleID = "module_id"
     case index
     case total
+    case itemIndex = "item_index"
+    case itemTotal = "item_total"
+    case itemName = "item_name"
     case state
     case message
+  }
+
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    phase = try values.decode(String.self, forKey: .phase)
+    moduleID = try values.decodeIfPresent(String.self, forKey: .moduleID)
+    index = try values.decode(Int.self, forKey: .index)
+    total = try values.decode(Int.self, forKey: .total)
+    itemIndex = try values.decodeIfPresent(Int.self, forKey: .itemIndex)
+    itemTotal = try values.decodeIfPresent(Int.self, forKey: .itemTotal)
+    itemName = try values.decodeIfPresent(String.self, forKey: .itemName)
+    state = try values.decodeIfPresent(String.self, forKey: .state)
+    message = try values.decode(String.self, forKey: .message)
   }
 }
 

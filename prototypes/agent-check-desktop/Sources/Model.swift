@@ -158,6 +158,9 @@ final class Workbench: ObservableObject {
   @Published var activeModules: [CheckModule] = []
   @Published var moduleStates: [String: String] = [:]
   @Published var progressMessage = ""
+  @Published var currentItemName = ""
+  @Published var currentItemIndex = 0
+  @Published var currentItemTotal = 0
   @Published var realRunError: String?
   @Published var selectedRecordID: UUID?
   @Published var toast: String?
@@ -305,7 +308,10 @@ final class Workbench: ObservableObject {
   }
   var progress: Double {
     guard !activeModules.isEmpty else { return 0 }
-    return min(Double(elapsed) / Double(activeModules.count * 2), 1)
+    let completedModules = Double(completed.count)
+    let itemFraction = currentItemTotal > 0
+      ? min(Double(currentItemIndex) / Double(currentItemTotal), 1) : 0
+    return min((completedModules + itemFraction) / Double(activeModules.count), 1)
   }
   var activeModule: CheckModule? {
     guard running, completed.count < activeModules.count else { return nil }
@@ -419,6 +425,9 @@ final class Workbench: ObservableObject {
     elapsed = 0
     moduleStates = [:]
     progressMessage = ""
+    currentItemName = ""
+    currentItemIndex = 0
+    currentItemTotal = 0
     runningService = service
     runningMode = outcome == .limited ? agentMode : "standard"
     runningOutcome = runningMode == "pending-review" ? .inconclusive : outcome
@@ -563,12 +572,16 @@ final class Workbench: ObservableObject {
 
   private func handleProgress(_ event: ProgressEvent) {
     progressMessage = Self.customerProgressMessage(event.message)
+    if let itemIndex = event.itemIndex { currentItemIndex = itemIndex }
+    if let itemTotal = event.itemTotal { currentItemTotal = itemTotal }
+    if let itemName = event.itemName { currentItemName = Self.customerProgressMessage(itemName) }
     if event.phase == "module_started" {
       elapsed = max(elapsed, event.index * 2)
     } else if event.phase == "module_completed", let moduleID = event.moduleID {
       if let module = CheckModule.fromBackend(moduleID), !completed.contains(module) {
         completed.append(module)
       }
+      currentItemIndex = currentItemTotal
       moduleStates[moduleID] = event.state ?? "unknown"
       elapsed = max(elapsed, event.index * 2)
     }
