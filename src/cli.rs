@@ -468,20 +468,56 @@ impl LiveExecutor {
             },
         )
         .ok();
-        let has_wrong = scorecard.as_ref().is_some_and(|card| {
-            card.observations
-                .iter()
-                .any(|observation| observation.label == crate::capability::ScoreLabel::Wrong)
-        });
+        let (state, state_reason) = match scorecard.as_ref() {
+            None => (
+                ModuleResultState::Inconclusive,
+                "能力评分卡生成失败，无法判断模型能力".to_string(),
+            ),
+            Some(card) => {
+                let wrong = card
+                    .observations
+                    .iter()
+                    .filter(|observation| observation.label == crate::capability::ScoreLabel::Wrong)
+                    .count();
+                let execution_gaps = card
+                    .observations
+                    .iter()
+                    .filter(|observation| {
+                        matches!(
+                            observation.label,
+                            crate::capability::ScoreLabel::Incomplete
+                                | crate::capability::ScoreLabel::Missing
+                                | crate::capability::ScoreLabel::Pending
+                        )
+                    })
+                    .count();
+                if execution_gaps > 0 {
+                    (
+                        ModuleResultState::Inconclusive,
+                        format!(
+                            "{} 个样本没有形成可判定证据，不能归因于模型能力",
+                            execution_gaps
+                        ),
+                    )
+                } else if wrong > 0 {
+                    (
+                        ModuleResultState::Fail,
+                        format!("{} 个有效样本答案未通过预先定义的判定规则", wrong),
+                    )
+                } else {
+                    (
+                        ModuleResultState::Pass,
+                        "所有已执行样本均通过预先定义的判定规则".into(),
+                    )
+                }
+            }
+        };
         ModuleRunResult {
-            state: if has_wrong {
-                ModuleResultState::Fail
-            } else {
-                ModuleResultState::Pass
-            },
+            state,
             reason: Some(format!(
-                "已执行 {} 个能力固定单元；评分按既有接受规则计算",
-                evidence.len()
+                "已执行 {} 个能力固定单元；{}",
+                evidence.len(),
+                state_reason
             )),
             evidence_kind: "real_capability_scorecard".into(),
             evidence_summary: format!(
