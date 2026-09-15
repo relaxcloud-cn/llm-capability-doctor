@@ -239,16 +239,17 @@ pub struct CapabilityScorecard {
 }
 
 pub fn fixed_capability_catalog() -> Vec<CapabilitySample> {
-    let mut samples = Vec::with_capacity(240);
+    let mut samples = Vec::with_capacity(120);
     for category in CapabilityCategory::ALL {
         for (subdomain_index, subdomain) in category.subdomains().into_iter().enumerate() {
-            for sample_index in 1..=8 {
+            for sample_index in 1..=4 {
                 let id = format!(
                     "{}-{}-{:02}",
                     category.id(),
                     subdomain_index + 1,
                     sample_index
                 );
+                let (prompt, expected) = sample_definition(category, subdomain, sample_index);
                 samples.push(CapabilitySample {
                     id: id.clone(),
                     category,
@@ -256,10 +257,10 @@ pub fn fixed_capability_catalog() -> Vec<CapabilitySample> {
                     dataset_identity: DatasetIdentity::ProductOriginal,
                     source_ref: format!("agentcheck://capability/{id}"),
                     language: CAPABILITY_LANGUAGE.into(),
-                    prompt: prompt_template(category, sample_index),
-                    expected: format!("样本 {id} 的预设答案"),
+                    prompt,
+                    expected: expected.clone(),
                     acceptance: AcceptanceRule::ExactAny {
-                        accepted: vec![format!("样本 {id} 的预设答案")],
+                        accepted: vec![expected],
                     },
                     generation_settings: BTreeMap::from([
                         (String::from("temperature"), String::from("0")),
@@ -510,9 +511,9 @@ pub fn scorecard_json(scorecard: &CapabilityScorecard) -> Result<String, serde_j
 }
 
 fn validate_catalog(samples: &[CapabilitySample]) -> Result<(), String> {
-    if samples.len() != 240 {
+    if samples.len() != 120 {
         return Err(format!(
-            "Capability catalog must contain 240 units, got {}",
+            "Capability catalog must contain 120 units, got {}",
             samples.len()
         ));
     }
@@ -536,9 +537,9 @@ fn validate_catalog(samples: &[CapabilitySample]) -> Result<(), String> {
             .iter()
             .filter(|sample| sample.category == category)
             .count();
-        if count != 40 {
+        if count != 20 {
             return Err(format!(
-                "{} must contain 40 logical units, got {count}",
+                "{} must contain 20 logical units, got {count}",
                 category.id()
             ));
         }
@@ -601,26 +602,88 @@ fn summarize(
     }
 }
 
-fn prompt_template(category: CapabilityCategory, sample_index: u32) -> String {
+fn sample_definition(
+    category: CapabilityCategory,
+    subdomain: &str,
+    sample_index: u32,
+) -> (String, String) {
+    let item = match sample_index {
+        1 => ("甲", "项目甲"),
+        2 => ("乙", "项目乙"),
+        3 => ("丙", "项目丙"),
+        _ => ("丁", "项目丁"),
+    };
     match category {
-        CapabilityCategory::InstructionFollowing => format!(
-            "材料：样本材料 {sample_index}\n任务：按约束回答样本 {sample_index}\n只回答任务，不补充材料外事实。"
-        ),
-        CapabilityCategory::InformationExtraction => format!(
-            "材料：记录 {sample_index}\n请按字段表填写：名称、类型、值\n缺失字段写“未提供”。"
-        ),
-        CapabilityCategory::ToolSelection => format!(
-            "任务：完成受控工具任务 {sample_index}\n可用工具：查询、计算\n请给出工具决策和参数；题目要求不调用时明确说明。"
-        ),
-        CapabilityCategory::MultiTurn => format!(
-            "对话历史：历史标记 {sample_index}\n当前请求：依据当前有效条件回答\n只依据当前有效条件回答。"
-        ),
-        CapabilityCategory::LongContext => format!(
-            "材料（长度档位 {sample_index}）：固定中文材料\n问题：只依据材料回答，不使用外部知识。"
-        ),
-        CapabilityCategory::ReasoningAndMath => {
-            format!("已知事实：固定事实 {sample_index}\n规则：固定规则\n问题：给出最终答案和单位。")
-        }
+        CapabilityCategory::InstructionFollowing => match subdomain {
+            "material-facts" => (
+                format!("材料：{}的负责人是小林。任务：只回答负责人姓名。", item.1),
+                "小林".into(),
+            ),
+            "condition-filtering" => (
+                format!("材料：{}状态为已完成；{}状态为进行中。任务：只回答已完成项目。", item.1, if item.0 == "甲" { "项目乙" } else { "项目甲" }),
+                item.1.into(),
+            ),
+            "single-constraint" => (
+                format!("材料：{}预算为{}元。任务：只回答预算数字。", item.1, 10 + sample_index * 5),
+                (10 + sample_index * 5).to_string(),
+            ),
+            "multi-constraint" => (
+                format!("材料：{}属于华东地区且状态为开放；其他项目不满足两个条件。任务：只回答同时满足条件的项目。", item.1),
+                item.1.into(),
+            ),
+            _ => ("材料：记录中没有提供负责人信息。任务：只回答负责人。".into(), "未提供".into()),
+        },
+        CapabilityCategory::InformationExtraction => match subdomain {
+            "single-object-fields" => (
+                format!("材料：{}，类型为服务，数量为{}。任务：只回答数量。", item.1, 10 + sample_index),
+                (10 + sample_index).to_string(),
+            ),
+            "multi-object-relations" => (
+                format!("材料：小林负责{}，小周负责其他项目。任务：只回答小林负责的项目。", item.1),
+                item.1.into(),
+            ),
+            "field-types" => (
+                "材料：库存数量为 12 件。任务：只回答数量和单位。".into(),
+                "12件".into(),
+            ),
+            "missing-values" => ("材料：项目已登记，但没有填写负责人。任务：只回答负责人。".into(), "未提供".into()),
+            _ => ("材料：项目甲旧名称为北区，新名称为东区，最新记录覆盖旧记录。任务：只回答最新名称。".into(), "东区".into()),
+        },
+        CapabilityCategory::ToolSelection => match subdomain {
+            "tool-selection" => ("任务：查询北京今天的天气。可用工具：查询天气、计算。只回答应选择的工具名。".into(), "查询天气".into()),
+            "argument-filling" => ("任务：查询北京今天的天气。只回答工具参数。".into(), "城市=北京，日期=今天".into()),
+            "argument-types" => ("任务：计算 12 加 8。可用工具：查询、计算。只回答工具名和数字参数。".into(), "计算，数字=12和8".into()),
+            "multiple-tools" => ("任务：先查询北京气温，再计算摄氏温度加 2。可用工具：查询天气、计算。只回答调用顺序。".into(), "查询天气→计算".into()),
+            _ => ("任务：把一句话改写得更正式。可用工具：查询天气、计算。此任务不需要工具，只回答是否调用。".into(), "不调用工具".into()),
+        },
+        CapabilityCategory::MultiTurn => match subdomain {
+            "condition-retention" => ("第1轮：项目甲预算100元，负责人小林。第2轮：请列出负责人。任务：只回答负责人。".into(), "小林".into()),
+            "condition-update" => ("第1轮：项目甲预算100元。第2轮：预算改为120元。任务：只回答当前预算。".into(), "120元".into()),
+            "condition-revocation" => ("第1轮：只列出华东项目。第2轮：取消地区限制。任务：说明当前是否还有地区限制。".into(), "没有地区限制".into()),
+            "object-switching" => ("第1轮：项目甲负责人小林，项目乙负责人小周。第2轮：现在问项目乙负责人。任务：只回答姓名。".into(), "小周".into()),
+            _ => ("第1轮：输出项目名和预算。第2轮：只把项目名改为列表格式，预算要求不变。任务：只回答项目甲及其100元预算。".into(), "项目甲，100元".into()),
+        },
+        CapabilityCategory::LongContext => match subdomain {
+            "localization" => (
+                format!(
+                    "材料：开头有无关说明。第{}段写着：目标编号为 L{}。结尾有其他说明。任务：只回答目标编号。",
+                    sample_index + 1,
+                    sample_index
+                ),
+                format!("L{}", sample_index),
+            ),
+            "cross-section-relation" => ("材料前段：项目甲负责人小林。材料后段：小林所在团队为 T2。任务：只回答项目甲所在团队。".into(), "T2".into()),
+            "distractor-rejection" => ("材料：项目甲团队 T2；项目乙团队 T9。问题：项目甲团队是什么？只回答团队。".into(), "T2".into()),
+            "length-variation" => ("材料包含一段重复说明，唯一有效事实是：服务等级为标准。任务：只回答服务等级。".into(), "标准".into()),
+            _ => ("材料：项目甲数量 7，项目乙数量 5。任务：只回答两项目数量之和。".into(), "12".into()),
+        },
+        CapabilityCategory::ReasoningAndMath => match subdomain {
+            "condition-judgement" => ("已知：温度高于 30 度才需要预警；今天温度 32 度。任务：只回答是否预警。".into(), "是".into()),
+            "temporal-order" => ("事件顺序：提交申请、审核、发布。任务：只回答审核发生在发布之前还是之后。".into(), "之前".into()),
+            "quantity-comparison" => ("甲有 8 件，乙有 5 件。任务：只回答谁更多。".into(), "甲".into()),
+            "basic-calculation" => (format!("任务：计算 {} + {}。只回答结果。", sample_index + 2, sample_index + 3), (2 * sample_index + 5).to_string()),
+            _ => ("已知：甲比乙多 3，乙为 5，丙比甲少 2。任务：只回答丙的数值。".into(), "6".into()),
+        },
     }
 }
 
@@ -681,22 +744,39 @@ mod tests {
     }
 
     #[test]
-    fn freezes_six_categories_and_240_chinese_units() {
+    fn freezes_six_categories_and_120_chinese_units() {
         let catalog = fixed_capability_catalog();
-        assert_eq!(catalog.len(), 240);
+        assert_eq!(catalog.len(), 120);
         for category in CapabilityCategory::ALL {
             assert_eq!(
                 catalog
                     .iter()
                     .filter(|sample| sample.category == category)
                     .count(),
-                40
+                20
             );
         }
         assert!(
             catalog
                 .iter()
                 .all(|sample| sample.language == CAPABILITY_LANGUAGE)
+        );
+        assert!(catalog.iter().all(|sample| {
+            !sample.prompt.contains("样本材料")
+                && !sample.expected.contains(&sample.id)
+                && !sample.prompt.contains("预设答案")
+                && !sample.prompt.trim().is_empty()
+                && !sample.expected.trim().is_empty()
+        }));
+        assert!(
+            catalog
+                .iter()
+                .any(|sample| sample.prompt.contains("负责人") && sample.expected == "小林")
+        );
+        assert!(
+            catalog
+                .iter()
+                .any(|sample| sample.prompt.contains("项目甲数量") && sample.expected == "12")
         );
     }
 
@@ -856,14 +936,14 @@ mod tests {
         )
         .unwrap();
         let summary = &scorecard.summaries[0];
-        assert_eq!(summary.planned, 40);
+        assert_eq!(summary.planned, 20);
         assert_eq!(
             summary.correct
                 + summary.wrong
                 + summary.pending
                 + summary.incomplete
                 + summary.missing,
-            40
+            20
         );
         assert_eq!(summary.valid_scored, summary.correct + summary.wrong);
         assert!(
@@ -882,7 +962,7 @@ mod tests {
             build_scorecard("run-a", catalog, Vec::new(), settings(Some(1024))).unwrap();
         let long_context = &scorecard.summaries[4];
         assert_eq!(long_context.valid_scored, 0);
-        assert_eq!(long_context.missing, 40);
+        assert_eq!(long_context.missing, 20);
         assert!(long_context.score.is_none());
         assert!(
             scorecard
