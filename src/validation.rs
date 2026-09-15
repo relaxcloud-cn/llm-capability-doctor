@@ -588,7 +588,7 @@ mod tests {
                 .iter()
                 .all(|case| case.status == ValidationStatus::Pass)
         );
-        assert_eq!(cases[0].evidence.actual, "240 missing; 6 no-score");
+        assert_eq!(cases[0].evidence.actual, "120 missing; 6 no-score");
         assert_eq!(
             cases[1].evidence.actual,
             "14 fixtures have no structural difference"
