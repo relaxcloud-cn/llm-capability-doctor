@@ -271,9 +271,17 @@ struct ProgressScreen: View {
           }
         }.frame(height: 9)
         HStack {
-          Text(store.progressMessage.isEmpty
-            ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
-            : store.progressMessage)
+          VStack(alignment: .leading, spacing: 3) {
+            Text(store.currentItemName.isEmpty
+              ? (store.progressMessage.isEmpty
+                ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
+                : store.progressMessage)
+              : "正在检测：\(store.currentItemName)")
+            if store.currentItemTotal > 0 {
+              Text("当前项目：\(store.currentItemIndex) / \(store.currentItemTotal)")
+                .foregroundStyle(Theme.muted)
+            }
+          }
           Spacer()
           if let detailTotal = store.detailTotal, detailTotal > 0 {
             Text("\(store.detailIndex) / \(detailTotal) 个检测样本")
