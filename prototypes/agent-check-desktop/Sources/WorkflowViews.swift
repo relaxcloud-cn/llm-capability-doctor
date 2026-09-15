@@ -283,13 +283,25 @@ struct ProgressScreen: View {
             }
           }
           Spacer()
-          if let detailTotal = store.detailTotal, detailTotal > 0 {
-            Text("\(store.detailIndex) / \(detailTotal) 个检测样本")
+          if let current = store.progressItems.first(where: { $0.state == "进行中" }) {
+            Text("进行中 \(current.completed) / \(current.total)")
+          } else if let finished = store.progressItems.last(where: { $0.completed > 0 }) {
+            Text("已完成 \(finished.completed) / \(finished.total)")
           } else {
             Text("\(store.completed.count) / \(store.activeModules.count) 个模块完成")
           }
         }
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
+      }
+      if !store.progressItems.isEmpty {
+        VStack(spacing: 0) {
+          ForEach(store.progressItems) { item in
+            progressItemRow(item)
+          }
+        }
+        .background(Theme.infoTint)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line))
       }
       VStack(spacing: 6) {
         ForEach(store.activeModules) { module in
@@ -332,6 +344,38 @@ struct ProgressScreen: View {
       active ? Theme.accent.opacity(0.05) : .clear,
       in: RoundedRectangle(cornerRadius: 10)
     )
+    .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+  }
+
+  private func progressItemRow(_ item: ProgressItem) -> some View {
+    let ratio = item.total > 0 ? Double(item.completed) / Double(item.total) : 0
+    let running = item.state == "进行中"
+    return HStack(spacing: 16) {
+      Text(item.name)
+        .font(.system(size: 14, weight: .medium))
+        .frame(maxWidth: .infinity, alignment: .leading)
+      GeometryReader { geometry in
+        ZStack(alignment: .leading) {
+          Capsule().fill(Theme.canvas)
+          Capsule().fill(running ? Theme.accent : Theme.passBar)
+            .frame(width: max(0, geometry.size.width * ratio))
+            .overlay(alignment: .trailing) {
+              if running {
+                Capsule().fill(.white.opacity(0.55)).frame(width: 28).blur(radius: 4)
+                  .offset(x: 14)
+                  .animation(.linear(duration: 1.2).repeatForever(autoreverses: false), value: item.completed)
+              }
+            }
+        }
+      }
+      .frame(width: 180, height: 7)
+      Text("\(item.state) \(item.completed) / \(item.total)")
+        .font(Theme.captionFont)
+        .foregroundStyle(running ? Theme.accent : item.completed > 0 ? Theme.pass : Theme.faint)
+        .frame(width: 112, alignment: .trailing)
+    }
+    .padding(.horizontal, 20)
+    .padding(.vertical, 13)
     .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
   }
 }
