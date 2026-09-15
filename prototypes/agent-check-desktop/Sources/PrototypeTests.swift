@@ -15,8 +15,21 @@ func runModelTests() async throws {
   try expect(launch?.reportDirectory == "/tmp/reports", "保留 CLI 报告目录")
   try expect(launch?.htmlPath == "/tmp/reports/report.html", "保留 CLI HTML 输出位置")
   try expect(launch?.cliPath == "/tmp/agentcheck", "桌面端继续使用原始单文件 CLI")
+  let progressData = Data(#"{"phase":"module_progress","module_id":"capability","index":2,"total":6,"state":null,"message":"已完成能力样本 37 / 240","detail_index":37,"detail_total":240,"detail_id":"C02-3-05"}"#.utf8)
+  let progressEvent = try JSONDecoder().decode(ProgressEvent.self, from: progressData)
+  try expect(
+    progressEvent.detailIndex == 37 && progressEvent.detailTotal == 240
+      && progressEvent.detailID == "C02-3-05",
+    "解析能力样本级真实进度")
   let store = Workbench()
   try expect(store.configuring && store.service == nil, "首次启动无配置")
+  let runningStore = Workbench()
+  runningStore.service = Service(url: "https://example.test/v1", model: "fixture")
+  runningStore.selectedModules = Set(CheckModule.testModules)
+  runningStore.startRun(automatic: false)
+  runningStore.detailIndex = 37
+  runningStore.detailTotal = 240
+  try expect(runningStore.running && runningStore.progress > 0, "实时检测首屏进入进行中状态")
   try expect(
     CheckModule.allCases.map(\.title) == [
       "模型接入信息", "模型规格实测", "模型能力跑分", "模型性能实测", "智能体实测", "模型基线对比",

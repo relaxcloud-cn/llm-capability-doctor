@@ -90,6 +90,15 @@ pub trait ModuleExecutor {
         self.execute(module_id, record)
     }
 
+    fn execute_with_record_progress(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+        _progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        self.execute_with_record(module_id, record)
+    }
+
     fn execution_origin(&self) -> &'static str {
         "custom_executor"
     }
@@ -181,6 +190,18 @@ impl ModuleExecutor for LiveExecutor {
             }
         }
         self.execute(module_id, record)
+    }
+
+    fn execute_with_record_progress(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        if self.full && module_id == "capability" {
+            return self.execute_capability_with_progress(record, progress);
+        }
+        self.execute_with_record(module_id, record)
     }
 }
 
@@ -385,6 +406,15 @@ impl LiveExecutor {
     }
 
     fn execute_capability(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_capability_with_progress(record, &mut noop)
+    }
+
+    fn execute_capability_with_progress(
+        &mut self,
+        record: &DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
         let samples = fixed_capability_catalog();
         let mut responses = Vec::with_capacity(samples.len());
         let mut evidence = Vec::with_capacity(samples.len());
@@ -418,6 +448,12 @@ impl LiveExecutor {
                 },
             ));
             evidence.push(json!({"sample_id": sample.id, "payload": self.transport.evidence_payload(&request, &response)}));
+            progress(ProgressDetail {
+                index: evidence.len(),
+                total: samples.len(),
+                id: sample.id.clone(),
+                message: format!("已完成能力样本 {} / {}", evidence.len(), samples.len()),
+            });
         }
         let scorecard = build_scorecard(
             record.id.as_str(),
@@ -1463,6 +1499,7 @@ pub struct CliRunReport {
 pub enum ProgressPhase {
     RunStarted,
     ModuleStarted,
+    ModuleProgress,
     ModuleCompleted,
     RunCompleted,
     RunStopped,
@@ -1475,6 +1512,20 @@ pub struct ProgressEvent {
     pub index: usize,
     pub total: usize,
     pub state: Option<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_total: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressDetail {
+    pub index: usize,
+    pub total: usize,
+    pub id: String,
     pub message: String,
 }
 
@@ -1585,6 +1636,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         total: selected.len(),
         state: None,
         message: "检测已开始".into(),
+        detail_index: None,
+        detail_total: None,
+        detail_id: None,
     });
     let stop_index = request
         .stop_after
@@ -1602,8 +1656,25 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             total: selected.len(),
             state: None,
             message: format!("开始检测 {module_id}"),
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
-        let result = executor.execute_with_record(module_id, &mut record);
+        let mut detail_progress = |detail: ProgressDetail| {
+            progress.emit(ProgressEvent {
+                phase: ProgressPhase::ModuleProgress,
+                module_id: Some(module_id.clone()),
+                index,
+                total: selected.len(),
+                state: None,
+                message: detail.message,
+                detail_index: Some(detail.index),
+                detail_total: Some(detail.total),
+                detail_id: Some(detail.id),
+            });
+        };
+        let result =
+            executor.execute_with_record_progress(module_id, &mut record, &mut detail_progress);
         let evidence = add_evidence(
             &mut record,
             &format!("cli-{module_id}-{index}"),
@@ -1671,6 +1742,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             total: selected.len(),
             state: Some(progress_state),
             message: progress_message,
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
         if stop_index == Some(index) {
             stop_run(
@@ -1686,6 +1760,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 total: selected.len(),
                 state: Some("unverified".into()),
                 message: "检测已停止，未完成项目保持未验证".into(),
+                detail_index: None,
+                detail_total: None,
+                detail_id: None,
             });
             break;
         }
@@ -1699,6 +1776,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             total: selected.len(),
             state: None,
             message: "检测已完成".into(),
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
     }
     let overall = if stopped {
