@@ -320,6 +320,9 @@ final class Workbench: ObservableObject {
     guard running, completed.count < activeModules.count else { return nil }
     return activeModules[completed.count]
   }
+  var currentItemName: String { detailID ?? "" }
+  var currentItemIndex: Int { detailIndex }
+  var currentItemTotal: Int { detailTotal ?? 0 }
   var localStatus: String {
     persistenceError ?? (storageURL == nil ? "临时演示会话" : "记录保存在本机")
   }
