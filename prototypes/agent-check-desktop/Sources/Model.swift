@@ -508,6 +508,12 @@ final class Workbench: ObservableObject {
       "--timeout-seconds", String(launchConfiguration.timeoutSeconds),
     ]
     let backendModules = ["ingress"] + modules.compactMap(Self.backendModule)
+    if let reportDirectory = launchConfiguration.reportDirectory {
+      arguments += ["--report-dir", reportDirectory]
+    }
+    if let htmlPath = launchConfiguration.htmlPath {
+      arguments += ["--html", htmlPath]
+    }
     if !backendModules.isEmpty {
       arguments += ["--modules", backendModules.joined(separator: ",")]
     }

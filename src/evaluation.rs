@@ -62,12 +62,28 @@ pub fn write_module_inputs(
     output_dir: impl AsRef<Path>,
     rules_path: impl AsRef<Path>,
 ) -> Result<Vec<PathBuf>, String> {
-    let output_dir = output_dir.as_ref();
-    fs::create_dir_all(output_dir).map_err(|e| format!("创建模块输入目录失败：{e}"))?;
     let rules: Value = serde_json::from_slice(
         &fs::read(rules_path.as_ref()).map_err(|e| format!("读取评估规则失败：{e}"))?,
     )
     .map_err(|e| format!("解析评估规则失败：{e}"))?;
+    write_module_inputs_with_rules(report, output_dir.as_ref(), &rules)
+}
+
+pub fn write_bundled_module_inputs(
+    report: &CliRunReport,
+    output_dir: impl AsRef<Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let rules: Value = serde_json::from_str(include_str!("../rules/agentcheck-evaluation.json"))
+        .map_err(|e| format!("解析内置评估规则失败：{e}"))?;
+    write_module_inputs_with_rules(report, output_dir.as_ref(), &rules)
+}
+
+fn write_module_inputs_with_rules(
+    report: &CliRunReport,
+    output_dir: &Path,
+    rules: &Value,
+) -> Result<Vec<PathBuf>, String> {
+    fs::create_dir_all(output_dir).map_err(|e| format!("创建模块输入目录失败：{e}"))?;
     let mut paths = Vec::new();
     for module in &report.selected_modules {
         let evidence = report
@@ -121,7 +137,7 @@ pub fn analyze_modules(
 ) -> Result<Vec<PathBuf>, String> {
     let report_dir = report_dir.as_ref();
     fs::create_dir_all(report_dir).map_err(|e| format!("创建模块报告目录失败：{e}"))?;
-    let omp = resolve_omp_path()?;
+    let omp = resolve_omp_path();
     let omp_config = OmpConfig::new(analyzer_config)?;
     let mut paths = Vec::new();
     for input_path in input_paths {
@@ -131,12 +147,17 @@ pub fn analyze_modules(
             .and_then(|name| name.strip_suffix(".input.json"))
             .ok_or_else(|| format!("无法从输入文件识别模块：{}", input_path.display()))?;
         let output_path = report_dir.join(format!("{module}.report.json"));
+        if let Err(error) = &omp {
+            write_json(&output_path, &inconclusive_report(module, error))?;
+            paths.push(output_path);
+            continue;
+        }
         let model_selector = format!("agentcheck-target/{}", analyzer_config.model);
         let prompt = format!(
             "你是 AgentCheck 评估器。附件是 {path} 对应的完整模块输入 JSON，包含判定规则和完整检测证据。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。严格依据规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、analyzer；verdict 只能是 pass、fail、limited、inconclusive；任何证据不足必须是 inconclusive；每个 finding 必须引用 evidence_id。不要输出 Markdown，不要输出 JSON 之外的内容。",
             path = input_path.display(),
         );
-        let result = Command::new(&omp)
+        let result = Command::new(omp.as_ref().unwrap())
             .args([
                 "-p",
                 "--mode",
@@ -218,6 +239,9 @@ fn resolve_omp_path() -> Result<PathBuf, String> {
             return Ok(path);
         }
         return Err(format!("OMP_BIN 指向的文件不存在：{}", path.display()));
+    }
+    if let Some(path) = crate::runtime::omp_path()? {
+        return Ok(path);
     }
     if let Ok(executable) = std::env::current_exe() {
         if let Some(parent) = executable.parent() {

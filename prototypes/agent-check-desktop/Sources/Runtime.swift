@@ -7,6 +7,8 @@ struct LaunchConfiguration {
   var stopAfter: String?
   var timeoutSeconds: Int
   var outputPath: String?
+  var reportDirectory: String?
+  var htmlPath: String?
   var cliPath: String
 
   static func from(arguments: [String]) -> LaunchConfiguration? {
@@ -27,6 +29,8 @@ struct LaunchConfiguration {
       stopAfter: value("--agentcheck-stop-after"),
       timeoutSeconds: Int(value("--agentcheck-timeout-seconds") ?? "300") ?? 300,
       outputPath: value("--agentcheck-output"),
+      reportDirectory: value("--agentcheck-report-dir"),
+      htmlPath: value("--agentcheck-html"),
       cliPath: cliPath
     )
   }
