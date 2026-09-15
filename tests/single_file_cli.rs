@@ -86,8 +86,6 @@ fn missing_analyzer_keeps_evidence_and_html_without_external_rules() {
             "--no-gui",
             "--modules",
             "ingress",
-            "--report-dir",
-            "reports",
             "--timeout-seconds",
             "2",
         ])
@@ -169,18 +167,28 @@ fn missing_analyzer_keeps_evidence_and_html_without_external_rules() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(directory.path().join("reports/run.json").is_file());
-    assert!(directory.path().join("reports/report.html").is_file());
     assert!(
         directory
             .path()
-            .join("reports/module-input/ingress.input.json")
+            .join("agentcheck-report/run.json")
+            .is_file()
+    );
+    assert!(
+        directory
+            .path()
+            .join("agentcheck-report/report.html")
+            .is_file()
+    );
+    assert!(
+        directory
+            .path()
+            .join("agentcheck-report/module-input/ingress.input.json")
             .is_file()
     );
     let report = std::fs::read_to_string(
         directory
             .path()
-            .join("reports/module-report/ingress.report.json"),
+            .join("agentcheck-report/module-report/ingress.report.json"),
     )
     .unwrap();
     let value: serde_json::Value = serde_json::from_str(&report).unwrap();
