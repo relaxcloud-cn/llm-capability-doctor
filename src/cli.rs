@@ -331,10 +331,48 @@ impl LiveExecutor {
                     max_tokens: 256,
                     stream: plan.category.id() == "S07",
                 };
-                let response = self.transport.send(request.clone());
-                let payload = self.transport.evidence_payload(&request, &response);
+                let (response, stream) = if request.stream {
+                    let stream = self.transport.send_stream(request.clone());
+                    (stream.response.clone(), Some(stream))
+                } else {
+                    (self.transport.send(request.clone()), None)
+                };
+                let payload = stream.as_ref().map_or_else(
+                    || self.transport.evidence_payload(&request, &response),
+                    |stream| self.transport.stream_evidence_payload(&request, stream),
+                );
                 evidence.push(json!({"sample_id": sample_id, "payload": payload}));
-                let (status, limitation) = if response.error.is_some() {
+                let (status, limitation) = if let Some(stream) = stream.as_ref() {
+                    if response.error.is_some() {
+                        (
+                            SpecStatus::Inconclusive,
+                            Some("流式传输失败，未归因模型".into()),
+                        )
+                    } else if stream.parse_errors.is_empty()
+                        && stream.terminated
+                        && is_chat_completion_shape(response.parsed.as_ref())
+                    {
+                        (
+                            SpecStatus::Accepted,
+                            Some("已完成该固定样本的真实流式请求；已记录事件和终止状态".into()),
+                        )
+                    } else if !stream.parse_errors.is_empty() {
+                        (
+                            SpecStatus::Failed,
+                            Some(format!(
+                                "客户端流式解析失败：{}",
+                                stream.parse_errors.join("；")
+                            )),
+                        )
+                    } else if !stream.terminated {
+                        (SpecStatus::Failed, Some("服务未正常结束流式响应".into()))
+                    } else {
+                        (
+                            SpecStatus::Failed,
+                            Some("流式响应未形成可识别的对话结果".into()),
+                        )
+                    }
+                } else if response.error.is_some() {
                     (
                         SpecStatus::Inconclusive,
                         Some("传输失败，未归因模型".into()),
@@ -2179,9 +2217,21 @@ mod tests {
                     .lock()
                     .unwrap()
                     .push(String::from_utf8_lossy(&request[..size]).into_owned());
+                let request_text = String::from_utf8_lossy(&request[..size]);
+                let is_stream = request_text.contains("\"stream\":true");
+                let body = if is_stream {
+                    format!("data: {response_body}\n\ndata: [DONE]\n\n")
+                } else {
+                    response_body.to_owned()
+                };
+                let content_type = if is_stream {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                };
                 let response = format!(
-                    "HTTP/1.1 {response_status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
-                    response_body.len()
+                    "HTTP/1.1 {response_status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
                 );
                 stream.write_all(response.as_bytes()).unwrap();
             }
