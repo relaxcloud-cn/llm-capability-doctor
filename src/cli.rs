@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
@@ -91,6 +90,15 @@ pub trait ModuleExecutor {
         self.execute(module_id, record)
     }
 
+    fn execute_with_record_progress(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+        _progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        self.execute_with_record(module_id, record)
+    }
+
     fn execution_origin(&self) -> &'static str {
         "custom_executor"
     }
@@ -120,7 +128,6 @@ impl ModuleExecutor for UnavailableExecutor {
 pub struct LiveExecutor {
     transport: ChatCompletionsTransport,
     full: bool,
-    progress_file: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for LiveExecutor {
@@ -142,7 +149,6 @@ impl LiveExecutor {
         Ok(Self {
             transport: ChatCompletionsTransport::new(endpoint, model, api_key, timeout)?,
             full: false,
-            progress_file: None,
         })
     }
 
@@ -155,33 +161,6 @@ impl LiveExecutor {
         let mut executor = Self::new(endpoint, model, api_key, timeout)?;
         executor.full = true;
         Ok(executor)
-    }
-
-    pub fn with_progress_file(mut self, path: Option<PathBuf>) -> Self {
-        self.progress_file = path;
-        self
-    }
-
-    fn emit_item_progress(&self, module_id: &str, index: usize, total: usize, item: &str) {
-        let Some(path) = &self.progress_file else {
-            return;
-        };
-        let event = ProgressEvent {
-            phase: ProgressPhase::ItemCompleted,
-            module_id: Some(module_id.into()),
-            index,
-            total,
-            item_index: Some(index),
-            item_total: Some(total),
-            item_name: Some(item.into()),
-            state: None,
-            message: format!("已完成 {item}"),
-        };
-        if let Ok(mut file) = fs::OpenOptions::new().create(true).append(true).open(path) {
-            if let Ok(line) = serde_json::to_string(&event) {
-                let _ = writeln!(file, "{line}");
-            }
-        }
     }
 }
 
@@ -211,6 +190,18 @@ impl ModuleExecutor for LiveExecutor {
             }
         }
         self.execute(module_id, record)
+    }
+
+    fn execute_with_record_progress(
+        &mut self,
+        module_id: &str,
+        record: &mut DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        if self.full && module_id == "capability" {
+            return self.execute_capability_with_progress(record, progress);
+        }
+        self.execute_with_record(module_id, record)
     }
 }
 
@@ -369,7 +360,7 @@ impl LiveExecutor {
                 };
                 observations.push(SpecificationObservation {
                     category: plan.category,
-                    sample_id: sample_id.clone(),
+                    sample_id,
                     attempt: SpecificationAttemptKind::Initial,
                     conditions: plan.fixed_settings.clone(),
                     actual_output: response.parsed,
@@ -381,8 +372,6 @@ impl LiveExecutor {
                     limitation,
                     verified_scope: None,
                 });
-                let completed = observations.len();
-                self.emit_item_progress("specification", completed, 30, &sample_id);
             }
         }
         let report = build_report(record.id.as_str(), observations).ok();
@@ -417,10 +406,19 @@ impl LiveExecutor {
     }
 
     fn execute_capability(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_capability_with_progress(record, &mut noop)
+    }
+
+    fn execute_capability_with_progress(
+        &mut self,
+        record: &DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
         let samples = fixed_capability_catalog();
         let mut responses = Vec::with_capacity(samples.len());
         let mut evidence = Vec::with_capacity(samples.len());
-        for (sample_index, sample) in samples.iter().enumerate() {
+        for sample in &samples {
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
                 prompt: sample.prompt.clone(),
@@ -450,7 +448,12 @@ impl LiveExecutor {
                 },
             ));
             evidence.push(json!({"sample_id": sample.id, "payload": self.transport.evidence_payload(&request, &response)}));
-            self.emit_item_progress("capability", sample_index + 1, samples.len(), &sample.id);
+            progress(ProgressDetail {
+                index: evidence.len(),
+                total: samples.len(),
+                id: sample.id.clone(),
+                message: format!("已完成能力样本 {} / {}", evidence.len(), samples.len()),
+            });
         }
         let scorecard = build_scorecard(
             record.id.as_str(),
@@ -1496,10 +1499,10 @@ pub struct CliRunReport {
 pub enum ProgressPhase {
     RunStarted,
     ModuleStarted,
+    ModuleProgress,
     ModuleCompleted,
     RunCompleted,
     RunStopped,
-    ItemCompleted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1508,29 +1511,26 @@ pub struct ProgressEvent {
     pub module_id: Option<String>,
     pub index: usize,
     pub total: usize,
-    pub item_index: Option<usize>,
-    pub item_total: Option<usize>,
-    pub item_name: Option<String>,
     pub state: Option<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_total: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProgressDetail {
+    pub index: usize,
+    pub total: usize,
+    pub id: String,
     pub message: String,
 }
 
 pub trait ProgressSink {
     fn emit(&mut self, event: ProgressEvent);
-}
-
-fn module_item_total(module_id: &str) -> Option<usize> {
-    match module_id {
-        "specification" => Some(
-            seven_category_plan()
-                .iter()
-                .map(|plan| plan.samples.len())
-                .sum(),
-        ),
-        "capability" => Some(fixed_capability_catalog().len()),
-        "baseline" => Some(14),
-        _ => None,
-    }
 }
 
 #[derive(Debug, Default)]
@@ -1634,11 +1634,11 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         module_id: None,
         index: 0,
         total: selected.len(),
-        item_index: None,
-        item_total: None,
-        item_name: None,
         state: None,
         message: "检测已开始".into(),
+        detail_index: None,
+        detail_total: None,
+        detail_id: None,
     });
     let stop_index = request
         .stop_after
@@ -1654,13 +1654,27 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: Some(module_id.clone()),
             index,
             total: selected.len(),
-            item_index: None,
-            item_total: module_item_total(module_id),
-            item_name: None,
             state: None,
             message: format!("开始检测 {module_id}"),
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
-        let result = executor.execute_with_record(module_id, &mut record);
+        let mut detail_progress = |detail: ProgressDetail| {
+            progress.emit(ProgressEvent {
+                phase: ProgressPhase::ModuleProgress,
+                module_id: Some(module_id.clone()),
+                index,
+                total: selected.len(),
+                state: None,
+                message: detail.message,
+                detail_index: Some(detail.index),
+                detail_total: Some(detail.total),
+                detail_id: Some(detail.id),
+            });
+        };
+        let result =
+            executor.execute_with_record_progress(module_id, &mut record, &mut detail_progress);
         let evidence = add_evidence(
             &mut record,
             &format!("cli-{module_id}-{index}"),
@@ -1726,11 +1740,11 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: Some(module_id.clone()),
             index: index + 1,
             total: selected.len(),
-            item_index: module_item_total(module_id),
-            item_total: module_item_total(module_id),
-            item_name: None,
             state: Some(progress_state),
             message: progress_message,
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
         if stop_index == Some(index) {
             stop_run(
@@ -1744,11 +1758,11 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 module_id: None,
                 index: index + 1,
                 total: selected.len(),
-                item_index: None,
-                item_total: None,
-                item_name: None,
                 state: Some("unverified".into()),
                 message: "检测已停止，未完成项目保持未验证".into(),
+                detail_index: None,
+                detail_total: None,
+                detail_id: None,
             });
             break;
         }
@@ -1760,11 +1774,11 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             module_id: None,
             index: selected.len(),
             total: selected.len(),
-            item_index: None,
-            item_total: None,
-            item_name: None,
             state: None,
             message: "检测已完成".into(),
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
         });
     }
     let overall = if stopped {

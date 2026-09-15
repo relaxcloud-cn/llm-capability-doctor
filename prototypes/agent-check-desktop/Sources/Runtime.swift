@@ -46,6 +46,9 @@ struct ProgressEvent: Decodable {
   var itemName: String?
   var state: String?
   var message: String
+  var detailIndex: Int?
+  var detailTotal: Int?
+  var detailID: String?
 
   enum CodingKeys: String, CodingKey {
     case phase
@@ -57,6 +60,9 @@ struct ProgressEvent: Decodable {
     case itemName = "item_name"
     case state
     case message
+    case detailIndex = "detail_index"
+    case detailTotal = "detail_total"
+    case detailID = "detail_id"
   }
 
   init(from decoder: Decoder) throws {
