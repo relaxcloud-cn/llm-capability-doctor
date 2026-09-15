@@ -49,7 +49,10 @@ pub struct StreamResponse {
     pub events: Vec<StreamEvent>,
     pub content: String,
     pub terminated: bool,
+    pub parse_errors: Vec<String>,
 }
+
+type ParsedStream = (String, Vec<StreamEvent>, String, bool, Vec<String>);
 
 #[derive(Clone)]
 pub struct ChatCompletionsTransport {
@@ -226,7 +229,7 @@ impl ChatCompletionsTransport {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     match self.read_stream(response, started) {
-                        Ok((body, events, content, terminated)) => StreamResponse {
+                        Ok((body, events, content, terminated, parse_errors)) => StreamResponse {
                             response: ChatCompletionsResponse {
                                 status: Some(status),
                                 body: truncate_body(body),
@@ -239,6 +242,7 @@ impl ChatCompletionsTransport {
                             events,
                             content,
                             terminated,
+                            parse_errors,
                         },
                         Err(error) => StreamResponse {
                             response: ChatCompletionsResponse {
@@ -253,6 +257,7 @@ impl ChatCompletionsTransport {
                             events: Vec::new(),
                             content: String::new(),
                             terminated: false,
+                            parse_errors: Vec::new(),
                         },
                     }
                 }
@@ -269,6 +274,7 @@ impl ChatCompletionsTransport {
                     events: Vec::new(),
                     content: String::new(),
                     terminated: false,
+                    parse_errors: Vec::new(),
                 },
             };
             let retryable = response.response.error.is_some()
@@ -291,12 +297,13 @@ impl ChatCompletionsTransport {
         &self,
         response: reqwest::Response,
         started: Instant,
-    ) -> Result<(String, Vec<StreamEvent>, String, bool), String> {
+    ) -> Result<ParsedStream, String> {
         self.runtime.block_on(async move {
             let mut body = Vec::new();
             let mut events = Vec::new();
             let mut content = String::new();
             let mut terminated = false;
+            let mut parse_errors = Vec::new();
             let mut line_buffer = String::new();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
@@ -306,7 +313,14 @@ impl ChatCompletionsTransport {
                 while let Some(newline) = line_buffer.find('\n') {
                     let line = line_buffer[..newline].trim_end_matches('\r').to_owned();
                     line_buffer.drain(..=newline);
-                    parse_stream_line(&line, started, &mut events, &mut content, &mut terminated);
+                    parse_stream_line(
+                        &line,
+                        started,
+                        &mut events,
+                        &mut content,
+                        &mut terminated,
+                        &mut parse_errors,
+                    );
                 }
             }
             if !line_buffer.trim().is_empty() {
@@ -316,6 +330,7 @@ impl ChatCompletionsTransport {
                     &mut events,
                     &mut content,
                     &mut terminated,
+                    &mut parse_errors,
                 );
             }
             Ok((
@@ -323,6 +338,7 @@ impl ChatCompletionsTransport {
                 events,
                 content,
                 terminated,
+                parse_errors,
             ))
         })
     }
@@ -437,6 +453,7 @@ impl ChatCompletionsTransport {
                     "finish_reason": event.finish_reason,
                     "done": event.done,
                 })).collect::<Vec<_>>(),
+                "parse_errors": stream.parse_errors,
             });
         }
         payload
@@ -460,8 +477,16 @@ fn parse_stream_line(
     events: &mut Vec<StreamEvent>,
     content: &mut String,
     terminated: &mut bool,
+    parse_errors: &mut Vec<String>,
 ) {
-    let Some(data) = line.strip_prefix("data:") else {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
+        return;
+    }
+    let Some(data) = line
+        .strip_prefix("data:")
+        .or_else(|| line.strip_prefix("data :"))
+    else {
         return;
     };
     let data = data.trim();
@@ -477,16 +502,40 @@ fn parse_stream_line(
         });
         return;
     }
-    let parsed = serde_json::from_str::<Value>(data).ok();
+    let parsed = match serde_json::from_str::<Value>(data) {
+        Ok(value) => value,
+        Err(error) => {
+            parse_errors.push(format!("流式事件 JSON 解析失败：{error}"));
+            events.push(StreamEvent {
+                at_ms: started.elapsed().as_millis() as u64,
+                raw: data.into(),
+                content_delta: None,
+                reasoning_delta: None,
+                finish_reason: None,
+                done: false,
+            });
+            return;
+        }
+    };
     let choice = parsed
-        .as_ref()
-        .and_then(|value| value.get("choices"))
+        .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first());
     let delta = choice.and_then(|value| value.get("delta"));
+    let message = choice.and_then(|value| value.get("message"));
     let content_delta = delta
         .and_then(|value| value.get("content"))
         .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .and_then(|value| value.get("content"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            choice
+                .and_then(|value| value.get("text"))
+                .and_then(Value::as_str)
+        })
         .map(str::to_owned);
     let reasoning_delta = delta
         .and_then(|value| {
@@ -495,6 +544,15 @@ fn parse_stream_line(
                 .or_else(|| value.get("reasoning"))
         })
         .and_then(Value::as_str)
+        .or_else(|| {
+            message
+                .and_then(|value| {
+                    value
+                        .get("reasoning_content")
+                        .or_else(|| value.get("reasoning"))
+                })
+                .and_then(Value::as_str)
+        })
         .map(str::to_owned);
     if let Some(value) = &content_delta {
         content.push_str(value);
