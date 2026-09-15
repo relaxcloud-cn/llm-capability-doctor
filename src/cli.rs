@@ -1521,7 +1521,12 @@ pub trait ProgressSink {
 
 fn module_item_total(module_id: &str) -> Option<usize> {
     match module_id {
-        "specification" => Some(30),
+        "specification" => Some(
+            seven_category_plan()
+                .iter()
+                .map(|plan| plan.samples.len())
+                .sum(),
+        ),
         "capability" => Some(fixed_capability_catalog().len()),
         "baseline" => Some(14),
         _ => None,
