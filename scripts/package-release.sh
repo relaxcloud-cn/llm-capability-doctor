@@ -12,13 +12,13 @@ trap 'rm -rf "$stage_dir"' EXIT
 
 case "$target" in
   x86_64-pc-windows-msvc|x86_64-pc-windows-gnu)
-    omp_asset="omp-windows-x64.exe"; omp_name="omp.exe"; cli_name="agentcheck.exe"; cargo_binary="llm-capability-doctor.exe" ;;
+    omp_asset="omp-windows-x64.exe"; omp_name="omp.exe"; cli_name="agent-check.exe"; cargo_binary="llm-capability-doctor.exe" ;;
   aarch64-apple-darwin)
-    omp_asset="omp-darwin-arm64"; omp_name="omp"; cli_name="agentcheck"; cargo_binary="llm-capability-doctor" ;;
+    omp_asset="omp-darwin-arm64"; omp_name="omp"; cli_name="agent-check"; cargo_binary="llm-capability-doctor" ;;
   x86_64-unknown-linux-gnu)
-    omp_asset="omp-linux-x64"; omp_name="omp"; cli_name="agentcheck"; cargo_binary="llm-capability-doctor" ;;
+    omp_asset="omp-linux-x64"; omp_name="omp"; cli_name="agent-check"; cargo_binary="llm-capability-doctor" ;;
   aarch64-unknown-linux-gnu)
-    omp_asset="omp-linux-arm64"; omp_name="omp"; cli_name="agentcheck"; cargo_binary="llm-capability-doctor" ;;
+    omp_asset="omp-linux-arm64"; omp_name="omp"; cli_name="agent-check"; cargo_binary="llm-capability-doctor" ;;
   *) echo "不支持的目标：$target；支持 Windows x86_64、macOS arm64、Linux x86_64 和 Linux arm64" >&2; exit 1 ;;
 esac
 case "$cargo_command" in build|zigbuild) ;; *) echo "AGENTCHECK_CARGO_COMMAND 只能是 build 或 zigbuild" >&2; exit 1 ;; esac
