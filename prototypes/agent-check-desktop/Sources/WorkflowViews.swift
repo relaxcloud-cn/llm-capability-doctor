@@ -260,54 +260,34 @@ struct ProgressScreen: View {
             Text("\(Int((store.progress * 100).rounded()))")
               .font(.system(size: 44, weight: .semibold))
               .monospacedDigit()
+              .contentTransition(.numericText())
+              .animation(.easeOut(duration: 0.42), value: store.progress)
             Text("%").font(.system(size: 15)).foregroundStyle(Theme.faint)
           }
         }
-        GeometryReader { geometry in
-          ZStack(alignment: .leading) {
-            Capsule().fill(Theme.canvas)
-            Capsule().fill(Theme.accent)
-              .frame(width: max(10, geometry.size.width * store.progress))
-          }
-        }.frame(height: 9)
+        BigProgressBar(progress: store.progress)
         HStack {
-          VStack(alignment: .leading, spacing: 3) {
-            Text(store.currentItemName.isEmpty
-              ? (store.progressMessage.isEmpty
-                ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
-                : store.progressMessage)
-              : "正在检测：\(store.currentItemName)")
-            if store.currentItemTotal > 0 {
-              Text("当前项目：\(store.currentItemIndex) / \(store.currentItemTotal)")
-                .foregroundStyle(Theme.muted)
-            }
-          }
+          Text(currentLineText)
           Spacer()
-          if let current = store.progressItems.first(where: { $0.state == "进行中" }) {
-            Text("进行中 \(current.completed) / \(current.total)")
-          } else if let finished = store.progressItems.last(where: { $0.completed > 0 }) {
-            Text("已完成 \(finished.completed) / \(finished.total)")
-          } else {
-            Text("\(store.completed.count) / \(store.activeModules.count) 个模块完成")
-          }
+          Text("\(store.completed.count) / \(store.activeModules.count) 个模块完成")
         }
         .font(Theme.captionFont).foregroundStyle(Theme.faint)
       }
-      if !store.progressItems.isEmpty {
-        VStack(spacing: 0) {
-          ForEach(store.progressItems) { item in
-            progressItemRow(item)
-          }
-        }
-        .background(Theme.infoTint)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.line))
-      }
-      VStack(spacing: 6) {
+      VStack(spacing: 0) {
         ForEach(store.activeModules) { module in
           moduleRow(module)
+          if store.isModuleExpanded(module) {
+            subItems(module)
+              .transition(.opacity)
+          }
         }
       }
+      .background(.white, in: RoundedRectangle(cornerRadius: Theme.radiusCard))
+      .overlay(
+        RoundedRectangle(cornerRadius: Theme.radiusCard).stroke(Theme.line, lineWidth: 1))
+      .clipShape(RoundedRectangle(cornerRadius: Theme.radiusCard))
+      .animation(.easeInOut(duration: 0.32), value: store.expandedModuleIDs)
+      .animation(.easeInOut(duration: 0.32), value: store.completed)
       Text(store.isRealMode
         ? "检测程序实际执行；提前停止会保留已完成的模块状态。"
         : "结束后生成使用结论；提前停止会保留已完成的结果。")
@@ -315,9 +295,68 @@ struct ProgressScreen: View {
     }
   }
 
+  private var currentLineText: String {
+    if store.currentItemName.isEmpty {
+      return store.progressMessage.isEmpty
+        ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
+        : store.progressMessage
+    }
+    let index = store.currentItemTotal > 0
+      ? min(store.currentItemIndex + 1, store.currentItemTotal)
+      : store.currentItemIndex + 1
+    let total = store.currentItemTotal > 0 ? store.currentItemTotal : index
+    return "正在检测：\(store.currentItemName)　·　第 \(index) / \(total) 个样本"
+  }
+
+  // 大进度条：宽度平滑过渡 + 流光 + 前端光点。
+  private struct BigProgressBar: View {
+    var progress: Double
+    var body: some View {
+      GeometryReader { geometry in
+        ZStack(alignment: .leading) {
+          Capsule().fill(Color(red: 0.91, green: 0.918, blue: 0.933))
+          Capsule()
+            .fill(
+              LinearGradient(
+                colors: [Color(red: 0.231, green: 0.455, blue: 0.941), Theme.accent],
+                startPoint: .leading, endPoint: .trailing))
+            .frame(width: max(10, geometry.size.width * progress))
+            .animation(.easeOut(duration: 0.55), value: progress)
+            .overlay(alignment: .trailing) {
+              Circle().fill(Theme.accent)
+                .frame(width: 7, height: 7)
+                .offset(x: -3)
+                .shadow(color: Theme.accent.opacity(0.55), radius: 5)
+                .shadow(color: Theme.accent.opacity(0.18), radius: 3)
+            }
+            .overlay { SheenSweep() }
+            .clipShape(Capsule())
+        }
+      }.frame(height: 9)
+    }
+  }
+
+  private struct SheenSweep: View {
+    @State private var sweeping = false
+    var body: some View {
+      GeometryReader { geometry in
+        Capsule()
+          .fill(.white.opacity(0.35))
+          .frame(width: max(24, geometry.size.width * 0.3))
+          .blur(radius: 5)
+          .offset(x: sweeping ? geometry.size.width + 30 : -60)
+          .animation(
+            .linear(duration: 2.2).repeatForever(autoreverses: false), value: sweeping)
+      }
+      .onAppear { sweeping = true }
+      .allowsHitTesting(false)
+    }
+  }
+
   private func moduleRow(_ module: CheckModule) -> some View {
     let done = store.completed.contains(module)
     let active = store.activeModule == module
+    let expanded = store.isModuleExpanded(module)
     return HStack(spacing: 14) {
       Image(
         systemName: done
@@ -336,47 +375,86 @@ struct ProgressScreen: View {
       Spacer()
       Text(done ? "已完成" : active ? "进行中" : "等待中")
         .font(Theme.captionFont)
-        .foregroundStyle(active ? Theme.accent : Theme.faint)
+        .foregroundStyle(done ? Theme.pass : active ? Theme.accent : Theme.faint)
+      Image(systemName: "chevron.right")
+        .font(.system(size: 9, weight: .semibold))
+        .foregroundStyle(Theme.faint)
+        .rotationEffect(.degrees(expanded ? 90 : 0))
+        .animation(.easeInOut(duration: 0.25), value: expanded)
     }
     .padding(.vertical, 14)
     .padding(.horizontal, 14)
-    .background(
-      active ? Theme.accent.opacity(0.05) : .clear,
-      in: RoundedRectangle(cornerRadius: 10)
-    )
+    .background(active ? Theme.accent.opacity(0.05) : .clear)
     .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    .contentShape(Rectangle())
+    .onTapGesture { store.toggleModuleExpanded(module) }
   }
 
-  private func progressItemRow(_ item: ProgressItem) -> some View {
-    let ratio = item.total > 0 ? Double(item.completed) / Double(item.total) : 0
-    let running = item.state == "进行中"
-    return HStack(spacing: 16) {
-      Text(item.name)
-        .font(.system(size: 14, weight: .medium))
-        .frame(maxWidth: .infinity, alignment: .leading)
-      GeometryReader { geometry in
-        ZStack(alignment: .leading) {
-          Capsule().fill(Theme.canvas)
-          Capsule().fill(running ? Theme.accent : Theme.passBar)
-            .frame(width: max(0, geometry.size.width * ratio))
-            .overlay(alignment: .trailing) {
-              if running {
-                Capsule().fill(.white.opacity(0.55)).frame(width: 28).blur(radius: 4)
-                  .offset(x: 14)
-                  .animation(.linear(duration: 1.2).repeatForever(autoreverses: false), value: item.completed)
-              }
-            }
-        }
+  // 大项展开后的小项列表：进行中 = 滑动光段；已完成 = 实心绿；等待中 = 空轨。
+  private func subItems(_ module: CheckModule) -> some View {
+    let isActive = store.activeModule == module
+    return VStack(spacing: 0) {
+      ForEach(store.moduleItems(module)) { item in
+        subItemRow(item, active: isActive)
       }
-      .frame(width: 180, height: 7)
+    }
+    .padding(.leading, 45)
+    .padding(.trailing, 14)
+    .padding(.bottom, 10)
+  }
+
+  private func subItemRow(_ item: ProgressItem, active: Bool) -> some View {
+    let running = active && item.state == "进行中"
+    let done = item.state == "已完成" || item.state == "已结束"
+    return HStack(spacing: 12) {
+      Circle()
+        .fill(
+          done ? Theme.passBar : running ? Theme.accent : Color(
+            red: 0.776, green: 0.804, blue: 0.839))
+        .frame(width: 10, height: 10)
+      Text(item.name)
+        .font(.system(size: 12.5, weight: running ? .medium : .regular))
+        .foregroundStyle(running ? Theme.ink : Theme.muted)
+        .frame(minWidth: 128, alignment: .leading)
+      SubItemTrack(running: running, done: done)
+        .frame(height: 6)
+        .frame(maxWidth: 320)
+      Spacer(minLength: 12)
       Text("\(item.state) \(item.completed) / \(item.total)")
         .font(Theme.captionFont)
-        .foregroundStyle(running ? Theme.accent : item.completed > 0 ? Theme.pass : Theme.faint)
-        .frame(width: 112, alignment: .trailing)
+        .foregroundStyle(running ? Theme.accent : done ? Theme.pass : Theme.faint)
+        .frame(width: 96, alignment: .trailing)
     }
-    .padding(.horizontal, 20)
-    .padding(.vertical, 13)
-    .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
+    .padding(.vertical, 9)
+    .overlay(alignment: .bottom) {
+      Rectangle().fill(Theme.line.opacity(0.6)).frame(height: 1)
+    }
+  }
+
+  private struct SubItemTrack: View {
+    var running: Bool
+    var done: Bool
+    var body: some View {
+      GeometryReader { geometry in
+        ZStack(alignment: .leading) {
+          Capsule().fill(
+            done
+              ? Theme.passBar.opacity(0.85)
+              : Color(red: 0.929, green: 0.937, blue: 0.949))
+          if running {
+            Capsule()
+              .fill(
+                LinearGradient(
+                  colors: [Theme.accent.opacity(0.25), Theme.accent],
+                  startPoint: .leading, endPoint: .trailing))
+              .frame(width: geometry.size.width * 0.38)
+              .offset(x: running ? geometry.size.width : -geometry.size.width * 0.38)
+              .animation(
+                .linear(duration: 1.15).repeatForever(autoreverses: false), value: running)
+          }
+        }
+      }
+    }
   }
 }
 

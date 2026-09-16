@@ -143,6 +143,8 @@ struct WorkbenchView: View {
           HStack(spacing: 8) {
             ProgressView().controlSize(.small)
             Text("检测中 · \(Int((store.progress * 100).rounded()))%")
+              .contentTransition(.numericText())
+              .animation(.easeOut(duration: 0.42), value: store.progress)
             Spacer()
             Image(systemName: "arrow.up.right")
           }
