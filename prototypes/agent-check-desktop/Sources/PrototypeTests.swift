@@ -30,6 +30,46 @@ func runModelTests() async throws {
   runningStore.detailIndex = 37
   runningStore.detailTotal = 240
   try expect(runningStore.running && runningStore.progress > 0, "实时检测首屏进入进行中状态")
+  let eventStore = Workbench()
+  eventStore.service = Service(url: "https://example.test/v1", model: "fixture")
+  eventStore.selectedModules = Set(CheckModule.testModules)
+  eventStore.startRun(automatic: false)
+  func decodeEvent(_ json: String) throws -> ProgressEvent {
+    try JSONDecoder().decode(ProgressEvent.self, from: Data(json.utf8))
+  }
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_started","module_id":"specification","index":0,"total":5,"state":null,"message":"开始检测 specification"}"#
+    ))
+  try expect(
+    eventStore.progressItems.first?.state == "进行中"
+      && eventStore.progressItems.dropFirst().allSatisfy { $0.state == "等待中" },
+    "模块开始后第一小项进入检测中，其余保持等待")
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_progress","module_id":"specification","index":0,"total":5,"state":null,"message":"已完成规格样本 12 / 27","detail_index":12,"detail_total":27,"detail_id":"S04"}"#
+    ))
+  try expect(
+    eventStore.progressItems[3].state == "进行中" && eventStore.progressItems[3].completed == 1,
+    "规格小项按真实样本数推进")
+  try expect(
+    eventStore.progressItems[2].state == "已完成" && eventStore.progressItems[2].completed == 5,
+    "进度越过的小项按样本数收尾")
+  try expect(eventStore.currentItemName == "工具调用", "当前小项显示正式名称")
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_started","module_id":"agent","index":3,"total":5,"state":null,"message":"开始检测 agent"}"#
+    ))
+  try expect(
+    eventStore.progressItems.count == 10 && eventStore.progressItems.first?.name == "遵守任务规则",
+    "智能体进度按真实场景展示")
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_started","module_id":"baseline","index":4,"total":5,"state":null,"message":"开始检测 baseline"}"#
+    ))
+  try expect(
+    eventStore.progressItems.count == 14 && eventStore.progressItems[13].name == "错误对象",
+    "基线进度复用十四项正式名称")
   try expect(
     CheckModule.allCases.map(\.title) == [
       "模型接入信息", "模型规格实测", "模型能力跑分", "模型性能实测", "智能体实测", "模型基线对比",

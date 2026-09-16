@@ -257,7 +257,7 @@ struct ProgressScreen: View {
             .font(.system(size: 17, weight: .semibold))
           Spacer()
           HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Text("\(Int(store.progress * 100))")
+            Text("\(Int((store.progress * 100).rounded()))")
               .font(.system(size: 44, weight: .semibold))
               .monospacedDigit()
             Text("%").font(.system(size: 15)).foregroundStyle(Theme.faint)
