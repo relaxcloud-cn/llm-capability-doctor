@@ -70,6 +70,28 @@ func runModelTests() async throws {
   try expect(
     eventStore.progressItems.count == 14 && eventStore.progressItems[13].name == "错误对象",
     "基线进度复用十四项正式名称")
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_started","module_id":"specification","index":0,"total":5,"state":null,"message":"开始检测 specification"}"#
+    ))
+  try expect(eventStore.isModuleExpanded(.parameters), "当前模块默认展开")
+  eventStore.handleProgress(
+    try decodeEvent(
+      #"{"phase":"module_completed","module_id":"specification","index":1,"total":5,"state":"pass","message":"specification 检测完成"}"#
+    ))
+  try expect(
+    eventStore.moduleProgressSnapshots["specification"]?.count == 7
+      && eventStore.moduleProgressSnapshots["specification"]?.first?.state == "已完成",
+    "完成后保留小项快照")
+  try expect(!eventStore.isModuleExpanded(.parameters), "模块完成后自动收起")
+  try expect(
+    eventStore.moduleItems(.parameters).first?.state == "已完成"
+      && eventStore.moduleItems(.parameters).first?.completed
+        == eventStore.moduleItems(.parameters).first?.total,
+    "收起后仍可读取完成明细")
+  try expect(eventStore.moduleItems(.performance).first?.state == "等待中", "未开始模块显示等待模板")
+  eventStore.toggleModuleExpanded(.parameters)
+  try expect(eventStore.isModuleExpanded(.parameters), "已完成模块可手动展开")
   try expect(
     CheckModule.allCases.map(\.title) == [
       "模型接入信息", "模型规格实测", "模型能力跑分", "模型性能实测", "智能体实测", "模型基线对比",

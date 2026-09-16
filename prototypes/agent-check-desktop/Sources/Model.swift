@@ -170,6 +170,8 @@ final class Workbench: ObservableObject {
   @Published var detailTotal: Int?
   @Published var detailID: String?
   @Published var progressItems: [ProgressItem] = []
+  @Published var moduleProgressSnapshots: [String: [ProgressItem]] = [:]
+  @Published var expandedModuleIDs: Set<String> = []
   @Published var realRunError: String?
   @Published var selectedRecordID: UUID?
   @Published var toast: String?
@@ -335,6 +337,25 @@ final class Workbench: ObservableObject {
     let prefix = detailID.split(separator: "-").first.map(String.init) ?? detailID
     return progressItems.first(where: { $0.id == prefix })?.name ?? detailID
   }
+  // 大项展开即小项：当前模块直接用实时小项；其余模块用完成快照或等待模板。
+  func moduleItems(_ module: CheckModule) -> [ProgressItem] {
+    if module == activeModule && !progressItems.isEmpty { return progressItems }
+    guard let backendID = module.backendID else { return [] }
+    return moduleProgressSnapshots[backendID] ?? Self.progressItems(for: backendID)
+  }
+  func isModuleExpanded(_ module: CheckModule) -> Bool {
+    if module == activeModule { return true }
+    guard let backendID = module.backendID else { return false }
+    return expandedModuleIDs.contains(backendID)
+  }
+  func toggleModuleExpanded(_ module: CheckModule) {
+    guard let backendID = module.backendID else { return }
+    if expandedModuleIDs.contains(backendID) {
+      expandedModuleIDs.remove(backendID)
+    } else {
+      expandedModuleIDs.insert(backendID)
+    }
+  }
   var currentItemIndex: Int { detailIndex }
   var currentItemTotal: Int { detailTotal ?? 0 }
   var localStatus: String {
@@ -452,6 +473,8 @@ final class Workbench: ObservableObject {
     detailTotal = nil
     detailID = nil
     progressItems = []
+    moduleProgressSnapshots = [:]
+    expandedModuleIDs = []
     runningService = service
     runningMode = outcome == .limited ? agentMode : "standard"
     runningOutcome = runningMode == "pending-review" ? .inconclusive : outcome
@@ -601,6 +624,8 @@ final class Workbench: ObservableObject {
       var items = Self.progressItems(for: moduleID)
       if !items.isEmpty { items[0].state = "进行中" }
       progressItems = items
+      moduleProgressSnapshots[moduleID] = items
+      expandedModuleIDs.insert(moduleID)
       detailIndex = 0
       detailTotal = nil
       detailID = nil
@@ -625,6 +650,8 @@ final class Workbench: ObservableObject {
         item.state = event.state == "pass" ? "已完成" : "已结束"
         return item
       }
+      moduleProgressSnapshots[moduleID] = progressItems
+      expandedModuleIDs.remove(moduleID)
       elapsed = max(elapsed, completed.count * 2)
     }
   }
