@@ -253,8 +253,15 @@ struct ProgressScreen: View {
       }
       VStack(alignment: .leading, spacing: 14) {
         HStack(alignment: .firstTextBaseline) {
-          Text("正在检测：\(store.activeModule?.title ?? "整理结果")")
+          HStack(spacing: 10) {
+            if store.activeModule == nil {
+              ProgressView().controlSize(.small)
+            }
+            Text(
+              store.activeModule.map { "正在检测：\($0.title)" } ?? "正在汇总结果"
+            )
             .font(.system(size: 17, weight: .semibold))
+          }
           Spacer()
           HStack(alignment: .firstTextBaseline, spacing: 2) {
             Text("\(Int((store.progress * 100).rounded()))")
@@ -296,6 +303,9 @@ struct ProgressScreen: View {
   }
 
   private var currentLineText: String {
+    if store.activeModule == nil {
+      return "汇总各模块结果，生成使用结论"
+    }
     if store.currentItemName.isEmpty {
       return store.progressMessage.isEmpty
         ? (store.activeModule?.subtitle ?? "汇总各模块结果，生成使用结论")
