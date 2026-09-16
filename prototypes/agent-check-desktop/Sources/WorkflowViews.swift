@@ -322,13 +322,7 @@ struct ProgressScreen: View {
                 startPoint: .leading, endPoint: .trailing))
             .frame(width: max(10, geometry.size.width * progress))
             .animation(.easeOut(duration: 0.55), value: progress)
-            .overlay(alignment: .trailing) {
-              Circle().fill(Theme.accent)
-                .frame(width: 7, height: 7)
-                .offset(x: -3)
-                .shadow(color: Theme.accent.opacity(0.55), radius: 5)
-                .shadow(color: Theme.accent.opacity(0.18), radius: 3)
-            }
+            .overlay(alignment: .trailing) { PulseDot() }
             .overlay { SheenSweep() }
             .clipShape(Capsule())
         }
@@ -350,6 +344,21 @@ struct ProgressScreen: View {
       }
       .onAppear { sweeping = true }
       .allowsHitTesting(false)
+    }
+  }
+
+  // 前端光点：低百分比时填充很窄，靠呼吸动画表明仍在运行。
+  private struct PulseDot: View {
+    @State private var pulsing = false
+    var body: some View {
+      Circle().fill(Theme.accent)
+        .frame(width: 7, height: 7)
+        .offset(x: -3)
+        .shadow(color: Theme.accent.opacity(0.55), radius: 5)
+        .shadow(color: Theme.accent.opacity(0.18), radius: 3)
+        .scaleEffect(pulsing ? 1.25 : 0.8)
+        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: pulsing)
+        .onAppear { pulsing = true }
     }
   }
 
@@ -442,17 +451,29 @@ struct ProgressScreen: View {
               ? Theme.passBar.opacity(0.85)
               : Color(red: 0.929, green: 0.937, blue: 0.949))
           if running {
-            Capsule()
-              .fill(
-                LinearGradient(
-                  colors: [Theme.accent.opacity(0.25), Theme.accent],
-                  startPoint: .leading, endPoint: .trailing))
-              .frame(width: geometry.size.width * 0.38)
-              .offset(x: running ? geometry.size.width : -geometry.size.width * 0.38)
-              .animation(
-                .linear(duration: 1.15).repeatForever(autoreverses: false), value: running)
+            SweepSegment(width: geometry.size.width)
           }
         }
+      }
+      .clipped()
+    }
+
+    // 光段必须是独立视图：插入时 onAppear 触发一次状态翻转，
+    // repeatForever 动画才会真正跑起来；挂在 running 值上不会触发。
+    private struct SweepSegment: View {
+      var width: CGFloat
+      @State private var sweeping = false
+      var body: some View {
+        Capsule()
+          .fill(
+            LinearGradient(
+              colors: [Theme.accent.opacity(0.25), Theme.accent],
+              startPoint: .leading, endPoint: .trailing))
+          .frame(width: width * 0.38)
+          .offset(x: sweeping ? width : -width * 0.38)
+          .animation(
+            .linear(duration: 1.15).repeatForever(autoreverses: false), value: sweeping)
+          .onAppear { sweeping = true }
       }
     }
   }
