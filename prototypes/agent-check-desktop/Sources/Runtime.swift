@@ -76,6 +76,9 @@ struct ProgressEvent: Decodable {
     itemName = try values.decodeIfPresent(String.self, forKey: .itemName)
     state = try values.decodeIfPresent(String.self, forKey: .state)
     message = try values.decode(String.self, forKey: .message)
+    detailIndex = try values.decodeIfPresent(Int.self, forKey: .detailIndex)
+    detailTotal = try values.decodeIfPresent(Int.self, forKey: .detailTotal)
+    detailID = try values.decodeIfPresent(String.self, forKey: .detailID)
   }
 }
 

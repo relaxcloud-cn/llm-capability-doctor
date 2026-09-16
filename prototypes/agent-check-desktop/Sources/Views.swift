@@ -142,7 +142,7 @@ struct WorkbenchView: View {
         } label: {
           HStack(spacing: 8) {
             ProgressView().controlSize(.small)
-            Text("检测中 · \(Int(store.progress * 100))%")
+            Text("检测中 · \(Int((store.progress * 100).rounded()))%")
             Spacer()
             Image(systemName: "arrow.up.right")
           }

@@ -198,10 +198,17 @@ impl ModuleExecutor for LiveExecutor {
         record: &mut DetectionRecord,
         progress: &mut dyn FnMut(ProgressDetail),
     ) -> ModuleRunResult {
-        if self.full && module_id == "capability" {
-            return self.execute_capability_with_progress(record, progress);
+        if !self.full {
+            return self.execute_with_record(module_id, record);
         }
-        self.execute_with_record(module_id, record)
+        match module_id {
+            "specification" => self.execute_specification_with_progress(record, progress),
+            "capability" => self.execute_capability_with_progress(record, progress),
+            "performance" => self.execute_performance_with_progress(record, progress),
+            "agent" => self.execute_agent_with_progress(record, progress),
+            "baseline" => self.execute_baseline_with_progress(record, progress),
+            _ => self.execute_with_record(module_id, record),
+        }
     }
 }
 
@@ -314,10 +321,31 @@ impl LiveExecutor {
     }
 
     fn execute_specification(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_specification_with_progress(record, &mut noop)
+    }
+
+    fn execute_specification_with_progress(
+        &mut self,
+        record: &DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        let plans = seven_category_plan();
+        let total_samples: usize = plans.iter().map(|plan| plan.samples.len()).sum();
         let mut observations = Vec::new();
         let mut evidence = Vec::new();
-        for plan in seven_category_plan() {
+        for plan in plans {
             for sample_id in plan.samples {
+                progress(ProgressDetail {
+                    index: evidence.len(),
+                    total: total_samples,
+                    id: plan.category.id().into(),
+                    message: format!(
+                        "正在检测规格样本 {} / {}",
+                        evidence.len() + 1,
+                        total_samples
+                    ),
+                });
                 let request = ChatCompletionsRequest {
                     module_id: "specification".into(),
                     prompt: format!(
@@ -342,6 +370,12 @@ impl LiveExecutor {
                     |stream| self.transport.stream_evidence_payload(&request, stream),
                 );
                 evidence.push(json!({"sample_id": sample_id, "payload": payload}));
+                progress(ProgressDetail {
+                    index: evidence.len(),
+                    total: total_samples,
+                    id: plan.category.id().into(),
+                    message: format!("已完成规格样本 {} / {}", evidence.len(), total_samples),
+                });
                 let (status, limitation) = if let Some(stream) = stream.as_ref() {
                     if response.error.is_some() {
                         (
@@ -457,6 +491,12 @@ impl LiveExecutor {
         let mut responses = Vec::with_capacity(samples.len());
         let mut evidence = Vec::with_capacity(samples.len());
         for sample in &samples {
+            progress(ProgressDetail {
+                index: evidence.len(),
+                total: samples.len(),
+                id: sample.id.clone(),
+                message: format!("正在检测能力样本 {} / {}", evidence.len() + 1, samples.len()),
+            });
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
                 prompt: sample.prompt.clone(),
@@ -572,15 +612,40 @@ impl LiveExecutor {
     }
 
     fn execute_performance(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_performance_with_progress(record, &mut noop)
+    }
+
+    fn execute_performance_with_progress(
+        &mut self,
+        record: &mut DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
         let run_started = std::time::Instant::now();
+        let plans = fixed_performance_plan();
+        let total_dimensions: usize = plans
+            .iter()
+            .map(|plan| performance_dimensions(plan).len())
+            .sum();
+        let mut completed_dimensions = 0_usize;
         let mut samples = Vec::new();
         let mut evidence = Vec::new();
         let mut consecutive_environment_failures = 0_u32;
         let mut circuit_breaker_reason: Option<String> = None;
-        'plans: for plan in fixed_performance_plan() {
+        'plans: for plan in plans {
             for (mode, input_tokens, target_output_tokens, target_concurrency) in
                 performance_dimensions(&plan)
             {
+                progress(ProgressDetail {
+                    index: completed_dimensions,
+                    total: total_dimensions,
+                    id: plan.category.id().into(),
+                    message: format!(
+                        "正在检测性能项目 {} / {}",
+                        completed_dimensions + 1,
+                        total_dimensions
+                    ),
+                });
                 let dimension_started = std::time::Instant::now();
                 for warmup_index in 0..plan.warmup_count {
                     let work = PerformanceWorkItem {
@@ -701,6 +766,16 @@ impl LiveExecutor {
                     formal_index += batch_size;
                     remaining -= batch_size;
                 }
+                completed_dimensions += 1;
+                progress(ProgressDetail {
+                    index: completed_dimensions,
+                    total: total_dimensions,
+                    id: plan.category.id().into(),
+                    message: format!(
+                        "已完成性能项目 {} / {}",
+                        completed_dimensions, total_dimensions
+                    ),
+                });
             }
         }
         let end = samples
@@ -830,9 +905,31 @@ impl LiveExecutor {
     }
 
     fn execute_agent(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_agent_with_progress(record, &mut noop)
+    }
+
+    fn execute_agent_with_progress(
+        &mut self,
+        record: &mut DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
+        let scenarios = fixed_agent_scenarios();
+        let total_scenarios = scenarios.len();
+        let mut executed = 0_usize;
         let mut attempts = Vec::new();
         let mut evidence = Vec::new();
-        for spec in fixed_agent_scenarios() {
+        for spec in scenarios {
+            progress(ProgressDetail {
+                index: executed,
+                total: total_scenarios,
+                id: spec.scenario.id().into(),
+                message: format!(
+                    "正在执行智能体场景 {} / {}",
+                    executed + 1,
+                    total_scenarios
+                ),
+            });
             let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
             let evidence_id = format!("cli-agent-{}", spec.workspace.task_id);
             let captured = add_evidence(
@@ -856,6 +953,13 @@ impl LiveExecutor {
             }
             attempts.push(execution);
             evidence.push(json!({"sample_id": spec.workspace.task_id, "evidence_id": captured.id}));
+            executed += 1;
+            progress(ProgressDetail {
+                index: executed,
+                total: total_scenarios,
+                id: spec.scenario.id().into(),
+                message: format!("已完成智能体场景 {} / {}", executed, total_scenarios),
+            });
         }
         let report_result = build_report_for_record(
             record,
@@ -1104,10 +1208,30 @@ impl LiveExecutor {
     }
 
     fn execute_baseline(&mut self, record: &DetectionRecord) -> ModuleRunResult {
+        let mut noop = |_detail: ProgressDetail| {};
+        self.execute_baseline_with_progress(record, &mut noop)
+    }
+
+    fn execute_baseline_with_progress(
+        &mut self,
+        record: &DetectionRecord,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) -> ModuleRunResult {
         let catalog = fixed_baseline_catalog();
+        let total_scenarios = BaselineScenario::ALL.len();
         let mut observations = Vec::new();
         let mut evidence = Vec::new();
         for scenario in BaselineScenario::ALL {
+            progress(ProgressDetail {
+                index: evidence.len(),
+                total: total_scenarios,
+                id: scenario.id().into(),
+                message: format!(
+                    "正在检测基线场景 {} / {}",
+                    evidence.len() + 1,
+                    total_scenarios
+                ),
+            });
             let request = ChatCompletionsRequest {
                 module_id: "baseline".into(),
                 prompt: format!("基线场景 {}：{}", scenario.id(), scenario.title()),
@@ -1134,6 +1258,12 @@ impl LiveExecutor {
                 actual: source,
             });
             evidence.push(json!({"scenario": scenario.id(), "payload": self.transport.evidence_payload(&request, &response)}));
+            progress(ProgressDetail {
+                index: evidence.len(),
+                total: total_scenarios,
+                id: scenario.id().into(),
+                message: format!("已完成基线场景 {} / {}", evidence.len(), total_scenarios),
+            });
         }
         let report = build_baseline_report(record, catalog, observations).ok();
         ModuleRunResult {
@@ -2409,6 +2539,55 @@ mod tests {
         assert_eq!(result.evidence_payload["executed_samples"], sample_count);
         assert!(result.evidence_payload["report"]["rows"].is_array());
         assert!(!result.evidence_payload.to_string().contains("secret-value"));
+    }
+
+    #[test]
+    fn full_specification_run_reports_detail_progress_for_every_sample() {
+        let sample_count = crate::specification::seven_category_plan()
+            .iter()
+            .map(|plan| plan.samples.len())
+            .sum::<usize>();
+        let (endpoint, server) = mock_server(
+            200,
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#,
+            sample_count,
+        );
+        let mut executor = LiveExecutor::new_full(
+            endpoint,
+            "model-a",
+            "secret-value",
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut progress = RecordingProgress::default();
+        run_with_executor_reporting(
+            CliRunRequest {
+                selected_modules: Some(vec!["specification".into()]),
+                ..request(None)
+            },
+            &mut executor,
+            &mut progress,
+        )
+        .unwrap();
+        server.join().unwrap();
+        let details = progress
+            .events
+            .iter()
+            .filter(|event| event.phase == ProgressPhase::ModuleProgress)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            details.len(),
+            sample_count * 2,
+            "每个样本上报开始与完成两次进度"
+        );
+        assert!(details.iter().all(|event| event.detail_total == Some(sample_count)));
+        assert_eq!(details[0].detail_index, Some(0));
+        assert_eq!(details[0].detail_id.as_deref(), Some("S01"));
+        assert!(details[0].message.contains("正在检测"));
+        let last = details.last().expect("末尾存在完成事件");
+        assert_eq!(last.detail_index, Some(sample_count));
+        assert_eq!(last.detail_id.as_deref(), Some("S07"));
+        assert!(last.message.contains("已完成"));
     }
 
     #[test]

@@ -329,7 +329,12 @@ final class Workbench: ObservableObject {
     guard running, completed.count < activeModules.count else { return nil }
     return activeModules[completed.count]
   }
-  var currentItemName: String { detailID ?? "" }
+  var currentItemName: String {
+    guard let detailID else { return "" }
+    if let exact = progressItems.first(where: { $0.id == detailID }) { return exact.name }
+    let prefix = detailID.split(separator: "-").first.map(String.init) ?? detailID
+    return progressItems.first(where: { $0.id == prefix })?.name ?? detailID
+  }
   var currentItemIndex: Int { detailIndex }
   var currentItemTotal: Int { detailTotal ?? 0 }
   var localStatus: String {
@@ -589,11 +594,13 @@ final class Workbench: ObservableObject {
     }
   }
 
-  private func handleProgress(_ event: ProgressEvent) {
+  func handleProgress(_ event: ProgressEvent) {
     progressMessage = Self.customerProgressMessage(event.message)
     if event.phase == "module_started" {
       guard let moduleID = event.moduleID, Self.uiModule(moduleID) != nil else { return }
-      progressItems = Self.progressItems(for: moduleID)
+      var items = Self.progressItems(for: moduleID)
+      if !items.isEmpty { items[0].state = "进行中" }
+      progressItems = items
       detailIndex = 0
       detailTotal = nil
       detailID = nil
@@ -624,16 +631,24 @@ final class Workbench: ObservableObject {
 
   private func updateProgressItems(moduleID: String, event: ProgressEvent) {
     guard let detailID = event.detailID else { return }
-    let itemID = detailID.split(separator: "-").first.map(String.init) ?? detailID
+    let itemID = progressItems.contains(where: { $0.id == detailID })
+      ? detailID
+      : detailID.split(separator: "-").first.map(String.init) ?? detailID
+    let index = event.detailIndex ?? 0
+    var completedBefore = 0
     progressItems = progressItems.map { item in
       var item = item
       if item.id == itemID {
-        let categoryOffset = Int(itemID.dropFirst()).map { ($0 - 1) * item.total } ?? 0
-        item.completed = min(item.total, max(0, (event.detailIndex ?? 0) - categoryOffset))
+        item.completed = min(item.total, max(0, index - completedBefore))
         item.state = item.completed >= item.total ? "已完成" : "进行中"
+      } else if completedBefore + item.total <= index {
+        // 进度位置已越过该小项：直接按全部完成收尾，漏掉中间事件也不停在等待中
+        item.completed = item.total
+        item.state = "已完成"
       } else if item.completed > 0 && item.state == "进行中" {
         item.state = "已完成"
       }
+      completedBefore += item.total
       return item
     }
   }
@@ -642,15 +657,17 @@ final class Workbench: ObservableObject {
     let names: [(String, String, Int)]
     switch moduleID {
     case "specification":
-      names = [("S01", "协议可接受上限", 1), ("S02", "输出长度", 1), ("S03", "常用参数", 1), ("S04", "工具调用", 1), ("S05", "结构化输出", 1), ("S06", "消息与多轮输入", 1), ("S07", "流式输出", 1)]
+      names = [("S01", "协议可接受上限", 3), ("S02", "输出长度", 3), ("S03", "常用参数", 5), ("S04", "工具调用", 7), ("S05", "结构化输出", 3), ("S06", "消息与多轮输入", 4), ("S07", "流式输出", 2)]
     case "capability":
       names = [("C01", "文本理解与指令执行", 20), ("C02", "信息提取与结构化填写", 20), ("C03", "工具选择与参数填写", 20), ("C04", "多轮对话与条件承接", 20), ("C05", "长材料理解与信息利用", 20), ("C06", "逻辑推理与计算", 20)]
     case "performance":
-      names = [("P01", "首字响应时间", 1), ("P02", "完整响应时间", 1), ("P03", "并发处理能力", 1), ("P04", "持续运行稳定性", 1), ("P05", "长文本负载", 1)]
+      names = [("P01", "首字响应时间", 2), ("P02", "完整响应时间", 1), ("P03", "并发处理能力", 4), ("P04", "持续运行稳定性", 1), ("P05", "长文本负载", 7)]
     case "agent":
-      names = [("A01", "规则遵循", 1), ("A02", "工具运用", 1), ("A03", "错误恢复", 1), ("A04", "权限边界", 1), ("A05", "真实交付", 1), ("A06", "连续任务", 1), ("A07", "上下文承接", 1), ("A08", "结果核验", 1)]
+      names = [("T1-A", "遵守任务规则", 1), ("T1-B", "处理外部注入", 1), ("T2-A", "选择正确工具", 1), ("T2-B", "校验路径与参数", 1), ("T3-A", "使用工具返回驱动下一步", 1), ("T3-B", "处理工具返回的信息缺失", 1), ("T4-A", "跨轮次保留状态", 1), ("T4-B", "跨轮次响应条件变化", 1), ("T5-A", "处理可恢复工具失败", 1), ("T5-B", "处理信息不足与提前结束", 1)]
     case "baseline":
-      names = (1...15).map { ("B\($0)", "结构对照项目 \($0)", 1) }
+      return BaselineItem.all.map {
+        ProgressItem(id: $0.id, name: $0.title, completed: 0, total: 1, state: "等待中")
+      }
     default:
       names = []
     }
