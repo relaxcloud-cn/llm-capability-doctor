@@ -92,6 +92,31 @@ func runModelTests() async throws {
   try expect(eventStore.moduleItems(.performance).first?.state == "等待中", "未开始模块显示等待模板")
   eventStore.toggleModuleExpanded(.parameters)
   try expect(eventStore.isModuleExpanded(.parameters), "已完成模块可手动展开")
+  let specCatalog = RealResultCatalog.catalog(for: "specification")
+  try expect(
+    specCatalog?.groups.map(\.name) == [
+      "协议可接受上限", "输出长度", "常用参数", "工具调用", "结构化输出", "消息与多轮输入", "流式输出",
+    ], "规格结果按正式小项分组")
+  try expect(
+    specCatalog?.sampleGroup("context-boundary") == "S01"
+      && specCatalog?.sampleGroup("T03") == "S04"
+      && specCatalog?.sampleGroup("stream-tool") == "S07",
+    "内部样本编号归入正确小项")
+  try expect(
+    specCatalog?.sampleName(1, "context-1024") == "常规长度请求（约 1K 字符）",
+    "样本编号翻译成客户说法")
+  try expect(
+    RealResultCatalog.catalog(for: "capability")?.sampleGroup("C03-2-04") == "C03"
+      && RealResultCatalog.catalog(for: "capability")?.groups.count == 6,
+    "能力样本按前缀归入六类")
+  try expect(
+    RealResultCatalog.catalog(for: "agent")?.sampleGroup("agent-t4b") == "T4-B"
+      && RealResultCatalog.catalog(for: "agent")?.groups.count == 10,
+    "智能体场景编号归入十个任务")
+  try expect(
+    RealResultCatalog.catalog(for: "baseline")?.sampleGroup("bc13") == "BC13"
+      && RealResultCatalog.catalog(for: "baseline")?.groups.first?.name == "响应外层",
+    "基线场景编号归入十四项并复用正式名称")
   try expect(
     CheckModule.allCases.map(\.title) == [
       "模型接入信息", "模型规格实测", "模型能力跑分", "模型性能实测", "智能体实测", "模型基线对比",
