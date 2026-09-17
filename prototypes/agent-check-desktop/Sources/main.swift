@@ -81,6 +81,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         await store.connect()
       }
     }
+    if let shotIndex = args.firstIndex(of: "--agentcheck-shot"), args.count > shotIndex + 1 {
+      let path = args[shotIndex + 1]
+      let delay = args.firstIndex(of: "--agentcheck-shot-delay")
+        .flatMap { args.count > $0 + 1 ? Double(args[$0 + 1]) : nil } ?? 20
+      let open = args.firstIndex(of: "--agentcheck-open")
+        .flatMap { args.count > $0 + 1 ? args[$0 + 1] : nil }
+      Task { @MainActor in
+        try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        if let open, let module = CheckModule.fromBackend(open) {
+          for _ in 0..<60 {
+            if store.currentRecord != nil, !store.running { break }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+          }
+          store.showModule(module)
+          try? await Task.sleep(nanoseconds: 900_000_000)
+        }
+        captureRealShot(URL(fileURLWithPath: path))
+      }
+    }
+  }
+
+  // 真实模式自截图：给联调验证用，不影响正常使用。
+  private func captureRealShot(_ url: URL) {
+    print(
+      "SHOT-STATE screen=\(store.screen) record=\(store.selectedRecordID?.uuidString ?? "nil") completed=\(store.completed.count) sheet=\(window.attachedSheet != nil)"
+    )
+    guard let view = window.attachedSheet?.contentView ?? window.contentView else { return }
+    var captureView: NSView = view
+    if let scroll = scrollView(in: view), let document = scroll.documentView,
+      document.bounds.height > scroll.contentView.bounds.height + 1
+    { captureView = scroll.contentView }
+    let bounds = CGRect(origin: .zero, size: captureView.bounds.size)
+    guard let bitmap = captureView.bitmapImageRepForCachingDisplay(in: bounds) else { return }
+    captureView.cacheDisplay(in: bounds, to: bitmap)
+    if let data = bitmap.representation(using: .png, properties: [:]) {
+      try? data.write(to: url)
+      print("SHOT: \(url.path)")
+    }
   }
   func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
   func windowShouldClose(_ sender: NSWindow) -> Bool {

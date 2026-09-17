@@ -599,19 +599,27 @@ final class Workbench: ObservableObject {
     }
   }
 
+  // 只消费到最后一处换行：没写完的半行留到下一次再读，事件不会丢。
+  private func processProgressData(_ data: Data, offset: Int) -> Int {
+    guard data.count > offset else { return offset }
+    let chunk = data.subdata(in: offset..<data.count)
+    guard let lastNewline = chunk.lastIndex(of: UInt8(ascii: "\n")) else { return offset }
+    let complete = chunk[chunk.startIndex...lastNewline]
+    let lines = String(decoding: complete, as: UTF8.self).split(separator: "\n")
+    for line in lines {
+      guard let event = try? JSONDecoder().decode(ProgressEvent.self, from: Data(line.utf8)) else {
+        continue
+      }
+      handleProgress(event)
+    }
+    return offset + complete.count
+  }
+
   private func consumeProgress(at url: URL) async {
     var offset = 0
     while !Task.isCancelled && running {
-      if let data = try? Data(contentsOf: url), data.count > offset {
-        let newData = data.subdata(in: offset..<data.count)
-        offset = data.count
-        let lines = String(decoding: newData, as: UTF8.self).split(separator: "\n")
-        for line in lines {
-          guard let event = try? JSONDecoder().decode(ProgressEvent.self, from: Data(line.utf8)) else {
-            continue
-          }
-          handleProgress(event)
-        }
+      if let data = try? Data(contentsOf: url) {
+        offset = processProgressData(data, offset: offset)
       }
       try? await Task.sleep(nanoseconds: 150_000_000)
     }
@@ -718,6 +726,14 @@ final class Workbench: ObservableObject {
   private func finishRealRun(stopped: Bool) async {
     guard realProcess != nil, !realFinalizing else { return }
     realFinalizing = true
+    // 进程退出和轮询之间存在竞态：退出前最后写入的事件可能还没被读到。
+    // 这里把进度文件整体重放一遍（handleProgress 幂等），确保不丢尾部事件。
+    if let url = realProgressURL {
+      realProgressURL = nil
+      if let data = try? Data(contentsOf: url) {
+        _ = processProgressData(data, offset: 0)
+      }
+    }
     progressTask?.cancel()
     progressTask = nil
     let reportData = realOutputURL.flatMap { try? Data(contentsOf: $0) }
