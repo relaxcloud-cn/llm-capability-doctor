@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>模型规格实测 S01–S07：检测逻辑与判定逻辑对齐</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --ink: #1a1d21; --sub: #5b6470; --line: #e4e7ec;
+    --accent: #2f6fed; --accent-soft: #eaf1fe;
+    --verified: #0e7a3d; --effective: #2e9e5b; --accepted: #2f6fed;
+    --unsupported: #6b7280; --failed: #d3382c; --inconclusive: #b7791f; --na: #9aa3af;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+         background: var(--bg); color: var(--ink); line-height: 1.65; font-size: 14px; }
+  .layout { display: grid; grid-template-columns: 232px 1fr; max-width: 1280px; margin: 0 auto; }
+  nav { position: sticky; top: 0; height: 100vh; padding: 28px 16px; overflow-y: auto; }
+  nav .brand { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+  nav .ver { font-size: 12px; color: var(--sub); margin-bottom: 20px; }
+  nav a { display: block; padding: 7px 10px; border-radius: 8px; color: var(--sub);
+          text-decoration: none; font-size: 13px; }
+  nav a:hover { background: var(--accent-soft); color: var(--accent); }
+  nav a .id { font-family: var(--mono); font-size: 11px; margin-right: 6px; color: var(--accent); }
+  main { padding: 32px 32px 96px; min-width: 0; }
+  h1 { font-size: 24px; margin-bottom: 6px; }
+  .subtitle { color: var(--sub); margin-bottom: 28px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+          padding: 26px 28px; margin-bottom: 22px; }
+  h2 { font-size: 19px; margin-bottom: 4px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h3 { font-size: 14px; margin: 22px 0 10px; color: var(--ink); }
+  h3::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px;
+               background: var(--accent); margin-right: 8px; vertical-align: 1px; }
+  .tag { font-family: var(--mono); font-size: 12px; padding: 2px 8px; border-radius: 6px;
+         background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .impl { font-size: 12px; padding: 2px 8px; border-radius: 6px; font-weight: 600; }
+  .impl.real { background: #e7f6ec; color: var(--verified); }
+  .impl.stub { background: #fdeceb; color: var(--failed); }
+  .impl.partial { background: #fdf3e3; color: var(--inconclusive); }
+  .goal { color: var(--sub); margin: 8px 0 0; }
+  .goal b { color: var(--ink); font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; margin: 10px 0 4px; font-size: 13px; }
+  th { text-align: left; font-weight: 600; color: var(--sub); font-size: 12px;
+       padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  code, .mono { font-family: var(--mono); font-size: 12.5px; background: #f0f2f5;
+                padding: 1px 5px; border-radius: 4px; }
+  td code { background: none; padding: 0; }
+  .chip { display: inline-block; font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+          padding: 1px 8px; border-radius: 20px; white-space: nowrap; }
+  .chip.verified { background: #e7f6ec; color: var(--verified); }
+  .chip.effective { background: #e9f8ef; color: var(--effective); }
+  .chip.accepted { background: var(--accent-soft); color: var(--accepted); }
+  .chip.unsupported { background: #eef0f3; color: var(--unsupported); }
+  .chip.failed { background: #fdeceb; color: var(--failed); }
+  .chip.inconclusive { background: #fdf3e3; color: var(--inconclusive); }
+  .chip.na { background: #f2f4f7; color: var(--na); }
+  ul { padding-left: 20px; margin: 6px 0; }
+  li { margin: 4px 0; }
+  .rule-box { background: #f8f9fb; border: 1px solid var(--line); border-radius: 10px;
+              padding: 14px 18px; margin: 10px 0; }
+  .warn { border-left: 3px solid var(--inconclusive); background: #fdf8ee;
+          padding: 10px 14px; border-radius: 0 8px 8px 0; margin: 10px 0; font-size: 13px; }
+  .flow { font-family: var(--mono); font-size: 12.5px; background: #f8f9fb; border: 1px solid var(--line);
+          border-radius: 8px; padding: 10px 14px; margin: 8px 0; white-space: pre-wrap; }
+  .muted { color: var(--sub); font-size: 12.5px; }
+  .src { color: var(--sub); font-size: 12px; margin-top: 16px; }
+  .src code { font-size: 11.5px; }
+</style>
+</head>
+<body>
+<div class="layout">
+<nav>
+  <div class="brand">AgentCheck · 模型规格实测</div>
+  <div class="ver">specification/v1 · 依据 issue-16 / 36 / 37 / 38 / 39 / 40</div>
+  <a href="#contract"><span class="id">§</span>统一执行契约</a>
+  <a href="#status"><span class="id">§</span>状态语义</a>
+  <a href="#matrix"><span class="id">§</span>执行矩阵总览</a>
+  <a href="#s01"><span class="id">S01</span>上下文容量</a>
+  <a href="#s04"><span class="id">S04</span>工具调用</a>
+  <a href="#s05"><span class="id">S05</span>结构化输出</a>
+  <a href="#s06"><span class="id">S06</span>消息与多轮输入</a>
+  <a href="#s07"><span class="id">S07</span>流式输出</a>
+  <a href="#downstream"><span class="id">§</span>下游消费与边界</a>
+</nav>
+<main>
+
+<h1>模型规格实测：S01–S07 检测逻辑与判定逻辑</h1>
+<p class="subtitle">回答"当前服务<b>支持什么、实际验证到哪里、有哪些限制</b>"。不回答能力强弱、不产出总分、不替代 Agent 任务验收，不把一次网络成功解释为能力通过。接口范围：OpenAI 风格 Chat Completions，除 S07 外一律非流式。</p>
+
+<div class="card" id="contract">
+  <h2>统一执行契约</h2>
+  <h3>每次请求必须记录</h3>
+  <ul>
+    <li>endpoint（脱敏稳定标识）、model（原样记录，不鉴定后台真实模型）、protocol、完整 request settings</li>
+    <li>测试版本（文档版本 + 类别编号 + 样例编号 + 题目指纹）、运行环境、脱敏请求 / HTTP 状态 / 完整响应或完整事件序列</li>
+    <li>同一对照请求<b>只改变正在验证的一个因素</b>；认证失败、服务不可达、全局限流等环境阻断应停止分支并标执行异常，不重复打满全部样例</li>
+  </ul>
+  <h3>重试与停止（全局上限）</h3>
+  <div class="flow">初测 1 次 ── 有效但不合规 → 同条件复核 ≤ 2 次（首次有效失败始终保留，复核成功不覆盖）
+              ── 执行异常（超时/限流/断连/无效 HTTP）→ 重试 ≤ 2 次，取得有效响应后转内容判定
+              ── 复核/重试不改题目、设置、证据版本；重试耗尽仍无有效证据 → inconclusive，不得改写成 failed</div>
+  <h3>判定分层原则</h3>
+  <ul>
+    <li><b>接口接受 ≠ 参数生效 ≠ 范围已验证</b>：<code>accepted</code> / <code>effective</code> / <code>verified_range</code> 是三个独立事实层级，可同时保存，禁止互相晋升</li>
+    <li><b>边界声明必须有失败侧证据</b>：只有相邻"成功档 + 可归因失败档"才能写边界；单边成功只能写"已验证到 N"</li>
+    <li><b>自然结束不是上限证据</b>：模型提前说完不等于参数失效或到达上限</li>
+    <li><b>环境错误不产生 unsupported</b>：网络、超时、网关错误一律走 inconclusive；只有服务明确拒绝才可写 unsupported</li>
+  </ul>
+</div>
+
+<div class="card" id="status">
+  <h2>状态语义（七档）</h2>
+  <table>
+    <tr><th style="width:150px">状态</th><th>使用条件</th><th>禁止解释</th></tr>
+    <tr><td><span class="chip verified">verified_range</span></td><td>在明确记录的输入/输出/schema 范围内完成并满足规则</td><td>不得写成服务理论最大值</td></tr>
+    <tr><td><span class="chip effective">effective</span></td><td>受控对照证明目标控制改变了行为</td><td>不得扩大到未测取值或任意组合</td></tr>
+    <tr><td><span class="chip accepted">accepted</span></td><td>HTTP/协议层接受了字段，但没有足够行为证据</td><td>不得写成参数已生效或能力已通过</td></tr>
+    <tr><td><span class="chip unsupported">unsupported</span></td><td>有效响应明确拒绝或明确声明不支持该能力</td><td>不得由一次环境错误推出</td></tr>
+    <tr><td><span class="chip failed">failed</span></td><td>有效响应违反了本项规则</td><td>不得被后续偶然成功覆盖</td></tr>
+    <tr><td><span class="chip inconclusive">inconclusive</span></td><td>证据不足：超时、限流、截断、计数缺失等</td><td>不得冒充通过或失败</td></tr>
+    <tr><td><span class="chip na">not_applicable</span></td><td>当前协议、配置或样例条件不适用</td><td>不得计为失败</td></tr>
+  </table>
+  <p class="muted" style="margin-top:10px">类别结论 = 该类全部样例观察的聚合；任何一个样例达到更高层级即提升类别层级（verified_range &gt; effective &gt; unsupported &gt; failed &gt; accepted &gt; not_applicable &gt; inconclusive）。verified_range 必须同时满足"真实执行证据 + 显式 scope"。</p>
+</div>
+
+<div class="card" id="matrix">
+  <h2>执行矩阵总览</h2>
+  <table>
+    <tr><th>类别</th><th>初测样本</th><th>固定条件</th><th>停止边界</th></tr>
+    <tr><td><b>S01</b> 上下文容量</td><td>64K / 128K / 256K / 512K 四档真实长度输入，每档 1 次；前置 1 次密度校准</td><td>真实填充文本（唯一首尾标记）、max_tokens=256、温度 0、非流式</td><td>512K 封顶；计数不足/环境异常即 inconclusive，四档全拒即 failed</td></tr>
+    <tr><td><b>S04</b> 工具调用</td><td>5 个固定样本各 1 次，均携带 tools + tool_choice</td><td>固定双工具（天气含 string/int/enum/bool/array/嵌套对象 + 空气质量）；max_tokens=512、温度 0、非流式、不执行工具</td><td>每个样本独立判定；单项失败不停止其他样本</td></tr>
+    <tr><td><b>S05</b> 结构化输出</td><td>JSON 模式 / 指定 schema 各 1 次</td><td>同一短文本；按模式设置 response_format</td><td>解析、schema 或明确拒绝证据齐全后停止</td></tr>
+    <tr><td><b>S06</b> 消息与多轮</td><td>M01–M04 各 1 次</td><td>固定角色组合 + 唯一历史标记；不跨请求</td><td>完成当前角色组合；不扩展未列角色或跨会话</td></tr>
+    <tr><td><b>S07</b> 流式输出</td><td>普通文本 + 工具调用各 1 次</td><td>stream:true；固定事件样例与正常结束要求</td><td>收到正常结束或明确错误；客户端主动停止单独记录</td></tr>
+  </table>
+</div>
+
+<div class="card" id="s01">
+  <h2><span class="tag">S01</span> 上下文容量 <span class="impl stub">现状：已实现（固定四档真实输入）</span></h2>
+  <p class="goal"><b>回答：</b>在固定输出余量 256 条件下，服务实际接受并完成到多大输入。<b>不回答：</b>长材料理解质量、最大输出能力、服务理论上限。</p>
+
+  <h3>检测逻辑</h3>
+  <ul>
+    <li><b>密度校准</b>：先发约 4,000 字符固定文本，读 <code>usage.prompt_tokens</code> 算出该端点的字符/token 密度（clamp 0.5–16；拿不到 usage 用默认 3.0）</li>
+    <li><b>固定四档</b>：64K / 128K / 256K / 512K tokens <b>全部发送</b>，不提前停止；按"档位 × 密度 × 1.05"构造真实长度填充文本（唯一首尾标记，尾部 "Reply only OK."）</li>
+    <li><b>计数来源</b>：优先服务端 <code>usage.prompt_tokens</code>；无 usage 时按校准密度估算并在报告中注明；差个几万 token 不重要</li>
+    <li><b>封顶</b>：512K 为最高探测档，不向上扩探</li>
+  </ul>
+  <div class="flow">一档"通过" = HTTP 2xx + 可解析 chat-completion 结构 + 实测/估算 prompt_tokens ≥ 档位目标</div>
+
+  <h3>判定逻辑</h3>
+  <table>
+    <tr><th style="width:340px">观察到的证据</th><th style="width:140px">判定</th><th>说明</th></tr>
+    <tr><td>2xx + 结构合法 + prompt_tokens ≥ 档位（usage 或估算）</td><td><span class="chip verified">verified_range</span></td><td>scope 写"input ≤ 实测值 tokens"；估算时注明来源</td></tr>
+    <tr><td>非 2xx 且报文明确指向超长（context length / too many tokens / 超长 等）</td><td><span class="chip failed">failed</span></td><td>可归因容量拒绝，构成上界证据；<b>四档全拒 → S01 失败</b></td></tr>
+    <tr><td>2xx 但 usage.prompt_tokens &lt; 档位</td><td><span class="chip inconclusive">inconclusive</span></td><td>疑似静默截断或计数口径不一致，不冒充通过</td></tr>
+    <tr><td>HTTP 413 / 5xx / 超时 / 其它非 2xx</td><td><span class="chip inconclusive">inconclusive</span></td><td>网关体积限制、环境异常不归因模型窗口</td></tr>
+    <tr><td>2xx 但响应结构不可识别</td><td><span class="chip failed">failed</span></td><td>—</td></tr>
+  </table>
+  <div class="warn"><b>注意：</b>被拒档记为 failed 并写入 limitation 作上界证据；类别聚合仍取最高优先级，已通过档的 verified_range 不受影响。证据中只保留 prompt 首尾各 64 字符，512K 原文不进报告。</div>
+</div>
+
+<div class="card" id="s04">
+  <h2><span class="tag">S04</span> 工具调用 <span class="impl stub">现状：已实现（5 个真实工具请求）</span></h2>
+  <p class="goal"><b>回答：</b>能否按给定工具定义生成正确的<b>非流式</b>调用。<b>不回答：</b>工具执行、回传续答、规划与工具选择质量（归 Agent 模块）。</p>
+
+  <h3>检测逻辑</h3>
+  <ul>
+    <li><b>固定工具</b>：<code>lookup_weather</code>（一次埋入 string / integer / enum / boolean / array / 嵌套 object 六类参数）+ <code>lookup_air_quality</code>（city:string + index:integer，验证不串位）</li>
+    <li><b>5 个固定样本各 1 次</b>：题目直接给出全部参数值，不考推理；原 T01–T04 参数类型校验合并进一次调用</li>
+  </ul>
+  <table>
+    <tr><th>样本</th><th>tool_choice</th><th>调用形态</th><th>必查事实</th></tr>
+    <tr><td>tools-all-types</td><td>required</td><td>单工具单调用</td><td>恰好 1 个 lookup_weather；city/days/unit/include_alert/locations/options.lang 类型与值全对、无多余字段</td></tr>
+    <tr><td>tools-none</td><td>"none"</td><td>禁止调用</td><td>不返回 tool_calls 且有文本回答；返回调用即有效失败</td></tr>
+    <tr><td>tools-same-twice</td><td>required</td><td>同一工具调两次</td><td>恰 2 个 lookup_weather；每次调用参数独立合规、城市集合 = {北京, 上海}</td></tr>
+    <tr><td>tools-two-distinct</td><td>required</td><td>两个不同工具各一次</td><td>lookup_weather + lookup_air_quality 各 1 个；参数不串位、各按其 schema 校验</td></tr>
+    <tr><td>tools-forced</td><td>指定 lookup_weather</td><td>强制指定工具</td><td>≥1 个调用且全部名为 lookup_weather，不许替换成其他工具或纯文字</td></tr>
+  </table>
+  <p class="muted">（原 #36 矩阵为 9 类 × 3 组 = 27 次：T01–T04 合并为 tools-all-types；T09「缺必填字段仍按题生成」因判定偏模型行为而非协议契约，已砍掉。规格层不做复核重发，每样本只发初测 1 次；执行异常的重试仅发生在传输层，不计入样本次数。）</p>
+
+  <h3>判定逻辑：三层顺序，逐层定位失败</h3>
+  <div class="flow">① HTTP 成功 + 响应可解析 + choices[0].message 存在
+② tool_calls 容器存在 + 调用数量 + 函数名 + arguments JSON 可解析
+③ JSON Schema 校验：必填字段、类型、枚举、数组元素、禁止额外字段
+任一层失败 → 保留失败层级 + 原始脱敏响应；复核成功不覆盖首次有效失败</div>
+  <table>
+    <tr><th style="width:340px">事实</th><th style="width:140px">判定</th></tr>
+    <tr><td>三层全部满足</td><td><span class="chip verified">pass / verified</span></td></tr>
+    <tr><td>无调用、漏调用、文字代替调用、参数串位、JSON 合法但 schema 不符</td><td><span class="chip failed">failed</span></td></tr>
+    <tr><td>服务明确拒绝工具字段或声明不支持</td><td><span class="chip unsupported">unsupported</span></td></tr>
+    <tr><td>认证/超时/限流/截断等无足够有效响应</td><td><span class="chip inconclusive">inconclusive</span></td></tr>
+  </table>
+  <p class="src">设计：<code>design/issue-36-tool-calling.md</code> + issue-16 §6 · 实现：<code>src/tool_probe.rs</code> + <code>LiveExecutor::execute_tool_call_probes</code></p>
+</div>
+
+<div class="card" id="s05">
+  <h2><span class="tag">S05</span> 结构化输出 <span class="impl stub">现状：已实现（两模式各 1 次）</span></h2>
+  <p class="goal"><b>回答两个独立问题：</b>①能否返回合法 JSON（只验证语法）；②能否满足给定结构（字段/类型/约束）。<b>不回答：</b>业务字段正确性、业务任务质量。</p>
+
+  <h3>检测逻辑：同一短文本 × 两种模式各 1 次</h3>
+  <table>
+    <tr><th>子项</th><th>请求设置</th><th>通过条件</th><th>失败条件</th></tr>
+    <tr><td>合法 JSON</td><td><code>{"type":"json_object"}</code></td><td><code>message.content</code> 原文可被标准 JSON 解析器解析</td><td>解析失败、夹杂不可解析前后文</td></tr>
+    <tr><td>指定结构</td><td><code>{"type":"json_schema","json_schema":{...}}</code>（仅服务声明支持时）</td><td>JSON 可解析 + 必填字段存在 + 类型/枚举/非空/范围约束满足</td><td>缺字段、类型错误、schema 声明禁止时出现额外字段</td></tr>
+  </table>
+  <ul>
+    <li><b>判定材料</b>：只取 <code>choices[0].message.content</code> 原文直接解析；<b>禁止</b>去代码围栏、补逗号/括号、自动转型、截去前后文后判通过（修补结果只能作诊断字段）</li>
+    <li>"响应外层是 JSON"、HTTP 成功、finish_reason、参数回显，都不能单独证明生成内容通过</li>
+    <li>两个子项分别出结果，不允许用"JSON 通过"覆盖"结构失败"；失败定位到字段路径（如 <code>tags[]</code> 元素类型）</li>
+  </ul>
+
+  <h3>判定逻辑</h3>
+  <table>
+    <tr><th style="width:340px">事实</th><th style="width:140px">判定</th></tr>
+    <tr><td>schema 请求原文满足全部约束，且该模式条件确实生效</td><td><span class="chip effective">effective</span></td></tr>
+    <tr><td>服务明确拒绝该模式字段</td><td><span class="chip unsupported">unsupported</span>（不计入结构失败分母）</td></tr>
+    <tr><td>JSON 可解析但缺必填字段/类型错误/约束违反</td><td><span class="chip failed">failed</span>（定位字段路径）</td></tr>
+    <tr><td>超时/限流/截断/内容缺失</td><td><span class="chip inconclusive">inconclusive</span></td></tr>
+  </table>
+  <p class="src">设计：<code>design/issue-39-structured-output.md</code> · 实现：<code>src/structured_probe.rs</code> + <code>LiveExecutor::execute_structured_probes</code>（每样本只发初测 1 次，规格层无复核重发）</p>
+</div>
+
+<div class="card" id="s06">
+  <h2><span class="tag">S06</span> 消息与多轮输入 <span class="impl stub">现状：已实现（4 个固定消息序列各 1 次）</span></h2>
+  <p class="goal"><b>回答：</b>常见消息角色是否被接受；同一请求携带历史消息时能否完成<b>最小跨轮信息传递</b>。<b>不回答：</b>长期记忆、跨会话记忆、复杂对话质量。</p>
+
+  <h3>检测逻辑</h3>
+  <table>
+    <tr><th>样例</th><th>请求结构</th><th>成功条件</th></tr>
+    <tr><td>M01</td><td>system + user</td><td>返回非空、可解析的 assistant 消息</td></tr>
+    <tr><td>M02</td><td>system + user + assistant + user</td><td>最后一轮正确引用历史中的唯一标记</td></tr>
+    <tr><td>M03</td><td>多条 user + 一条 assistant 历史</td><td>能区分当前问题与历史标记，结束正常</td></tr>
+    <tr><td>M04</td><td>适用时加入 tool 角色消息（不要求工具闭环）</td><td>消息被接受；协议不适用则 <span class="chip na">not_applicable</span></td></tr>
+  </table>
+  <ul>
+    <li>唯一标记只出现于一个历史位置；答案只要求确认标记，不要求长篇生成</li>
+    <li>不跨请求构造记忆；结论仅覆盖已测角色组合和"同请求携带历史"模式</li>
+  </ul>
+
+  <h3>判定逻辑</h3>
+  <table>
+    <tr><th style="width:340px">事实</th><th style="width:140px">判定</th></tr>
+    <tr><td>角色被接受 + 标记被正确引用/区分 + 正常结束</td><td><span class="chip verified">pass / verified</span></td></tr>
+    <tr><td>角色被拒绝、消息格式错误、响应为空、标记错引/丢失</td><td><span class="chip failed">failed</span></td></tr>
+    <tr><td>tool 角色在当前协议不适用</td><td><span class="chip na">not_applicable</span>（不计失败）</td></tr>
+    <tr><td>认证/网关/超时等执行异常</td><td><span class="chip inconclusive">inconclusive</span></td></tr>
+  </table>
+  <p class="src">设计：<code>design/issue-16-model-spec-measurement.md</code> §8 · 实现：<code>src/messages_probe.rs</code> + <code>LiveExecutor::execute_messages_probes</code>（历史仅存在于同请求 messages 内，每样本只发初测 1 次）</p>
+</div>
+
+<div class="card" id="s07">
+  <h2><span class="tag">S07</span> 流式输出 <span class="impl stub">现状：已实现（文本标记流 + 工具增量流各 1 次）</span></h2>
+  <p class="goal"><b>回答：</b>普通文本和工具调用的增量能否被接收、按协议组装并正常结束。<b>不回答：</b>首字节延迟、吞吐、并发、稳定性（归性能模块）；结构字段差异归基线模块。</p>
+
+  <h3>检测逻辑</h3>
+  <ul>
+    <li><b>固定设置</b>：<code>stream:true</code>、温度 0、短受控提示 + 唯一首尾标记；客户端必须保存原始字节、SSE 事件原文及顺序、事件时间、终止事件、组装结果</li>
+    <li><b>文本场景</b>（stream-text）：短受控提示要求回复带 STREAM_BEGIN/STREAM_END 首尾标记，组装内容须完整含标记且正常终止</li>
+    <li><b>工具场景</b>（stream-tool）：携带固定双工具 + tool_choice:required + 流式；增量按 index 归组拼接——单个片段可以是非法 JSON，<b>拼接结果</b>须为合法 JSON 且符合天气工具必填字段</li>
+    <li>设计中的对抗切片场景（空事件穿插、跨块分片、缺 [DONE]、参数截断、交错调用）无法要求真实服务产生，落在 stream_probe 的合成事件流单测中覆盖</li>
+    <li>网络分块数量 ≠ 语义增量数量；客户端主动取消单独记录，既不算服务正常结束，也不算模型失败</li>
+  </ul>
+
+  <h3>判定逻辑</h3>
+  <div class="flow">文本通过 = 内容增量可解析 + 顺序正确 + 首尾标记完整 + 终止原因可识别 + 客户端未主动停止
+工具通过 = 调用身份可归组 + 名称完整 + 参数片段按序拼接后 JSON 可解析 + 符合 schema + 正常结束可验证</div>
+  <table>
+    <tr><th style="width:340px">事实</th><th style="width:140px">判定</th></tr>
+    <tr><td>上述全部满足</td><td><span class="chip verified">pass / verified</span></td></tr>
+    <tr><td>收到 [DONE] 但无完整内容 / 部分文本后断开 / 参数尾部断开 / 拼接后仍不可解析</td><td><span class="chip failed">failed</span> / <span class="chip inconclusive">inconclusive</span></td></tr>
+    <tr><td>服务明确拒绝 stream=true</td><td><span class="chip unsupported">unsupported</span></td></tr>
+    <tr><td>工具场景只有普通文字、没有工具增量</td><td><span class="chip failed">failed</span> / <span class="chip inconclusive">inconclusive</span>（不能用文本流通过替代）</td></tr>
+    <tr><td>客户端主动停止</td><td>记录停止原因，不归因模型</td></tr>
+  </table>
+  <div class="warn"><b>注意：</b>空内容事件是合法事件不判负；收到部分参数片段不等于调用成功，必须等组装+解析+结束证据齐全。</div>
+  <p class="src">设计：<code>design/issue-40-streaming-output.md</code> · 实现：<code>src/stream_probe.rs</code> + <code>LiveExecutor::execute_stream_probes</code>（StreamEvent 记录 tool_calls 增量原文；每样本只发初测 1 次）</p>
+</div>
+
+<div class="card" id="downstream">
+  <h2>下游消费与模块边界</h2>
+  <ul>
+    <li><b>verified_range 是下游模块的输入前提</b>：能力跑分的长上下文样本按 <code>validated_input_max_tokens</code> 决定跳过或执行——规格实测产不出 verified range，下游就只能记 missing 而不是假装测过</li>
+    <li><b>证据包</b>：每个子项 ≥1 个可定位证据（脱敏请求+设置指纹、HTTP 状态/完整事件序列、计数来源与 finish_reason、初测/复核/重试关系、题目指纹与规则版本）；API key 不进入任何证据</li>
+    <li><b>显示口径</b>：客户视图必须同时展示结论 + 已测范围 + 条件 + 限制 + 证据位置；任何下界不得显示在"最大上限"字段</li>
+    <li><b>责任边界</b>：未通过某子项 ≠ 整套服务不可用；accepted 不计入通过；环境异常不写成模型失败；不推未测能力</li>
+  </ul>
+</div>
+
+<p class="muted" style="text-align:center">依据：design/issue-16（总规范）、issue-36（工具调用）、issue-37（常用参数）、issue-38（上下文窗口）、issue-39（结构化输出）、issue-40（流式输出）· 规格版本 specification/v1 · 生成于 2026-09-20</p>
+</main>
+</div>
+</body>
+</html>

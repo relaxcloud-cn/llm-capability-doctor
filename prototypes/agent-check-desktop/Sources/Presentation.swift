@@ -53,14 +53,6 @@ enum Catalog {
         .init("S2-03", "限制 1,024；输出 1,024；结束原因：达到长度限制"),
       ]),
     .init(
-      id: "S3", title: "常用参数支持", value: "已接受，生效待验证", state: .unknown,
-      summary: "带 temperature 的请求被接受，但尚无足够对照证明其影响。", boundary: "接收成功不等于参数生效，也不代表其他参数均受支持。",
-      facts: [
-        .init("本次参数", "temperature: 0 / 1"), .init("已观察", "两个请求均返回文本"),
-        .init("证据缺口", "缺少控制其他条件的重复对照；暂不判定生效或不支持"),
-      ],
-      evidence: [.init("S3-01", "temperature: 0 → 收到文本"), .init("S3-02", "temperature: 1 → 收到文本")]),
-    .init(
       id: "S4", title: "工具调用支持", value: "最小闭环已完成", state: .observed,
       summary: "发起函数调用、回传工具结果、继续回复的闭环已完成。", boundary: "不据此判断复杂工具选择质量；流式工具调用、并行调用尚未检测。",
       facts: [

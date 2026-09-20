@@ -39,6 +39,8 @@ pub struct StreamEvent {
     pub raw: String,
     pub content_delta: Option<String>,
     pub reasoning_delta: Option<String>,
+    /// delta.tool_calls 原始数组（流式工具调用增量，供 S07 归组拼接）。
+    pub tool_calls_delta: Option<Value>,
     pub finish_reason: Option<String>,
     pub done: bool,
 }
@@ -214,6 +216,11 @@ impl ChatCompletionsTransport {
             "max_tokens": request.max_tokens,
             "stream": true,
         });
+        self.send_stream_payload(payload)
+    }
+
+    /// 发送自定义流式 payload（供 S07 带 tools/tool_choice 的探测使用）。
+    pub(crate) fn send_stream_payload(&self, payload: Value) -> StreamResponse {
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
         for attempt in 1..=MAX_ATTEMPTS {
@@ -343,7 +350,9 @@ impl ChatCompletionsTransport {
         })
     }
 
-    fn send_payload(&self, payload: Value, module_id: &str) -> ChatCompletionsResponse {
+    /// 发送自定义 Chat Completions payload（供 S04 工具调用等需要
+    /// tools/tool_choice 等额外字段的探测使用）。
+    pub(crate) fn send_payload(&self, payload: Value, module_id: &str) -> ChatCompletionsResponse {
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
         for attempt in 1..=MAX_ATTEMPTS {
@@ -409,6 +418,31 @@ impl ChatCompletionsTransport {
         &self.model
     }
 
+    /// 自定义 payload 请求的证据记录：保留完整请求体而非拆解字段。
+    pub(crate) fn raw_evidence_payload(
+        &self,
+        request_payload: &Value,
+        module_id: &str,
+        response: &ChatCompletionsResponse,
+    ) -> Value {
+        json!({
+            "transport_version": TRANSPORT_VERSION,
+            "module": module_id,
+            "request": {
+                "endpoint": redact_endpoint(&self.endpoint),
+                "payload": request_payload,
+            },
+            "response": {
+                "status": response.status,
+                "body": response.parsed.clone().unwrap_or_else(|| Value::String(response.body.clone())),
+                "elapsed_ms": response.elapsed_ms,
+                "error": response.error,
+                "attempts": response.attempts,
+                "retry_reasons": response.retry_reasons,
+            },
+        })
+    }
+
     pub fn evidence_payload(
         &self,
         request: &ChatCompletionsRequest,
@@ -435,6 +469,20 @@ impl ChatCompletionsTransport {
         })
     }
 
+    /// 自定义 payload 流式请求的证据记录。
+    pub(crate) fn raw_stream_evidence_payload(
+        &self,
+        request_payload: &Value,
+        module_id: &str,
+        stream: &StreamResponse,
+    ) -> Value {
+        let mut payload = self.raw_evidence_payload(request_payload, module_id, &stream.response);
+        if let Some(response) = payload.get_mut("response") {
+            response["stream"] = stream_evidence(stream);
+        }
+        payload
+    }
+
     pub fn stream_evidence_payload(
         &self,
         request: &ChatCompletionsRequest,
@@ -442,22 +490,27 @@ impl ChatCompletionsTransport {
     ) -> Value {
         let mut payload = self.evidence_payload(request, &stream.response);
         if let Some(response) = payload.get_mut("response") {
-            response["stream"] = json!({
-                "terminated": stream.terminated,
-                "content": stream.content,
-                "events": stream.events.iter().map(|event| json!({
-                    "at_ms": event.at_ms,
-                    "raw": event.raw,
-                    "content_delta": event.content_delta,
-                    "reasoning_delta": event.reasoning_delta,
-                    "finish_reason": event.finish_reason,
-                    "done": event.done,
-                })).collect::<Vec<_>>(),
-                "parse_errors": stream.parse_errors,
-            });
+            response["stream"] = stream_evidence(stream);
         }
         payload
     }
+}
+
+fn stream_evidence(stream: &StreamResponse) -> Value {
+    json!({
+        "terminated": stream.terminated,
+        "content": stream.content,
+        "events": stream.events.iter().map(|event| json!({
+            "at_ms": event.at_ms,
+            "raw": event.raw,
+            "content_delta": event.content_delta,
+            "reasoning_delta": event.reasoning_delta,
+            "tool_calls_delta": event.tool_calls_delta,
+            "finish_reason": event.finish_reason,
+            "done": event.done,
+        })).collect::<Vec<_>>(),
+        "parse_errors": stream.parse_errors,
+    })
 }
 
 fn stream_summary(content: &str, events: &[StreamEvent]) -> Option<Value> {
@@ -497,6 +550,7 @@ fn parse_stream_line(
             raw: data.into(),
             content_delta: None,
             reasoning_delta: None,
+            tool_calls_delta: None,
             finish_reason: None,
             done: true,
         });
@@ -511,6 +565,7 @@ fn parse_stream_line(
                 raw: data.into(),
                 content_delta: None,
                 reasoning_delta: None,
+                tool_calls_delta: None,
                 finish_reason: None,
                 done: false,
             });
@@ -557,6 +612,10 @@ fn parse_stream_line(
     if let Some(value) = &content_delta {
         content.push_str(value);
     }
+    let tool_calls_delta = delta
+        .and_then(|value| value.get("tool_calls"))
+        .or_else(|| message.and_then(|value| value.get("tool_calls")))
+        .cloned();
     let finish_reason = choice
         .and_then(|value| value.get("finish_reason"))
         .and_then(Value::as_str)
@@ -569,6 +628,7 @@ fn parse_stream_line(
         raw: data.into(),
         content_delta,
         reasoning_delta,
+        tool_calls_delta,
         finish_reason,
         done: false,
     });

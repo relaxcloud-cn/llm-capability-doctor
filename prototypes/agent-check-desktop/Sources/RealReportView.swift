@@ -51,20 +51,12 @@ struct RealResultCatalog {
         passNote: "不同长度的请求都能被服务接受并正常回答",
         failNote: "服务拒绝了部分长度的请求；超长业务内容需要先拆分或截断"),
       Group(
-        id: "S02", name: "输出长度",
-        passNote: "短、中、自然长度三种输出要求都能完成",
-        failNote: "部分输出要求没有完成或被截断；长输出业务需要留心"),
-      Group(
-        id: "S03", name: "常用参数",
-        passNote: "常用参数组合都能被服务接受",
-        failNote: "部分参数组合被服务拒绝；接入时需要避开这些参数"),
-      Group(
         id: "S04", name: "工具调用",
         passNote: "都能按格式返回工具调用",
         failNote: "有请求没有按格式返回工具调用；业务依赖工具调用的话需要先处理"),
       Group(
         id: "S05", name: "结构化输出",
-        passNote: "纯文本、JSON、按字段模板三种都能按格式输出",
+        passNote: "JSON、按字段模板两种都能按格式输出",
         failNote: "部分格式要求没有满足；程序直接解析返回值的场景需要适配"),
       Group(
         id: "S06", name: "消息与多轮输入",
@@ -76,23 +68,27 @@ struct RealResultCatalog {
         failNote: "流式返回未能正常开始或结束；流式场景需要先排查"),
     ]
     let membership: [String: String] = [
-      "context-1024": "S01", "context-2048": "S01", "context-boundary": "S01",
-      "output-small": "S02", "output-medium": "S02", "output-natural": "S02",
-      "P02": "S03", "P03": "S03", "P04": "S03", "P05": "S03", "P06": "S03",
-      "T01": "S04", "T02": "S04", "T03": "S04", "T04": "S04", "T05": "S04", "T06": "S04",
-      "T07": "S04",
-      "plain-text": "S05", "json": "S05", "schema": "S05",
+      "context-64k": "S01", "context-128k": "S01", "context-256k": "S01", "context-512k": "S01",
+      "tools-all-types": "S04", "tools-none": "S04", "tools-same-twice": "S04",
+      "tools-two-distinct": "S04", "tools-forced": "S04",
+      "json": "S05", "schema": "S05",
       "M01": "S06", "M02": "S06", "M03": "S06", "M04": "S06",
       "stream-text": "S07", "stream-tool": "S07",
     ]
     let names: [String: String] = [
-      "context-1024": "常规长度请求（约 1K 字符）",
-      "context-2048": "较长请求（约 2K 字符）",
-      "context-boundary": "更长请求（接近声明上限）",
-      "output-small": "要求较短输出",
-      "output-medium": "要求中等长度输出",
-      "output-natural": "不限长度的自然输出",
-      "plain-text": "要求纯文本回答",
+      "context-64k": "约 64K token 的真实长度输入",
+      "context-128k": "约 128K token 的真实长度输入",
+      "context-256k": "约 256K token 的真实长度输入",
+      "context-512k": "约 512K token 的真实长度输入",
+      "tools-all-types": "单次调用填齐各类参数",
+      "tools-none": "禁止工具调用时直接回答",
+      "tools-same-twice": "同一工具调用两次且参数不串",
+      "tools-two-distinct": "两个不同工具各调一次",
+      "tools-forced": "强制调用指定工具",
+      "M01": "system+user 角色组合",
+      "M02": "带历史回引暗号",
+      "M03": "多条历史里区分目标标记",
+      "M04": "含 tool 角色的消息序列",
       "json": "要求 JSON 回答",
       "schema": "要求按字段模板回答",
       "stream-text": "流式文本输出",
@@ -101,12 +97,12 @@ struct RealResultCatalog {
     return RealResultCatalog(
       groups: groups,
       unitName: "项",
-      cardTitle: "七项检查的结果",
+      cardTitle: "五项检查的结果",
       cardCaption: "点开每一项可看当时的请求和回答",
       sampleGroup: { membership[$0] },
       sampleName: plain(names, fallback: { "第 \($0) 项检查" }),
       bannerPass: { _ in
-        "我们用固定检查项问了这套服务：能接受多大的请求、能输出多长、常用参数、工具调用、结构化输出、多轮对话和流式返回。全部得到了符合格式的回答。"
+        "我们用固定检查项问了这套服务：能接受多大的请求、工具调用、结构化输出、多轮对话和流式返回。全部得到了符合格式的回答。"
       },
       bannerFail: { pass, fail in
         "大部分检查正常，但有 \(fail) 项未通过（\(pass) 项正常）。建议展开对应分组看具体是哪一步；影响取决于你的业务是否用到该项。"

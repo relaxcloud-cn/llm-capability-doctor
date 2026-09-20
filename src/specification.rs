@@ -11,10 +11,6 @@ pub const SPECIFICATION_VERSION: &str = "specification/v1";
 pub enum SpecCategory {
     #[serde(rename = "S01")]
     ContextCapacity,
-    #[serde(rename = "S02")]
-    OutputLength,
-    #[serde(rename = "S03")]
-    CommonParameters,
     #[serde(rename = "S04")]
     ToolCalls,
     #[serde(rename = "S05")]
@@ -26,10 +22,8 @@ pub enum SpecCategory {
 }
 
 impl SpecCategory {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 5] = [
         Self::ContextCapacity,
-        Self::OutputLength,
-        Self::CommonParameters,
         Self::ToolCalls,
         Self::StructuredOutput,
         Self::MessagesAndTurns,
@@ -39,8 +33,6 @@ impl SpecCategory {
     pub const fn id(self) -> &'static str {
         match self {
             Self::ContextCapacity => "S01",
-            Self::OutputLength => "S02",
-            Self::CommonParameters => "S03",
             Self::ToolCalls => "S04",
             Self::StructuredOutput => "S05",
             Self::MessagesAndTurns => "S06",
@@ -51,8 +43,6 @@ impl SpecCategory {
     pub const fn title(self) -> &'static str {
         match self {
             Self::ContextCapacity => "上下文容量",
-            Self::OutputLength => "输出长度",
-            Self::CommonParameters => "常用参数",
             Self::ToolCalls => "工具调用",
             Self::StructuredOutput => "结构化输出",
             Self::MessagesAndTurns => "消息与多轮输入",
@@ -141,37 +131,36 @@ pub struct SpecificationReport {
     pub verified_ranges: Vec<VerifiedRange>,
 }
 
-pub fn seven_category_plan() -> Vec<SpecificationPlan> {
+pub fn specification_plan() -> Vec<SpecificationPlan> {
     vec![
         plan(
             SpecCategory::ContextCapacity,
-            vec!["context-1024", "context-2048", "context-boundary"],
+            vec![
+                "context-64k",
+                "context-128k",
+                "context-256k",
+                "context-512k",
+            ],
             [("system", "fixed"), ("output_limit", "256")],
         ),
         plan(
-            SpecCategory::OutputLength,
-            vec!["output-small", "output-medium", "output-natural"],
-            [
-                ("prompt", "numbered-sequence"),
-                ("one_output_limit_field", "true"),
-            ],
-        ),
-        plan(
-            SpecCategory::CommonParameters,
-            vec!["P02", "P03", "P04", "P05", "P06"],
-            [
-                ("control_group", "one_factor_at_a_time"),
-                ("baseline_group", "required"),
-            ],
-        ),
-        plan(
             SpecCategory::ToolCalls,
-            vec!["T01", "T02", "T03", "T04", "T05", "T06", "T07"],
-            [("stream", "false"), ("tool_execution", "never")],
+            vec![
+                "tools-all-types",
+                "tools-none",
+                "tools-same-twice",
+                "tools-two-distinct",
+                "tools-forced",
+            ],
+            [
+                ("stream", "false"),
+                ("tool_execution", "never"),
+                ("tools", "fixed-pair"),
+            ],
         ),
         plan(
             SpecCategory::StructuredOutput,
-            vec!["plain-text", "json", "schema"],
+            vec!["json", "schema"],
             [("same_short_input", "true")],
         ),
         plan(
@@ -408,9 +397,9 @@ mod tests {
     }
 
     #[test]
-    fn freezes_the_seven_category_plan_and_retry_limits() {
-        let plans = seven_category_plan();
-        assert_eq!(plans.len(), 7);
+    fn freezes_the_specification_plan_and_retry_limits() {
+        let plans = specification_plan();
+        assert_eq!(plans.len(), 5);
         assert_eq!(
             plans.iter().map(|plan| plan.category).collect::<Vec<_>>(),
             SpecCategory::ALL
@@ -421,8 +410,14 @@ mod tests {
                 .all(|plan| plan.max_rechecks == 2 && plan.max_retries == 2)
         );
         assert_eq!(
-            plans[3].samples,
-            ["T01", "T02", "T03", "T04", "T05", "T06", "T07"]
+            plans[1].samples,
+            [
+                "tools-all-types",
+                "tools-none",
+                "tools-same-twice",
+                "tools-two-distinct",
+                "tools-forced"
+            ]
         );
     }
 
@@ -431,14 +426,14 @@ mod tests {
         let report = build_report(
             "run-a",
             vec![observation(
-                SpecCategory::CommonParameters,
-                "P02",
+                SpecCategory::ToolCalls,
+                "tools-all-types",
                 SpecStatus::Accepted,
                 EvidenceOrigin::RealExecution,
             )],
         )
         .unwrap();
-        assert_eq!(report.rows[2].result, SpecStatus::Accepted);
+        assert_eq!(report.rows[1].result, SpecStatus::Accepted);
         assert!(report.verified_ranges.is_empty());
     }
 
@@ -452,12 +447,12 @@ mod tests {
         );
         real.verified_scope = Some("input <= 2048 tokens; output余量=256".into());
         let mut fixture = observation(
-            SpecCategory::OutputLength,
-            "output-medium",
+            SpecCategory::ToolCalls,
+            "tools-fixture",
             SpecStatus::VerifiedRange,
             EvidenceOrigin::ControlledFixture,
         );
-        fixture.verified_scope = Some("output <= 256 tokens".into());
+        fixture.verified_scope = Some("tools <= 2".into());
         assert!(build_report("run-a", vec![fixture]).is_err());
         let report = build_report("run-a", vec![real]).unwrap();
         assert_eq!(report.verified_ranges.len(), 1);
@@ -467,14 +462,14 @@ mod tests {
     #[test]
     fn natural_end_and_unknown_boundary_are_reported_without_maximum_claims() {
         let mut natural = observation(
-            SpecCategory::OutputLength,
-            "output-natural",
+            SpecCategory::MessagesAndTurns,
+            "M01",
             SpecStatus::Accepted,
             EvidenceOrigin::RealExecution,
         );
         natural.natural_end = true;
         natural.finish_reason = Some("stop".into());
-        natural.limitation = Some("自然结束，未证明输出上限".into());
+        natural.limitation = Some("自然结束，未证明长期记忆".into());
         let mut unknown = observation(
             SpecCategory::ContextCapacity,
             "context-boundary",
@@ -483,10 +478,10 @@ mod tests {
         );
         unknown.limitation = Some("计数或拒绝原因不足，边界未确认".into());
         let report = build_report("run-a", vec![natural, unknown]).unwrap();
-        assert_eq!(report.rows[1].result, SpecStatus::Accepted);
+        assert_eq!(report.rows[3].result, SpecStatus::Accepted);
         assert_eq!(report.rows[0].result, SpecStatus::Inconclusive);
         assert!(report.verified_ranges.is_empty());
-        assert!(report.rows[1].limitations[0].contains("未证明"));
+        assert!(report.rows[3].limitations[0].contains("未证明"));
     }
 
     #[test]
@@ -502,15 +497,15 @@ mod tests {
                 ),
                 observation(
                     SpecCategory::ToolCalls,
-                    "T05",
+                    "tools-none",
                     SpecStatus::Failed,
                     EvidenceOrigin::RealExecution,
                 ),
             ],
         )
         .unwrap();
-        assert_eq!(report.rows[3].result, SpecStatus::Failed);
-        assert_eq!(report.rows[5].result, SpecStatus::NotApplicable);
+        assert_eq!(report.rows[1].result, SpecStatus::Failed);
+        assert_eq!(report.rows[3].result, SpecStatus::NotApplicable);
         assert!(
             !report
                 .rows

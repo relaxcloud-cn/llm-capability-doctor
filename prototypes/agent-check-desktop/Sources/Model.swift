@@ -31,7 +31,7 @@ enum CheckModule: String, CaseIterable, Codable, Identifiable {
     case .info:
       return "本次接入的服务、接口与响应来源信息"
     case .parameters:
-      return "七项基础规格实测——上下文与输出长度、常用参数、工具调用、结构化输出、多轮消息、流式响应"
+      return "五项基础规格实测——上下文容量、工具调用、结构化输出、多轮消息、流式响应"
     case .functions:
       return "六类模型能力逐项得分——文本理解、信息提取、工具选择、多轮承接、长材料利用、逻辑计算"
     case .performance:
@@ -692,7 +692,7 @@ final class Workbench: ObservableObject {
     let names: [(String, String, Int)]
     switch moduleID {
     case "specification":
-      names = [("S01", "协议可接受上限", 3), ("S02", "输出长度", 3), ("S03", "常用参数", 5), ("S04", "工具调用", 7), ("S05", "结构化输出", 3), ("S06", "消息与多轮输入", 4), ("S07", "流式输出", 2)]
+      names = [("S01", "协议可接受上限", 4), ("S04", "工具调用", 5), ("S05", "结构化输出", 2), ("S06", "消息与多轮输入", 4), ("S07", "流式输出", 2)]
     case "capability":
       names = [("C01", "文本理解与指令执行", 20), ("C02", "信息提取与结构化填写", 20), ("C03", "工具选择与参数填写", 20), ("C04", "多轮对话与条件承接", 20), ("C05", "长材料理解与信息利用", 20), ("C06", "逻辑推理与计算", 20)]
     case "performance":

@@ -23,7 +23,9 @@ use crate::capability::{
     fixed_capability_catalog,
 };
 use crate::conclusion::{CustomerConclusionReport, build_default_customer_report};
+use crate::context_probe;
 use crate::ingress::{ConnectionConfig, redact_endpoint};
+use crate::messages_probe;
 use crate::performance::{
     ErrorKind, PerformanceConditions, PerformanceSample, ResponseMode as PerformanceResponseMode,
     RunPhase, TerminalState, Timeline, TokenCountSource,
@@ -36,9 +38,12 @@ use crate::records::{
 };
 use crate::records::{AttemptRecord, CreateRunInput, DetectionRecord};
 use crate::specification::{
-    AttemptKind as SpecificationAttemptKind, EvidenceOrigin, SpecStatus, SpecificationObservation,
-    build_report, seven_category_plan,
+    AttemptKind as SpecificationAttemptKind, EvidenceOrigin, SpecCategory, SpecStatus,
+    SpecificationObservation, SpecificationPlan, build_report, specification_plan,
 };
+use crate::stream_probe;
+use crate::structured_probe;
+use crate::tool_probe;
 use crate::transport::{
     ChatCompletionsRequest, ChatCompletionsResponse, ChatCompletionsTransport, StreamResponse,
 };
@@ -330,19 +335,69 @@ impl LiveExecutor {
         record: &DetectionRecord,
         progress: &mut dyn FnMut(ProgressDetail),
     ) -> ModuleRunResult {
-        let plans = seven_category_plan();
+        let plans = specification_plan();
         let total_samples: usize = plans.iter().map(|plan| plan.samples.len()).sum();
         let mut observations = Vec::new();
         let mut evidence = Vec::new();
         for plan in plans {
+            if plan.category == SpecCategory::ContextCapacity {
+                self.execute_context_probes(
+                    &plan,
+                    &mut observations,
+                    &mut evidence,
+                    total_samples,
+                    progress,
+                );
+                continue;
+            }
+            if plan.category == SpecCategory::ToolCalls {
+                self.execute_tool_call_probes(
+                    &plan,
+                    &mut observations,
+                    &mut evidence,
+                    total_samples,
+                    progress,
+                );
+                continue;
+            }
+            if plan.category == SpecCategory::StructuredOutput {
+                self.execute_structured_probes(
+                    &plan,
+                    &mut observations,
+                    &mut evidence,
+                    total_samples,
+                    progress,
+                );
+                continue;
+            }
+            if plan.category == SpecCategory::MessagesAndTurns {
+                self.execute_messages_probes(
+                    &plan,
+                    &mut observations,
+                    &mut evidence,
+                    total_samples,
+                    progress,
+                );
+                continue;
+            }
+            if plan.category == SpecCategory::Streaming {
+                self.execute_stream_probes(
+                    &plan,
+                    &mut observations,
+                    &mut evidence,
+                    total_samples,
+                    progress,
+                );
+                continue;
+            }
             for sample_id in plan.samples {
                 progress(ProgressDetail {
-                    index: evidence.len(),
+                    index: observations.len(),
                     total: total_samples,
                     id: plan.category.id().into(),
                     message: format!(
                         "正在检测规格样本 {} / {}",
-                        evidence.len() + 1,
+                        observations.len() + 1,
                         total_samples
                     ),
                 });
@@ -370,12 +425,6 @@ impl LiveExecutor {
                     |stream| self.transport.stream_evidence_payload(&request, stream),
                 );
                 evidence.push(json!({"sample_id": sample_id, "payload": payload}));
-                progress(ProgressDetail {
-                    index: evidence.len(),
-                    total: total_samples,
-                    id: plan.category.id().into(),
-                    message: format!("已完成规格样本 {} / {}", evidence.len(), total_samples),
-                });
                 let (status, limitation) = if let Some(stream) = stream.as_ref() {
                     if response.error.is_some() {
                         (
@@ -444,8 +493,15 @@ impl LiveExecutor {
                     limitation,
                     verified_scope: None,
                 });
+                progress(ProgressDetail {
+                    index: observations.len(),
+                    total: total_samples,
+                    id: plan.category.id().into(),
+                    message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+                });
             }
         }
+        let executed_samples = observations.len();
         let report = build_report(record.id.as_str(), observations).ok();
         let passed = report.as_ref().is_some_and(|report| {
             report
@@ -473,7 +529,461 @@ impl LiveExecutor {
                     "生成失败"
                 }
             ),
-            evidence_payload: json!({"version": crate::specification::SPECIFICATION_VERSION, "planned_samples": evidence.len(), "executed_samples": evidence.len(), "report": report, "evidence": evidence}),
+            evidence_payload: json!({"version": crate::specification::SPECIFICATION_VERSION, "planned_samples": total_samples, "executed_samples": executed_samples, "report": report, "evidence": evidence}),
+        }
+    }
+
+    /// S01 上下文容量实测：先校准字符/token 密度，再对 64K/128K/256K/512K
+    /// 四个固定档位各发送一次真实长度输入，按服务端 usage 判定各档是否通过。
+    fn execute_context_probes(
+        &mut self,
+        plan: &SpecificationPlan,
+        observations: &mut Vec<SpecificationObservation>,
+        evidence: &mut Vec<Value>,
+        total_samples: usize,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) {
+        let calibration_prompt = context_probe::calibration_prompt();
+        let calibration_chars = calibration_prompt.len();
+        let calibration_request = ChatCompletionsRequest {
+            module_id: "specification".into(),
+            prompt: calibration_prompt,
+            max_tokens: 64,
+            stream: false,
+        };
+        let calibration_response = self.transport.send(calibration_request.clone());
+        evidence.push(json!({
+            "sample_id": "context-calibration",
+            "payload": self.transport.evidence_payload(&calibration_request, &calibration_response),
+        }));
+        let density = context_probe::extract_prompt_tokens(calibration_response.parsed.as_ref())
+            .map(|tokens| context_probe::chars_per_token(calibration_chars, tokens))
+            .unwrap_or(context_probe::FALLBACK_CHARS_PER_TOKEN);
+
+        for sample_id in &plan.samples {
+            let Some(target) = context_probe::tier_tokens(sample_id) else {
+                continue;
+            };
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!(
+                    "正在检测规格样本 {} / {}",
+                    observations.len() + 1,
+                    total_samples
+                ),
+            });
+            let prompt = context_probe::build_probe_prompt(target, density);
+            let estimated_tokens = (prompt.len() as f64 / density) as u64;
+            let request = ChatCompletionsRequest {
+                module_id: "specification".into(),
+                prompt,
+                max_tokens: 256,
+                stream: false,
+            };
+            let response = self.transport.send(request.clone());
+            let finish_reason = response_finish_reason(response.parsed.as_ref());
+            let outcome = context_probe::classify(&response, target, estimated_tokens);
+            let mut payload = self.transport.evidence_payload(&request, &response);
+            if let Some(request_field) = payload.get_mut("request") {
+                let head: String = request.prompt.chars().take(64).collect();
+                let tail: String = request
+                    .prompt
+                    .chars()
+                    .rev()
+                    .take(64)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect();
+                request_field["prompt"] = json!(format!(
+                    "{head}…[填充文本共 {} 字符]…{tail}",
+                    request.prompt.len()
+                ));
+            }
+            evidence.push(json!({
+                "sample_id": sample_id,
+                "payload": payload,
+            }));
+            let (status, limitation, verified_scope, count_source) = match &outcome {
+                context_probe::ProbeOutcome::Passed {
+                    measured_tokens,
+                    estimated,
+                } => (
+                    SpecStatus::VerifiedRange,
+                    Some(if *estimated {
+                        "响应缺少 usage，token 数按校准密度估算".to_string()
+                    } else {
+                        "仅验证到该实测值，不代表服务理论上限".to_string()
+                    }),
+                    Some(format!("input <= {measured_tokens} tokens")),
+                    if *estimated { "estimate" } else { "usage" },
+                ),
+                context_probe::ProbeOutcome::Rejected { detail } => (
+                    SpecStatus::Failed,
+                    Some(format!("{detail}（可归因容量拒绝，构成上界证据）")),
+                    None,
+                    "usage",
+                ),
+                context_probe::ProbeOutcome::Inconclusive { detail } => (
+                    SpecStatus::Inconclusive,
+                    Some(detail.clone()),
+                    None,
+                    "usage",
+                ),
+                context_probe::ProbeOutcome::Malformed { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None, "usage")
+                }
+            };
+            let mut conditions = plan.fixed_settings.clone();
+            conditions.insert("target_tokens".into(), target.to_string());
+            conditions.insert("count_source".into(), count_source.into());
+            observations.push(SpecificationObservation {
+                category: plan.category,
+                sample_id: sample_id.clone(),
+                attempt: SpecificationAttemptKind::Initial,
+                conditions,
+                actual_output: response.parsed,
+                natural_end: finish_reason.as_deref() == Some("stop"),
+                finish_reason,
+                status,
+                evidence_refs: vec!["module-evidence".into()],
+                evidence_origin: EvidenceOrigin::RealExecution,
+                limitation,
+                verified_scope,
+            });
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+            });
+        }
+    }
+
+    /// S04 工具调用实测：5 个固定样本各发 1 次带 tools/tool_choice 的真实
+    /// 请求，校验调用形态与参数是否符合 schema 和样例规则。
+    fn execute_tool_call_probes(
+        &mut self,
+        plan: &SpecificationPlan,
+        observations: &mut Vec<SpecificationObservation>,
+        evidence: &mut Vec<Value>,
+        total_samples: usize,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) {
+        let samples = tool_probe::samples();
+        for sample_id in &plan.samples {
+            let Some(sample) = samples.iter().find(|sample| sample.id == sample_id) else {
+                continue;
+            };
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!(
+                    "正在检测规格样本 {} / {}",
+                    observations.len() + 1,
+                    total_samples
+                ),
+            });
+            let payload = tool_probe::request_payload(sample, self.transport.model_name());
+            let response = self
+                .transport
+                .send_payload(payload.clone(), "specification");
+            let finish_reason = response_finish_reason(response.parsed.as_ref());
+            let outcome = tool_probe::classify(sample, &response);
+            evidence.push(json!({
+                "sample_id": sample_id,
+                "payload": self.transport.raw_evidence_payload(&payload, "specification", &response),
+            }));
+            let (status, limitation, verified_scope) = match &outcome {
+                tool_probe::ToolOutcome::Pass { detail } => (
+                    SpecStatus::Effective,
+                    Some(format!("{detail}；仅验证该样例形态，不代表任意工具场景")),
+                    None,
+                ),
+                tool_probe::ToolOutcome::Violation { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                tool_probe::ToolOutcome::Unsupported { detail } => {
+                    (SpecStatus::Unsupported, Some(detail.clone()), None)
+                }
+                tool_probe::ToolOutcome::Malformed { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                tool_probe::ToolOutcome::Inconclusive { detail } => {
+                    (SpecStatus::Inconclusive, Some(detail.clone()), None)
+                }
+            };
+            let mut conditions = plan.fixed_settings.clone();
+            conditions.insert("tool_choice".into(), sample.tool_choice.to_string());
+            observations.push(SpecificationObservation {
+                category: plan.category,
+                sample_id: sample_id.clone(),
+                attempt: SpecificationAttemptKind::Initial,
+                conditions,
+                actual_output: response.parsed,
+                natural_end: finish_reason.as_deref() == Some("stop"),
+                finish_reason,
+                status,
+                evidence_refs: vec!["module-evidence".into()],
+                evidence_origin: EvidenceOrigin::RealExecution,
+                limitation,
+                verified_scope,
+            });
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+            });
+        }
+    }
+
+    /// S05 结构化输出实测：同一短输入 × 三模式各 1 次（对照 / json_object /
+    /// json_schema），只解析 message.content 原文，禁止修补后判过。
+    fn execute_structured_probes(
+        &mut self,
+        plan: &SpecificationPlan,
+        observations: &mut Vec<SpecificationObservation>,
+        evidence: &mut Vec<Value>,
+        total_samples: usize,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) {
+        let samples = structured_probe::samples();
+        for sample_id in &plan.samples {
+            let Some(sample) = samples.iter().find(|sample| sample.id == sample_id) else {
+                continue;
+            };
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!(
+                    "正在检测规格样本 {} / {}",
+                    observations.len() + 1,
+                    total_samples
+                ),
+            });
+            let payload = structured_probe::request_payload(sample, self.transport.model_name());
+            let response = self
+                .transport
+                .send_payload(payload.clone(), "specification");
+            let finish_reason = response_finish_reason(response.parsed.as_ref());
+            let outcome = structured_probe::classify(sample, &response);
+            evidence.push(json!({
+                "sample_id": sample_id,
+                "payload": self.transport.raw_evidence_payload(&payload, "specification", &response),
+            }));
+            let (status, limitation, verified_scope) = match &outcome {
+                structured_probe::StructuredOutcome::Pass { detail } => (
+                    SpecStatus::Effective,
+                    Some(format!(
+                        "{detail}；仅覆盖该冻结 schema 子集，不代表任意 schema"
+                    )),
+                    None,
+                ),
+                structured_probe::StructuredOutcome::Violation { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                structured_probe::StructuredOutcome::Unsupported { detail } => {
+                    (SpecStatus::Unsupported, Some(detail.clone()), None)
+                }
+                structured_probe::StructuredOutcome::Malformed { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                structured_probe::StructuredOutcome::Inconclusive { detail } => {
+                    (SpecStatus::Inconclusive, Some(detail.clone()), None)
+                }
+            };
+            let mut conditions = plan.fixed_settings.clone();
+            conditions.insert(
+                "response_format".into(),
+                sample
+                    .response_format
+                    .as_ref()
+                    .map(Value::to_string)
+                    .unwrap_or_else(|| "未设置".into()),
+            );
+            observations.push(SpecificationObservation {
+                category: plan.category,
+                sample_id: sample_id.clone(),
+                attempt: SpecificationAttemptKind::Initial,
+                conditions,
+                actual_output: response.parsed,
+                natural_end: finish_reason.as_deref() == Some("stop"),
+                finish_reason,
+                status,
+                evidence_refs: vec!["module-evidence".into()],
+                evidence_origin: EvidenceOrigin::RealExecution,
+                limitation,
+                verified_scope,
+            });
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+            });
+        }
+    }
+
+    /// S06 消息与多轮输入实测：4 个固定消息序列各 1 次，验证角色接受与
+    /// 同请求历史标记回引（不跨请求构造记忆）。
+    fn execute_messages_probes(
+        &mut self,
+        plan: &SpecificationPlan,
+        observations: &mut Vec<SpecificationObservation>,
+        evidence: &mut Vec<Value>,
+        total_samples: usize,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) {
+        let samples = messages_probe::samples();
+        for sample_id in &plan.samples {
+            let Some(sample) = samples.iter().find(|sample| sample.id == sample_id) else {
+                continue;
+            };
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!(
+                    "正在检测规格样本 {} / {}",
+                    observations.len() + 1,
+                    total_samples
+                ),
+            });
+            let payload = messages_probe::request_payload(sample, self.transport.model_name());
+            let response = self
+                .transport
+                .send_payload(payload.clone(), "specification");
+            let finish_reason = response_finish_reason(response.parsed.as_ref());
+            let outcome = messages_probe::classify(sample, &response);
+            evidence.push(json!({
+                "sample_id": sample_id,
+                "payload": self.transport.raw_evidence_payload(&payload, "specification", &response),
+            }));
+            let (status, limitation, verified_scope) = match &outcome {
+                messages_probe::MessagesOutcome::Pass { detail } => (
+                    SpecStatus::Effective,
+                    Some(format!("{detail}；仅覆盖已测角色组合与同请求历史模式")),
+                    None,
+                ),
+                messages_probe::MessagesOutcome::Violation { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                messages_probe::MessagesOutcome::NotApplicable { detail } => {
+                    (SpecStatus::NotApplicable, Some(detail.clone()), None)
+                }
+                messages_probe::MessagesOutcome::Malformed { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                messages_probe::MessagesOutcome::Inconclusive { detail } => {
+                    (SpecStatus::Inconclusive, Some(detail.clone()), None)
+                }
+            };
+            observations.push(SpecificationObservation {
+                category: plan.category,
+                sample_id: sample_id.clone(),
+                attempt: SpecificationAttemptKind::Initial,
+                conditions: plan.fixed_settings.clone(),
+                actual_output: response.parsed,
+                natural_end: finish_reason.as_deref() == Some("stop"),
+                finish_reason,
+                status,
+                evidence_refs: vec!["module-evidence".into()],
+                evidence_origin: EvidenceOrigin::RealExecution,
+                limitation,
+                verified_scope,
+            });
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+            });
+        }
+    }
+
+    /// S07 流式输出实测：文本标记流 + 工具增量流各 1 次真实 stream:true
+    /// 请求，验证语义增量、归组组装与正常终止。
+    fn execute_stream_probes(
+        &mut self,
+        plan: &SpecificationPlan,
+        observations: &mut Vec<SpecificationObservation>,
+        evidence: &mut Vec<Value>,
+        total_samples: usize,
+        progress: &mut dyn FnMut(ProgressDetail),
+    ) {
+        let samples = stream_probe::samples();
+        for sample_id in &plan.samples {
+            let Some(sample) = samples.iter().find(|sample| sample.id == sample_id) else {
+                continue;
+            };
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!(
+                    "正在检测规格样本 {} / {}",
+                    observations.len() + 1,
+                    total_samples
+                ),
+            });
+            let payload = stream_probe::request_payload(sample, self.transport.model_name());
+            let stream = self.transport.send_stream_payload(payload.clone());
+            let outcome = stream_probe::classify(sample, &stream);
+            evidence.push(json!({
+                "sample_id": sample_id,
+                "payload": self.transport.raw_stream_evidence_payload(&payload, "specification", &stream),
+            }));
+            let finish_reason = stream
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| event.finish_reason.clone());
+            let (status, limitation, verified_scope) = match &outcome {
+                stream_probe::StreamOutcome::Pass { detail } => (
+                    SpecStatus::Effective,
+                    Some(format!(
+                        "{detail}；仅覆盖该固定流式场景，不代表性能与稳定性"
+                    )),
+                    None,
+                ),
+                stream_probe::StreamOutcome::Violation { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                stream_probe::StreamOutcome::Unsupported { detail } => {
+                    (SpecStatus::Unsupported, Some(detail.clone()), None)
+                }
+                stream_probe::StreamOutcome::Malformed { detail } => {
+                    (SpecStatus::Failed, Some(detail.clone()), None)
+                }
+                stream_probe::StreamOutcome::Inconclusive { detail } => {
+                    (SpecStatus::Inconclusive, Some(detail.clone()), None)
+                }
+            };
+            observations.push(SpecificationObservation {
+                category: plan.category,
+                sample_id: sample_id.clone(),
+                attempt: SpecificationAttemptKind::Initial,
+                conditions: plan.fixed_settings.clone(),
+                actual_output: stream.response.parsed,
+                natural_end: stream.terminated,
+                finish_reason,
+                status,
+                evidence_refs: vec!["module-evidence".into()],
+                evidence_origin: EvidenceOrigin::RealExecution,
+                limitation,
+                verified_scope,
+            });
+            progress(ProgressDetail {
+                index: observations.len(),
+                total: total_samples,
+                id: plan.category.id().into(),
+                message: format!("已完成规格样本 {} / {}", observations.len(), total_samples),
+            });
         }
     }
 
@@ -495,7 +1005,11 @@ impl LiveExecutor {
                 index: evidence.len(),
                 total: samples.len(),
                 id: sample.id.clone(),
-                message: format!("正在检测能力样本 {} / {}", evidence.len() + 1, samples.len()),
+                message: format!(
+                    "正在检测能力样本 {} / {}",
+                    evidence.len() + 1,
+                    samples.len()
+                ),
             });
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
@@ -924,11 +1438,7 @@ impl LiveExecutor {
                 index: executed,
                 total: total_scenarios,
                 id: spec.scenario.id().into(),
-                message: format!(
-                    "正在执行智能体场景 {} / {}",
-                    executed + 1,
-                    total_scenarios
-                ),
+                message: format!("正在执行智能体场景 {} / {}", executed + 1, total_scenarios),
             });
             let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
             let evidence_id = format!("cli-agent-{}", spec.workspace.task_id);
@@ -1706,6 +2216,16 @@ fn probe_prompt(module_id: &str) -> &'static str {
     }
 }
 
+fn response_finish_reason(value: Option<&serde_json::Value>) -> Option<String> {
+    value
+        .and_then(|value| value.get("choices"))
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 fn is_chat_completion_shape(value: Option<&serde_json::Value>) -> bool {
     value
         .and_then(|value| value.get("choices"))
@@ -2334,6 +2854,60 @@ mod tests {
         response_body: &'static str,
         connections: usize,
     ) -> (String, thread::JoinHandle<Vec<String>>) {
+        mock_server_with(response_status, connections, move |_| {
+            response_body.to_owned()
+        })
+    }
+
+    /// 按请求内容生成响应体的 mock：S04 工具请求回合法 tool_calls、
+    /// S05 结构化请求回合规 JSON，其余回 "ok"。
+    fn spec_mock_server(connections: usize) -> (String, thread::JoinHandle<Vec<String>>) {
+        mock_server_with(200, connections, |request| spec_response_body(request))
+    }
+
+    fn spec_response_body(request: &str) -> String {
+        let weather = |arguments: &str| json!({"type": "function", "function": {"name": "lookup_weather", "arguments": arguments}});
+        let air = |arguments: &str| json!({"type": "function", "function": {"name": "lookup_air_quality", "arguments": arguments}});
+        let weather_args = |city: &str, days: u8, alert: bool, locations: &str| {
+            format!(
+                r#"{{"city":"{city}","days":{days},"unit":"celsius","include_alert":{alert},"locations":{locations},"options":{{"lang":"zh"}}}}"#
+            )
+        };
+        let is_stream = request.contains("\"stream\":true");
+        let message = if is_stream && request.contains("\"tools\"") {
+            // 流式工具场景：单事件给出完整 tool_calls（parser 兼容 delta/message 两种形态）。
+            json!({"tool_calls": [weather(&weather_args("北京", 1, false, "[\"海淀\"]"))]})
+        } else if is_stream {
+            json!({"content": "STREAM_BEGIN 北京明天晴 STREAM_END"})
+        } else if request.contains("\"tool_choice\":\"none\"") {
+            json!({"content": "北京明天晴，气温25度。"})
+        } else if request.contains("\"tool_choice\":{\"type\":\"function\"") {
+            json!({"tool_calls": [weather(&weather_args("上海", 1, false, "[\"浦东\"]"))]})
+        } else if request.contains("分别发起两次") {
+            json!({"tool_calls": [
+                weather(&weather_args("北京", 1, false, "[\"海淀\"]")),
+                weather(&weather_args("上海", 1, false, "[\"浦东\"]"))
+            ]})
+        } else if request.contains("空气质量工具") {
+            json!({"tool_calls": [
+                weather(&weather_args("北京", 1, false, "[\"海淀\"]")),
+                air(r#"{"city":"上海","index":3}"#)
+            ]})
+        } else if request.contains("\"tools\"") {
+            json!({"tool_calls": [weather(&weather_args("北京", 3, true, "[\"海淀\",\"朝阳\"]"))]})
+        } else if request.contains("json_schema") || request.contains("json_object") {
+            json!({"content": r#"{"city":"杭州","temperature":23,"raining":false,"tags":["沿海","春季"]}"#})
+        } else {
+            json!({"content": "ok"})
+        };
+        json!({"choices": [{"message": message, "finish_reason": "stop"}]}).to_string()
+    }
+
+    fn mock_server_with(
+        response_status: u16,
+        connections: usize,
+        respond: impl Fn(&str) -> String + Send + 'static,
+    ) -> (String, thread::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2349,10 +2923,11 @@ mod tests {
                     .push(String::from_utf8_lossy(&request[..size]).into_owned());
                 let request_text = String::from_utf8_lossy(&request[..size]);
                 let is_stream = request_text.contains("\"stream\":true");
+                let response_body = respond(&request_text);
                 let body = if is_stream {
                     format!("data: {response_body}\n\ndata: [DONE]\n\n")
                 } else {
-                    response_body.to_owned()
+                    response_body
                 };
                 let content_type = if is_stream {
                     "text/event-stream"
@@ -2515,15 +3090,12 @@ mod tests {
 
     #[test]
     fn full_executor_runs_every_specification_sample_and_keeps_report_evidence() {
-        let sample_count = crate::specification::seven_category_plan()
+        let sample_count = crate::specification::specification_plan()
             .iter()
             .map(|plan| plan.samples.len())
             .sum::<usize>();
-        let (endpoint, server) = mock_server(
-            200,
-            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#,
-            sample_count,
-        );
+        // S01 除档位探针外多发一个密度校准请求
+        let (endpoint, server) = spec_mock_server(sample_count + 1);
         let mut executor = LiveExecutor::new_full(
             endpoint,
             "model-a",
@@ -2533,7 +3105,7 @@ mod tests {
         .unwrap();
         let result = executor.execute("specification", &executor_record());
         let requests = server.join().unwrap();
-        assert_eq!(requests.len(), sample_count);
+        assert_eq!(requests.len(), sample_count + 1);
         assert_eq!(result.state, ModuleResultState::Pass);
         assert_eq!(result.evidence_payload["planned_samples"], sample_count);
         assert_eq!(result.evidence_payload["executed_samples"], sample_count);
@@ -2543,15 +3115,12 @@ mod tests {
 
     #[test]
     fn full_specification_run_reports_detail_progress_for_every_sample() {
-        let sample_count = crate::specification::seven_category_plan()
+        let sample_count = crate::specification::specification_plan()
             .iter()
             .map(|plan| plan.samples.len())
             .sum::<usize>();
-        let (endpoint, server) = mock_server(
-            200,
-            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#,
-            sample_count,
-        );
+        // S01 除档位探针外多发一个密度校准请求
+        let (endpoint, server) = spec_mock_server(sample_count + 1);
         let mut executor = LiveExecutor::new_full(
             endpoint,
             "model-a",
@@ -2580,7 +3149,11 @@ mod tests {
             sample_count * 2,
             "每个样本上报开始与完成两次进度"
         );
-        assert!(details.iter().all(|event| event.detail_total == Some(sample_count)));
+        assert!(
+            details
+                .iter()
+                .all(|event| event.detail_total == Some(sample_count))
+        );
         assert_eq!(details[0].detail_index, Some(0));
         assert_eq!(details[0].detail_id.as_deref(), Some("S01"));
         assert!(details[0].message.contains("正在检测"));

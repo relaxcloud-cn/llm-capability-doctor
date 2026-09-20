@@ -18,7 +18,7 @@ use crate::cli::{
 use crate::gui::{DesktopPlatform, GUI_VERSION, detect_desktop, render_workbench_html};
 use crate::performance::{PERFORMANCE_VERSION, PerformanceCategory, fixed_performance_plan};
 use crate::records::ModuleResultState;
-use crate::specification::{SPECIFICATION_VERSION, SpecCategory, seven_category_plan};
+use crate::specification::{SPECIFICATION_VERSION, SpecCategory, specification_plan};
 
 pub const VALIDATION_VERSION: &str = "validation/issue-33/v1";
 pub const VALIDATION_ENVIRONMENT: &str = "controlled-rust-regression";
@@ -146,7 +146,7 @@ impl ValidationMatrix {
 
 pub fn run_validation_suite() -> ValidationMatrix {
     let mut cases = Vec::new();
-    let spec_plan = seven_category_plan();
+    let spec_plan = specification_plan();
     for category in SpecCategory::ALL {
         let observed = spec_plan.iter().any(|plan| plan.category == category);
         cases.push(controlled_case(
@@ -552,7 +552,7 @@ mod tests {
     #[test]
     fn matrix_covers_every_formal_list_and_ui_interactions() {
         let matrix = run_validation_suite();
-        assert_eq!(matrix.cases_for(ValidationDomain::Specification).len(), 7);
+        assert_eq!(matrix.cases_for(ValidationDomain::Specification).len(), 5);
         assert_eq!(matrix.cases_for(ValidationDomain::Capability).len(), 6);
         assert_eq!(matrix.cases_for(ValidationDomain::Performance).len(), 5);
         assert_eq!(matrix.cases_for(ValidationDomain::Agent).len(), 8);
@@ -600,7 +600,7 @@ mod tests {
         let matrix = run_validation_suite();
         let json = validation_summary_json(&matrix).unwrap();
         assert!(json.contains("\"status\": \"pass\""));
-        assert!(json.contains("\"case_count\": 48"));
+        assert!(json.contains("\"case_count\": 46"));
         assert!(json.contains(VALIDATION_ENVIRONMENT));
     }
 }

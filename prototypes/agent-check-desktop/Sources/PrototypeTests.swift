@@ -95,15 +95,15 @@ func runModelTests() async throws {
   let specCatalog = RealResultCatalog.catalog(for: "specification")
   try expect(
     specCatalog?.groups.map(\.name) == [
-      "协议可接受上限", "输出长度", "常用参数", "工具调用", "结构化输出", "消息与多轮输入", "流式输出",
+      "协议可接受上限", "工具调用", "结构化输出", "消息与多轮输入", "流式输出",
     ], "规格结果按正式小项分组")
   try expect(
-    specCatalog?.sampleGroup("context-boundary") == "S01"
-      && specCatalog?.sampleGroup("T03") == "S04"
+    specCatalog?.sampleGroup("context-256k") == "S01"
+      && specCatalog?.sampleGroup("tools-all-types") == "S04"
       && specCatalog?.sampleGroup("stream-tool") == "S07",
     "内部样本编号归入正确小项")
   try expect(
-    specCatalog?.sampleName(1, "context-1024") == "常规长度请求（约 1K 字符）",
+    specCatalog?.sampleName(1, "context-64k") == "约 64K token 的真实长度输入",
     "样本编号翻译成客户说法")
   try expect(
     RealResultCatalog.catalog(for: "capability")?.sampleGroup("C03-2-04") == "C03"
