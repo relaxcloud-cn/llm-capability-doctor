@@ -254,6 +254,8 @@ pub struct CapabilityResponse {
     pub execution: ExecutionState,
     pub text: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    #[serde(default)]
+    pub truncated: bool,
     pub evidence_refs: Vec<String>,
 }
 
@@ -604,7 +606,7 @@ fn c01_bank() -> Vec<CapabilitySample> {
             format!("{FACTS_SC}任务：分别概括两个项目的状态，用两个自然段回答。{UNIFIED}"),
             "进行中、已完成",
             set(
-                groups(&[&["进行中"], &["已完成"]], &[]),
+                groups(&[&["进行中"], &["已完成", "已经完成", "全部完成"]], &[]),
                 vec![C::ParagraphCount(2)],
             ),
         ),
@@ -852,6 +854,7 @@ fn c01_bank() -> Vec<CapabilitySample> {
                     "没有去年",
                     "无法确定",
                     "无法判断",
+                    "未知",
                 ],
                 &[],
             ),
@@ -906,9 +909,15 @@ pub fn evaluate_response(
             executed: false,
         },
         ExecutionState::Valid => {
+            let stripped = response
+                .text
+                .as_deref()
+                .map(|text| strip_prompt_echo(text, &sample.prompt));
             let (label, reason) = evaluate_acceptance(
                 &sample.acceptance,
+                stripped.as_deref(),
                 response.text.as_deref(),
+                response.truncated,
                 &response.tool_calls,
             );
             CapabilityObservation {
@@ -924,97 +933,186 @@ pub fn evaluate_response(
     }
 }
 
-/// 统一判分入口：返回（标签, 原因）。ConstraintSet 递归复用内容规则。
+/// 剥掉响应中对题目的原文复述（部分模型会先引用材料/要求再作答），
+/// 避免复述文本里的禁含值或"最终答案"字样污染判分。
+fn strip_prompt_echo(text: &str, prompt: &str) -> String {
+    let mut out = text.replace(prompt, "");
+    if let Some((material, _)) = prompt.split_once("任务：") {
+        if material.len() >= 8 {
+            out = out.replace(material, "");
+        }
+    }
+    if let Some(index) = prompt.find("只依据题目给出") {
+        let suffix = &prompt[index..];
+        if suffix.len() >= 8 {
+            out = out.replace(suffix, "");
+        }
+    }
+    out
+}
+
+/// 禁含值命中检查：命中项处在排除性语境（"除…外""不在""未超过"等）
+/// 时不算违规，只统计以断言/列举形式出现的禁含值。
+fn forbidden_hit(normalized: &str, forbidden: &[String]) -> bool {
+    const EXCLUSION: [&str; 9] = [
+        "除", "不", "未", "非", "排除", "以外", "之外", "不符", "其他",
+    ];
+    forbidden.iter().any(|raw| {
+        let needle = normalize(raw);
+        !needle.is_empty()
+            && normalized.match_indices(&needle).any(|(position, _)| {
+                let head: String = normalized[..position]
+                    .chars()
+                    .rev()
+                    .take(12)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                let tail: String = normalized[position + needle.len()..]
+                    .chars()
+                    .take(12)
+                    .collect();
+                let window = format!("{head}{tail}");
+                !EXCLUSION.iter().any(|marker| window.contains(marker))
+            })
+    })
+}
+
+/// 提取"最终答案"区域：优先最后一个"最终答案"标记到解释边界；
+/// 无标记时取最后一个非空段落；兜底全文。内容规则只对答案区生效，
+/// 避免模型复述材料或解释排除项时带出禁含值造成误判。
+fn answer_region(text: &str) -> &str {
+    const MARKER: &str = "最终答案";
+    const BOUNDARIES: [&str; 8] = [
+        "说明：",
+        "解释：",
+        "理由：",
+        "注：",
+        "（注",
+        "推理过程",
+        "推理：",
+        "分析：",
+    ];
+    if let Some(position) = text.rfind(MARKER) {
+        let rest = &text[position..];
+        let end = BOUNDARIES
+            .iter()
+            .filter_map(|boundary| rest.find(boundary))
+            .chain(rest.find("\n\n"))
+            .min()
+            .unwrap_or(rest.len());
+        return rest[..end].trim();
+    }
+    text.split("\n\n")
+        .filter(|part| !part.trim().is_empty())
+        .last()
+        .unwrap_or(text)
+        .trim()
+}
+
+/// 统一判分入口：返回（标签, 原因）。`text` 为剥离题目复述后的文本
+/// （供答案区提取与内容规则使用），`output` 为完整原始输出
+/// （供输出约束使用）；ConstraintSet 递归复用内容规则。
 fn evaluate_acceptance(
     rule: &AcceptanceRule,
     text: Option<&str>,
+    output: Option<&str>,
+    truncated: bool,
     tool_calls: &[ToolCall],
 ) -> (ScoreLabel, Option<String>) {
+    if truncated && !text.is_some_and(|text| text.contains("最终答案")) && tool_calls.is_empty()
+    {
+        return (
+            ScoreLabel::Pending,
+            Some("响应在最大输出长度处截断，最终答案未成形".into()),
+        );
+    }
+    let answer = text.map(answer_region);
     match rule {
         AcceptanceRule::ExactAny { accepted } => (
-            text.map(|text| {
-                if accepted
-                    .iter()
-                    .any(|value| normalize(text) == normalize(value))
-                {
-                    ScoreLabel::Correct
-                } else {
-                    ScoreLabel::Wrong
-                }
-            })
-            .unwrap_or(ScoreLabel::Pending),
+            answer
+                .map(|text| {
+                    if accepted
+                        .iter()
+                        .any(|value| normalize(text) == normalize(value))
+                    {
+                        ScoreLabel::Correct
+                    } else {
+                        ScoreLabel::Wrong
+                    }
+                })
+                .unwrap_or(ScoreLabel::Pending),
             None,
         ),
         AcceptanceRule::ContainsAll {
             required,
             forbidden,
         } => (
-            text.map(|text| {
-                let normalized = normalize(text);
-                if required
-                    .iter()
-                    .all(|value| normalized.contains(&normalize(value)))
-                    && forbidden
+            answer
+                .map(|text| {
+                    let normalized = normalize(text);
+                    if required
                         .iter()
-                        .all(|value| !normalized.contains(&normalize(value)))
-                {
-                    ScoreLabel::Correct
-                } else {
-                    ScoreLabel::Wrong
-                }
-            })
-            .unwrap_or(ScoreLabel::Pending),
+                        .all(|value| normalized.contains(&normalize(value)))
+                        && !forbidden_hit(&normalized, forbidden)
+                    {
+                        ScoreLabel::Correct
+                    } else {
+                        ScoreLabel::Wrong
+                    }
+                })
+                .unwrap_or(ScoreLabel::Pending),
             None,
         ),
         AcceptanceRule::ContainsAny { any_of, forbidden } => (
-            text.map(|text| {
-                let normalized = normalize(text);
-                if any_of
-                    .iter()
-                    .any(|value| normalized.contains(&normalize(value)))
-                    && forbidden
+            answer
+                .map(|text| {
+                    let normalized = normalize(text);
+                    if any_of
                         .iter()
-                        .all(|value| !normalized.contains(&normalize(value)))
-                {
-                    ScoreLabel::Correct
-                } else {
-                    ScoreLabel::Wrong
-                }
-            })
-            .unwrap_or(ScoreLabel::Pending),
+                        .any(|value| normalized.contains(&normalize(value)))
+                        && !forbidden_hit(&normalized, forbidden)
+                    {
+                        ScoreLabel::Correct
+                    } else {
+                        ScoreLabel::Wrong
+                    }
+                })
+                .unwrap_or(ScoreLabel::Pending),
             None,
         ),
         AcceptanceRule::MatchGroups {
             required_groups,
             forbidden,
         } => (
-            text.map(|text| {
-                let normalized = normalize(text);
-                if required_groups.iter().all(|group| {
-                    group
-                        .iter()
-                        .any(|alias| normalized.contains(&normalize(alias)))
-                }) && forbidden
-                    .iter()
-                    .all(|value| !normalized.contains(&normalize(value)))
-                {
-                    ScoreLabel::Correct
-                } else {
-                    ScoreLabel::Wrong
-                }
-            })
-            .unwrap_or(ScoreLabel::Pending),
+            answer
+                .map(|text| {
+                    let normalized = normalize(text);
+                    if required_groups.iter().all(|group| {
+                        group
+                            .iter()
+                            .any(|alias| normalized.contains(&normalize(alias)))
+                    }) && !forbidden_hit(&normalized, forbidden)
+                    {
+                        ScoreLabel::Correct
+                    } else {
+                        ScoreLabel::Wrong
+                    }
+                })
+                .unwrap_or(ScoreLabel::Pending),
             None,
         ),
         AcceptanceRule::ConstraintSet {
             content,
             constraints,
         } => {
-            let (content_label, content_reason) = evaluate_acceptance(content, text, tool_calls);
+            let (content_label, content_reason) =
+                evaluate_acceptance(content, text, output, truncated, tool_calls);
             if content_label != ScoreLabel::Correct {
                 return (content_label, content_reason);
             }
-            let text = text.unwrap_or("");
+            let text = output.or(text).unwrap_or("");
             let failed: Vec<String> = constraints
                 .iter()
                 .filter(|constraint| !check_constraint(constraint, text))
@@ -1034,10 +1132,11 @@ fn evaluate_acceptance(
             tolerance,
             unit,
         } => (
-            text.and_then(first_number)
+            answer
+                .and_then(first_number)
                 .map(|value| {
                     let unit_ok = unit.as_ref().is_none_or(|unit| {
-                        text.is_some_and(|text| normalize(text).contains(&normalize(unit)))
+                        answer.is_some_and(|text| normalize(text).contains(&normalize(unit)))
                     });
                     if (value - expected).abs() <= *tolerance && unit_ok {
                         ScoreLabel::Correct
@@ -1076,10 +1175,10 @@ fn evaluate_acceptance(
         } => (
             if !tool_calls.is_empty() {
                 ScoreLabel::Wrong
-            } else if text.is_none() {
+            } else if answer.is_none() {
                 ScoreLabel::Pending
             } else if accepted_explanations.is_empty()
-                || text.is_some_and(|text| {
+                || answer.is_some_and(|text| {
                     accepted_explanations
                         .iter()
                         .any(|value| normalize(text).contains(&normalize(value)))
@@ -1540,6 +1639,7 @@ mod tests {
                 execution: ExecutionState::Valid,
                 text: Some("人民币六十五元".into()),
                 tool_calls: Vec::new(),
+                truncated: false,
                 evidence_refs: vec!["evidence://alias".into()],
             },
         );
@@ -1560,6 +1660,7 @@ mod tests {
                     execution: ExecutionState::Valid,
                     text: Some("65.05 元".into()),
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec!["evidence://numeric".into()],
                 },
             )
@@ -1580,6 +1681,7 @@ mod tests {
                     execution: ExecutionState::Valid,
                     text: Some("无法确定".into()),
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec!["evidence://no-call".into()],
                 },
             )
@@ -1599,18 +1701,21 @@ mod tests {
                     execution: ExecutionState::Valid,
                     text: Some(sample.expected.clone()),
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec![format!("evidence://{}", sample.id)],
                 },
                 1 => CapabilityResponse {
                     execution: ExecutionState::Valid,
                     text: Some("错误答案".into()),
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec![format!("evidence://{}", sample.id)],
                 },
                 2 => CapabilityResponse {
                     execution: ExecutionState::Valid,
                     text: None,
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec![format!("evidence://{}", sample.id)],
                 },
                 3 => CapabilityResponse {
@@ -1619,6 +1724,7 @@ mod tests {
                     },
                     text: None,
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: vec![format!("evidence://{}", sample.id)],
                 },
                 _ => CapabilityResponse {
@@ -1627,6 +1733,7 @@ mod tests {
                     },
                     text: None,
                     tool_calls: Vec::new(),
+                    truncated: false,
                     evidence_refs: Vec::new(),
                 },
             };
@@ -1659,6 +1766,7 @@ mod tests {
                             }
                         }),
                         tool_calls: Vec::new(),
+                        truncated: false,
                         evidence_refs: vec![format!("evidence://{}", sample.id)],
                     },
                 ));
@@ -1755,6 +1863,7 @@ mod tests {
                         execution: ExecutionState::Valid,
                         text: Some(sample.expected),
                         tool_calls: Vec::new(),
+                        truncated: false,
                         evidence_refs: vec!["evidence://other-run".into()],
                     },
                 ),],
@@ -1785,6 +1894,7 @@ mod tests {
                 execution: ExecutionState::Valid,
                 text: text.map(str::to_string),
                 tool_calls: Vec::new(),
+                truncated: false,
                 evidence_refs: vec!["evidence://c01-test".into()],
             },
         )
@@ -1950,5 +2060,92 @@ mod tests {
             .filter(|sample| matches!(sample.acceptance, AcceptanceRule::ConstraintSet { .. }))
             .count();
         assert_eq!(constrained, 22);
+    }
+
+    fn judged_full(
+        acceptance: AcceptanceRule,
+        text: Option<&str>,
+        truncated: bool,
+    ) -> CapabilityObservation {
+        let sample = CapabilitySample {
+            id: "c01-test".into(),
+            category: CapabilityCategory::InstructionFollowing,
+            subdomain: "material-facts".into(),
+            dataset_identity: DatasetIdentity::ProductOriginal,
+            source_ref: "test".into(),
+            language: CAPABILITY_LANGUAGE.into(),
+            prompt: "回答".into(),
+            expected: "王六".into(),
+            acceptance,
+            generation_settings: BTreeMap::new(),
+            revision: CAPABILITY_VERSION.into(),
+            input_tokens: None,
+        };
+        evaluate_response(
+            &sample,
+            CapabilityResponse {
+                execution: ExecutionState::Valid,
+                text: text.map(str::to_string),
+                tool_calls: Vec::new(),
+                truncated,
+                evidence_refs: vec!["evidence://c01-test".into()],
+            },
+        )
+    }
+
+    #[test]
+    fn truncated_response_without_answer_marker_is_pending_not_wrong() {
+        let rule = AcceptanceRule::ContainsAny {
+            any_of: vec!["王六".into()],
+            forbidden: vec!["王五".into()],
+        };
+        let observation = judged_full(
+            rule.clone(),
+            Some("The user asks: \"材料：产品A负责人王五...\" So we answer: 产品B的负责人是"),
+            true,
+        );
+        assert_eq!(observation.label, ScoreLabel::Pending);
+        assert!(
+            observation
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("截断"))
+        );
+        // 截断但已给出最终答案标记的，照常判分
+        let observation = judged_full(rule, Some("推理过程略。最终答案：王六"), true);
+        assert_eq!(observation.label, ScoreLabel::Correct);
+    }
+
+    #[test]
+    fn answer_region_shields_forbidden_values_in_echo_and_explanation() {
+        let rule = AcceptanceRule::ContainsAny {
+            any_of: vec!["王六".into()],
+            forbidden: vec!["王五".into()],
+        };
+        // 复述材料带出的禁含值不算违规；最终答案正确即通过
+        let observation = judged_full(
+            rule.clone(),
+            Some("The user asks: \"产品A负责人王五，产品B负责人王六...\" 最终答案：王六"),
+            false,
+        );
+        assert_eq!(observation.label, ScoreLabel::Correct);
+        // 答案后的说明段提到排除项，不影响判定
+        let groups = AcceptanceRule::MatchGroups {
+            required_groups: vec![vec!["甲".into()], vec!["丙".into()]],
+            forbidden: vec!["乙".into(), "丁".into()],
+        };
+        let observation = judged_full(
+            groups,
+            Some("最终答案：项目甲、项目丙。说明：项目乙超支，项目丁不符合。"),
+            false,
+        );
+        assert_eq!(observation.label, ScoreLabel::Correct);
+        // 无标记时取最后一个非空段落
+        let observation = judged_full(
+            rule,
+            Some("思考过程提到王五作为干扰项。\n\n产品B的负责人是王六。"),
+            false,
+        );
+        assert_eq!(observation.label, ScoreLabel::Correct);
     }
 }

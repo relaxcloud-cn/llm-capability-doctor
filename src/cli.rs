@@ -1014,11 +1014,13 @@ impl LiveExecutor {
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
                 prompt: sample.prompt.clone(),
-                max_tokens: 256,
+                max_tokens: 1024,
                 stream: false,
             };
             let response = self.transport.send(request.clone());
             let text = completion_text(response.parsed.as_ref());
+            let truncated =
+                response_finish_reason(response.parsed.as_ref()).as_deref() == Some("length");
             let execution = if response.error.is_some()
                 || !response
                     .status
@@ -1036,6 +1038,7 @@ impl LiveExecutor {
                     execution,
                     text,
                     tool_calls: Vec::new(),
+                    truncated,
                     evidence_refs: Vec::new(),
                 },
             ));
