@@ -516,7 +516,7 @@ pub fn boundary_regression_cases() -> Vec<ValidationCase> {
             ValidationDomain::Capability,
             CAPABILITY_VERSION,
             "未测量能力单元计入 missing，不进入 score 分母".into(),
-            "240 missing and no score",
+            "144 missing and no score",
             format!(
                 "{} missing; {} no-score",
                 scorecard
@@ -588,7 +588,7 @@ mod tests {
                 .iter()
                 .all(|case| case.status == ValidationStatus::Pass)
         );
-        assert_eq!(cases[0].evidence.actual, "120 missing; 6 no-score");
+        assert_eq!(cases[0].evidence.actual, "144 missing; 6 no-score");
         assert_eq!(
             cases[1].evidence.actual,
             "14 fixtures have no structural difference"

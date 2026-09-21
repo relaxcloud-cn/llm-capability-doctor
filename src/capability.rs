@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -122,6 +123,62 @@ pub enum ScoreLabel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum OutputConstraint {
+    /// 归一化后回答字符数 ≤ n。
+    MaxChars(u32),
+    /// 回答须包含子串（归一化匹配）。
+    MustContain(String),
+    /// 回答不得包含子串。
+    MustNotContain(String),
+    /// 关键词出现次数 ≥ n。
+    KeywordMinCount(String, u32),
+    /// 全回答为可解析 JSON 对象。
+    JsonObject,
+    /// JSON 顶层字段数 = n。
+    JsonFieldCount(u32),
+    /// JSON 必含指定字段名。
+    JsonRequiredFields(Vec<String>),
+    /// 非空行数 = n。
+    LineCount(u32),
+    /// 空行分段数 = n。
+    ParagraphCount(u32),
+    /// 含 [[...]] 形式标题。
+    WrappedTitle,
+    /// 回答以指定串开头。
+    StartsWith(String),
+    /// 回答以指定串结尾。
+    EndsWith(String),
+    /// 不含指定字符。
+    NoChar(char),
+    /// 首尾为配对引号。
+    QuotedOutput,
+    /// 给定项按顺序出现。
+    ExactOrder(Vec<String>),
+}
+
+impl OutputConstraint {
+    pub fn describe(&self) -> String {
+        match self {
+            Self::MaxChars(n) => format!("不超过{n}字"),
+            Self::MustContain(s) => format!("必须包含“{s}”"),
+            Self::MustNotContain(s) => format!("不得包含“{s}”"),
+            Self::KeywordMinCount(s, n) => format!("“{s}”至少出现{n}次"),
+            Self::JsonObject => "整体为可解析JSON对象".into(),
+            Self::JsonFieldCount(n) => format!("JSON顶层字段数为{n}"),
+            Self::JsonRequiredFields(fields) => format!("JSON必含字段{}", fields.join(",")),
+            Self::LineCount(n) => format!("恰好{n}行"),
+            Self::ParagraphCount(n) => format!("恰好{n}段"),
+            Self::WrappedTitle => "含[[标题]]包裹".into(),
+            Self::StartsWith(s) => format!("以“{s}”开头"),
+            Self::EndsWith(s) => format!("以“{s}”结尾"),
+            Self::NoChar(c) => format!("不含字符“{c}”"),
+            Self::QuotedOutput => "首尾为配对引号".into(),
+            Self::ExactOrder(items) => format!("按序出现{}", items.join("→")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AcceptanceRule {
     ExactAny {
         accepted: Vec<String>,
@@ -129,6 +186,21 @@ pub enum AcceptanceRule {
     ContainsAll {
         required: Vec<String>,
         forbidden: Vec<String>,
+    },
+    /// 任一等义表达命中即过，且不得含禁含值。
+    ContainsAny {
+        any_of: Vec<String>,
+        forbidden: Vec<String>,
+    },
+    /// 每组别名至少命中一个，且不得含禁含值（集合型答案）。
+    MatchGroups {
+        required_groups: Vec<Vec<String>>,
+        forbidden: Vec<String>,
+    },
+    /// 内容规则 + 输出约束清单，逐约束独立判定（IFEval 式）。
+    ConstraintSet {
+        content: Box<AcceptanceRule>,
+        constraints: Vec<OutputConstraint>,
     },
     Numeric {
         expected: f64,
@@ -239,8 +311,12 @@ pub struct CapabilityScorecard {
 }
 
 pub fn fixed_capability_catalog() -> Vec<CapabilitySample> {
-    let mut samples = Vec::with_capacity(120);
+    let mut samples = Vec::with_capacity(144);
     for category in CapabilityCategory::ALL {
+        if category == CapabilityCategory::InstructionFollowing {
+            samples.extend(c01_bank());
+            continue;
+        }
         for (subdomain_index, subdomain) in category.subdomains().into_iter().enumerate() {
             for sample_index in 1..=4 {
                 let id = format!(
@@ -276,6 +352,535 @@ pub fn fixed_capability_catalog() -> Vec<CapabilitySample> {
     samples
 }
 
+/// C01 文本理解与指令执行题库（44 题，方法借鉴 SQuAD 2.0 与 IFEval，
+/// 题目全部为产品原创中文受控材料）。子域序与 `subdomains()` 一致：
+/// 1 材料事实 2 条件筛选 3 单项约束 4 多项约束 5 信息不足。
+fn c01_bank() -> Vec<CapabilitySample> {
+    const UNIFIED: &str = "只依据题目给出的材料和条件回答。先给最终答案；同时满足题目列出的所有输出要求。材料没有提供的信息必须明确说明未知，不要使用外部知识补全。";
+    const FACTS_AB: &str =
+        "材料：项目甲由小林负责，预算30万，状态进行中；项目乙由小周负责，预算50万，状态已完成。";
+    const FACTS_ABCD: &str = "材料：项目甲预算30万、华东、进行中；项目乙预算50万、华北、已完成；项目丙预算20万、华东、进行中；项目丁预算45万、华东、已完成。";
+    const FACTS_SC: &str = "材料：项目甲预算30万、华东、进行中，负责人小林；项目乙预算50万、华北、已完成，负责人小周。";
+
+    fn any(aliases: &[&str], forbidden: &[&str]) -> AcceptanceRule {
+        AcceptanceRule::ContainsAny {
+            any_of: aliases.iter().map(|value| value.to_string()).collect(),
+            forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
+        }
+    }
+    fn groups(required: &[&[&str]], forbidden: &[&str]) -> AcceptanceRule {
+        AcceptanceRule::MatchGroups {
+            required_groups: required
+                .iter()
+                .map(|group| group.iter().map(|value| value.to_string()).collect())
+                .collect(),
+            forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
+        }
+    }
+    fn set(content: AcceptanceRule, constraints: Vec<OutputConstraint>) -> AcceptanceRule {
+        AcceptanceRule::ConstraintSet {
+            content: Box::new(content),
+            constraints,
+        }
+    }
+    use OutputConstraint as C;
+
+    let defs: Vec<(usize, u32, &str, String, &str, AcceptanceRule)> = vec![
+        // ---- 子域 1：材料事实（8 题）----
+        (
+            1,
+            1,
+            "material-facts",
+            format!("{FACTS_AB}任务：项目乙的预算是多少？{UNIFIED}"),
+            "50万",
+            any(&["50万", "500000", "五十万"], &[]),
+        ),
+        (
+            1,
+            2,
+            "material-facts",
+            format!("{FACTS_AB}任务：项目乙的验收日期是哪天？{UNIFIED}"),
+            "未提供",
+            any(&["未提供", "未说明", "未知", "没有提供", "无此信息"], &[]),
+        ),
+        (
+            1,
+            3,
+            "material-facts",
+            format!(
+                "材料：产品A负责人王五，产品B负责人王六，产品C负责人王五。任务：产品B的负责人是谁？{UNIFIED}"
+            ),
+            "王六",
+            any(&["王六"], &["王五"]),
+        ),
+        (
+            1,
+            4,
+            "material-facts",
+            format!(
+                "材料：项目甲原预算30万，3月调整为45万；项目负责人始终为小林。任务：项目甲当前预算是多少？{UNIFIED}"
+            ),
+            "45万",
+            any(&["45万", "四十五万"], &["30万"]),
+        ),
+        (
+            1,
+            5,
+            "material-facts",
+            format!(
+                "材料：本批共三个项目：项目甲、项目乙、项目丙。任务：本批共有几个项目？{UNIFIED}"
+            ),
+            "3个",
+            any(&["3个", "三个", "共3", "共三"], &[]),
+        ),
+        (
+            1,
+            6,
+            "material-facts",
+            format!("材料：库存现有零件12件，另有4件在途未到货。任务：现有库存多少件？{UNIFIED}"),
+            "12件",
+            any(&["12件", "12"], &["16"]),
+        ),
+        (
+            1,
+            7,
+            "material-facts",
+            format!(
+                "材料：季度评审会定于3月15日召开，地点暂定二层会议室。任务：评审会定在哪天？{UNIFIED}"
+            ),
+            "3月15日",
+            any(&["3月15日", "三月十五"], &[]),
+        ),
+        (
+            1,
+            8,
+            "material-facts",
+            format!(
+                "材料：项目丁已完成立项，负责人待任命，预算待评审。任务：项目丁的负责人是谁？{UNIFIED}"
+            ),
+            "未提供",
+            any(&["待任命", "未提供", "未知", "未确定", "尚未"], &[]),
+        ),
+        // ---- 子域 2：条件筛选（8 题，共用 ABCD 材料）----
+        (
+            2,
+            1,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出预算超过40万的项目，按金额从高到低排列。{UNIFIED}"),
+            "项目乙、项目丁",
+            set(
+                groups(&[&["项目乙", "乙"], &["项目丁", "丁"]], &["甲", "丙"]),
+                vec![C::ExactOrder(vec!["乙".into(), "丁".into()])],
+            ),
+        ),
+        (
+            2,
+            2,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出状态为已完成的项目。{UNIFIED}"),
+            "项目乙、项目丁",
+            groups(&[&["乙"], &["丁"]], &["甲", "丙", "进行中"]),
+        ),
+        (
+            2,
+            3,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出华东地区且状态为进行中的项目。{UNIFIED}"),
+            "项目甲、项目丙",
+            groups(&[&["甲"], &["丙"]], &["乙", "丁", "已完成"]),
+        ),
+        (
+            2,
+            4,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出预算超过100万的项目。{UNIFIED}"),
+            "无",
+            any(
+                &["无", "没有", "不存在", "空"],
+                &["项目甲", "项目乙", "项目丙", "项目丁"],
+            ),
+        ),
+        (
+            2,
+            5,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出除项目乙外状态为已完成的项目。{UNIFIED}"),
+            "项目丁",
+            groups(&[&["丁"]], &["甲", "乙", "丙", "进行中"]),
+        ),
+        (
+            2,
+            6,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：有几个项目未完成？列出名称。{UNIFIED}"),
+            "2个：项目甲、项目丙",
+            groups(&[&["2", "两"], &["甲"], &["丙"]], &["乙", "丁", "已完成"]),
+        ),
+        (
+            2,
+            7,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出预算在20万到40万之间（含边界）的项目。{UNIFIED}"),
+            "项目甲、项目丙",
+            groups(&[&["甲"], &["丙"]], &["乙", "丁"]),
+        ),
+        (
+            2,
+            8,
+            "condition-filtering",
+            format!("{FACTS_ABCD}任务：列出华东项目，按预算从低到高排列。{UNIFIED}"),
+            "项目丙、项目甲、项目丁",
+            set(
+                groups(&[&["丙"], &["甲"], &["丁"]], &["乙"]),
+                vec![C::ExactOrder(vec!["丙".into(), "甲".into(), "丁".into()])],
+            ),
+        ),
+        // ---- 子域 3：单项约束（12 题，共用 SC 材料，每题一条约束覆盖 12 种类型）----
+        (
+            3,
+            1,
+            "single-constraint",
+            format!("{FACTS_SC}任务：总结项目甲当前状态，回答不超过10个字。{UNIFIED}"),
+            "进行中",
+            set(any(&["进行中"], &[]), vec![C::MaxChars(10)]),
+        ),
+        (
+            3,
+            2,
+            "single-constraint",
+            format!(
+                "{FACTS_SC}任务：说明项目推进中需要注意的问题，回答必须包含“风险”一词。{UNIFIED}"
+            ),
+            "含“风险”",
+            set(any(&["风险"], &[]), vec![C::MustContain("风险".into())]),
+        ),
+        (
+            3,
+            3,
+            "single-constraint",
+            format!("{FACTS_SC}任务：介绍项目甲的基本情况，回答不得包含“预算”一词。{UNIFIED}"),
+            "提到项目甲事实",
+            set(
+                any(&["小林", "进行中", "华东"], &[]),
+                vec![C::MustNotContain("预算".into())],
+            ),
+        ),
+        (
+            3,
+            4,
+            "single-constraint",
+            format!("{FACTS_SC}任务：描述项目的安全管理要求，“安全”一词至少出现2次。{UNIFIED}"),
+            "含2次“安全”",
+            set(
+                any(&["安全"], &[]),
+                vec![C::KeywordMinCount("安全".into(), 2)],
+            ),
+        ),
+        (
+            3,
+            5,
+            "single-constraint",
+            format!(
+                "{FACTS_SC}任务：以JSON对象输出项目甲的负责人和预算，不要输出JSON以外的文字。{UNIFIED}"
+            ),
+            "小林、30万",
+            set(
+                groups(&[&["小林"], &["30万", "30"]], &[]),
+                vec![C::JsonObject],
+            ),
+        ),
+        (
+            3,
+            6,
+            "single-constraint",
+            format!("{FACTS_SC}任务：列出材料中的两个项目，每行一个。{UNIFIED}"),
+            "项目甲、项目乙",
+            set(groups(&[&["甲"], &["乙"]], &[]), vec![C::LineCount(2)]),
+        ),
+        (
+            3,
+            7,
+            "single-constraint",
+            format!("{FACTS_SC}任务：分别概括两个项目的状态，用两个自然段回答。{UNIFIED}"),
+            "进行中、已完成",
+            set(
+                groups(&[&["进行中"], &["已完成"]], &[]),
+                vec![C::ParagraphCount(2)],
+            ),
+        ),
+        (
+            3,
+            8,
+            "single-constraint",
+            format!("{FACTS_SC}任务：为项目甲的进展汇报拟一个标题，标题用[[]]包裹。{UNIFIED}"),
+            "含标题",
+            set(any(&["甲", "进展", "汇报"], &[]), vec![C::WrappedTitle]),
+        ),
+        (
+            3,
+            9,
+            "single-constraint",
+            format!("{FACTS_SC}任务：回答项目甲由谁负责，回答必须以“结论：”开头。{UNIFIED}"),
+            "小林",
+            set(any(&["小林"], &[]), vec![C::StartsWith("结论：".into())]),
+        ),
+        (
+            3,
+            10,
+            "single-constraint",
+            format!("{FACTS_SC}任务：说明项目乙的验收情况，回答必须以“完毕”结尾。{UNIFIED}"),
+            "已完成",
+            set(any(&["已完成"], &[]), vec![C::EndsWith("完毕".into())]),
+        ),
+        (
+            3,
+            11,
+            "single-constraint",
+            format!("{FACTS_SC}任务：介绍两个项目的预算，回答中不得使用逗号。{UNIFIED}"),
+            "30万、50万",
+            set(
+                groups(&[&["30万", "30"], &["50万", "50"]], &[]),
+                vec![C::NoChar('，')],
+            ),
+        ),
+        (
+            3,
+            12,
+            "single-constraint",
+            format!("{FACTS_SC}任务：给出项目甲的负责人，整个回答用中文引号包裹。{UNIFIED}"),
+            "小林",
+            set(any(&["小林"], &[]), vec![C::QuotedOutput]),
+        ),
+        // ---- 子域 4：多项约束（8 题，每题 2-4 条）----
+        (
+            4,
+            1,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：总结项目推进的风险，回答不超过15字且必须包含“风险”。{UNIFIED}"
+            ),
+            "含“风险”且≤15字",
+            set(
+                any(&["风险"], &[]),
+                vec![C::MustContain("风险".into()), C::MaxChars(15)],
+            ),
+        ),
+        (
+            4,
+            2,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：以JSON对象输出项目乙的负责人和状态，恰好2个字段，不得输出JSON以外的文字。{UNIFIED}"
+            ),
+            "小周、已完成",
+            set(
+                groups(&[&["小周"], &["已完成"]], &[]),
+                vec![C::JsonObject, C::JsonFieldCount(2)],
+            ),
+        ),
+        (
+            4,
+            3,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：列出预算超过40万的项目，每行一个，回答中不得包含“甲”字。{UNIFIED}"
+            ),
+            "项目乙",
+            set(
+                groups(&[&["乙"]], &["甲"]),
+                vec![C::LineCount(1), C::MustNotContain("甲".into())],
+            ),
+        ),
+        (
+            4,
+            4,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：为项目汇报拟标题并给出结论，标题用[[]]包裹，整段回答不超过30字。{UNIFIED}"
+            ),
+            "含标题且≤30字",
+            set(
+                any(&["项目", "汇报"], &[]),
+                vec![C::WrappedTitle, C::MaxChars(30)],
+            ),
+        ),
+        (
+            4,
+            5,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：说明项目甲的情况，回答不得使用逗号，必须以句号结尾。{UNIFIED}"
+            ),
+            "提到项目甲事实",
+            set(
+                any(&["进行中", "小林", "华东", "30万"], &[]),
+                vec![C::NoChar('，'), C::EndsWith("。".into())],
+            ),
+        ),
+        (
+            4,
+            6,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：提示项目资金风险，回答不超过8字且必须包含“预算不足”。{UNIFIED}"
+            ),
+            "含“预算不足”且≤8字",
+            set(
+                any(&["预算不足"], &[]),
+                vec![C::MustContain("预算不足".into()), C::MaxChars(8)],
+            ),
+        ),
+        (
+            4,
+            7,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：以JSON对象输出项目甲信息，必须包含name、owner、budget三个字段，不得输出JSON以外的文字。{UNIFIED}"
+            ),
+            "字段值正确",
+            set(
+                groups(&[&["甲"], &["小林"], &["30万", "30"]], &[]),
+                vec![
+                    C::JsonObject,
+                    C::JsonRequiredFields(vec!["name".into(), "owner".into(), "budget".into()]),
+                ],
+            ),
+        ),
+        (
+            4,
+            8,
+            "multi-constraint",
+            format!(
+                "{FACTS_SC}任务：按预算从高到低列出两个项目，每行一个，回答中不得包含“约”字。{UNIFIED}"
+            ),
+            "乙在甲前",
+            set(
+                groups(&[&["乙"], &["甲"]], &[]),
+                vec![
+                    C::ExactOrder(vec!["乙".into(), "甲".into()]),
+                    C::LineCount(2),
+                    C::MustNotContain("约".into()),
+                ],
+            ),
+        ),
+        // ---- 子域 5：信息不足（8 题）----
+        (
+            5,
+            1,
+            "insufficient-information",
+            format!(
+                "材料：项目甲预算30万，状态进行中，负责人待任命。任务：项目甲的负责人是谁？{UNIFIED}"
+            ),
+            "未提供",
+            any(
+                &["待任命", "未提供", "未知", "未确定", "尚未确定", "无法确定"],
+                &[],
+            ),
+        ),
+        (
+            5,
+            2,
+            "insufficient-information",
+            format!(
+                "材料：记录一称验收人为王五，记录二称验收人为王六，两条记录均未标注日期。任务：验收人是谁？{UNIFIED}"
+            ),
+            "无法确定",
+            any(&["冲突", "无法确定", "不一致", "无法判断", "两种说法"], &[]),
+        ),
+        (
+            5,
+            3,
+            "insufficient-information",
+            format!(
+                "材料：项目甲的旧名称是北区项目，也曾被称为东区项目，未说明哪个是最新名称。任务：项目甲的最新名称是什么？{UNIFIED}"
+            ),
+            "无法判断",
+            any(&["无法判断", "未说明", "无法确定", "未知"], &[]),
+        ),
+        (
+            5,
+            4,
+            "insufficient-information",
+            format!(
+                "材料：项目总预算80万，分项预算未列出。任务：项目甲的分项预算是多少？{UNIFIED}"
+            ),
+            "未提供",
+            any(&["未列出", "未提供", "未说明", "未知"], &[]),
+        ),
+        (
+            5,
+            5,
+            "insufficient-information",
+            format!(
+                "材料：项目甲于2月立项，预计工期6个月。任务：项目甲的验收日期是哪天？{UNIFIED}"
+            ),
+            "未提供",
+            any(&["未提供", "未说明", "未知", "无法确定"], &[]),
+        ),
+        (
+            5,
+            6,
+            "insufficient-information",
+            format!("材料：产品A本月销量增长20%。任务：产品B本月销量增长多少？{UNIFIED}"),
+            "未提供",
+            any(&["未提供", "未说明", "未知", "无产品B", "没有产品B"], &[]),
+        ),
+        (
+            5,
+            7,
+            "insufficient-information",
+            format!(
+                "材料：华东的项目乙预算50万；华北的项目乙预算70万。任务：项目乙的预算是多少？{UNIFIED}"
+            ),
+            "需要澄清",
+            any(
+                &["两个", "哪个", "澄清", "歧义", "无法确定", "华东", "华北"],
+                &[],
+            ),
+        ),
+        (
+            5,
+            8,
+            "insufficient-information",
+            format!("材料：项目甲今年收入120万。任务：项目甲今年收入同比增长多少？{UNIFIED}"),
+            "无法计算",
+            any(
+                &[
+                    "无法计算",
+                    "缺少",
+                    "未提供",
+                    "没有去年",
+                    "无法确定",
+                    "无法判断",
+                ],
+                &[],
+            ),
+        ),
+    ];
+
+    defs.into_iter()
+        .map(
+            |(sub_index, sample_index, subdomain, prompt, expected, acceptance)| CapabilitySample {
+                id: format!("C01-{sub_index}-{sample_index:02}"),
+                category: CapabilityCategory::InstructionFollowing,
+                subdomain: subdomain.into(),
+                dataset_identity: DatasetIdentity::ProductOriginal,
+                source_ref: format!("agentcheck://capability/C01-{sub_index}-{sample_index:02}"),
+                language: CAPABILITY_LANGUAGE.into(),
+                prompt,
+                expected: expected.into(),
+                acceptance,
+                generation_settings: BTreeMap::from([
+                    (String::from("temperature"), String::from("0")),
+                    (String::from("language"), String::from(CAPABILITY_LANGUAGE)),
+                ]),
+                revision: CAPABILITY_VERSION.into(),
+                input_tokens: None,
+            },
+        )
+        .collect()
+}
+
 pub fn evaluate_response(
     sample: &CapabilitySample,
     response: CapabilityResponse,
@@ -301,116 +906,255 @@ pub fn evaluate_response(
             executed: false,
         },
         ExecutionState::Valid => {
-            let label = match &sample.acceptance {
-                AcceptanceRule::ExactAny { accepted } => response
-                    .text
-                    .as_deref()
-                    .map(|text| {
-                        if accepted
-                            .iter()
-                            .any(|value| normalize(text) == normalize(value))
-                        {
-                            ScoreLabel::Correct
-                        } else {
-                            ScoreLabel::Wrong
-                        }
-                    })
-                    .unwrap_or(ScoreLabel::Pending),
-                AcceptanceRule::ContainsAll {
-                    required,
-                    forbidden,
-                } => response
-                    .text
-                    .as_deref()
-                    .map(|text| {
-                        let normalized = normalize(text);
-                        if required
-                            .iter()
-                            .all(|value| normalized.contains(&normalize(value)))
-                            && forbidden
-                                .iter()
-                                .all(|value| !normalized.contains(&normalize(value)))
-                        {
-                            ScoreLabel::Correct
-                        } else {
-                            ScoreLabel::Wrong
-                        }
-                    })
-                    .unwrap_or(ScoreLabel::Pending),
-                AcceptanceRule::Numeric {
-                    expected,
-                    tolerance,
-                    unit,
-                } => response
-                    .text
-                    .as_deref()
-                    .and_then(first_number)
-                    .map(|value| {
-                        let unit_ok = unit.as_ref().is_none_or(|unit| {
-                            response
-                                .text
-                                .as_deref()
-                                .is_some_and(|text| normalize(text).contains(&normalize(unit)))
-                        });
-                        if (value - expected).abs() <= *tolerance && unit_ok {
-                            ScoreLabel::Correct
-                        } else {
-                            ScoreLabel::Wrong
-                        }
-                    })
-                    .unwrap_or(ScoreLabel::Pending),
-                AcceptanceRule::ToolDecision {
-                    allowed_tool_names,
-                    required_arguments,
-                    allow_no_call,
-                } => {
-                    if response.tool_calls.is_empty() {
-                        if *allow_no_call {
-                            ScoreLabel::Correct
-                        } else {
-                            ScoreLabel::Wrong
-                        }
-                    } else if response.tool_calls.iter().all(|call| {
-                        allowed_tool_names.iter().any(|name| name == &call.name)
-                            && required_arguments
-                                .iter()
-                                .all(|(key, value)| call.arguments.get(key) == Some(value))
-                    }) {
-                        ScoreLabel::Correct
-                    } else {
-                        ScoreLabel::Wrong
-                    }
-                }
-                AcceptanceRule::NoCall {
-                    accepted_explanations,
-                } => {
-                    if !response.tool_calls.is_empty() {
-                        ScoreLabel::Wrong
-                    } else if response.text.is_none() {
-                        ScoreLabel::Pending
-                    } else if accepted_explanations.is_empty()
-                        || response.text.as_deref().is_some_and(|text| {
-                            accepted_explanations
-                                .iter()
-                                .any(|value| normalize(text).contains(&normalize(value)))
-                        })
-                    {
-                        ScoreLabel::Correct
-                    } else {
-                        ScoreLabel::Wrong
-                    }
-                }
-                AcceptanceRule::Pending { .. } => ScoreLabel::Pending,
-            };
+            let (label, reason) = evaluate_acceptance(
+                &sample.acceptance,
+                response.text.as_deref(),
+                &response.tool_calls,
+            );
             CapabilityObservation {
                 sample_id: sample.id.clone(),
                 label,
                 output: response.text.map(|text| redact_output(&text)),
                 tool_calls: response.tool_calls,
-                reason: None,
+                reason,
                 evidence_refs,
                 executed: true,
             }
+        }
+    }
+}
+
+/// 统一判分入口：返回（标签, 原因）。ConstraintSet 递归复用内容规则。
+fn evaluate_acceptance(
+    rule: &AcceptanceRule,
+    text: Option<&str>,
+    tool_calls: &[ToolCall],
+) -> (ScoreLabel, Option<String>) {
+    match rule {
+        AcceptanceRule::ExactAny { accepted } => (
+            text.map(|text| {
+                if accepted
+                    .iter()
+                    .any(|value| normalize(text) == normalize(value))
+                {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
+            })
+            .unwrap_or(ScoreLabel::Pending),
+            None,
+        ),
+        AcceptanceRule::ContainsAll {
+            required,
+            forbidden,
+        } => (
+            text.map(|text| {
+                let normalized = normalize(text);
+                if required
+                    .iter()
+                    .all(|value| normalized.contains(&normalize(value)))
+                    && forbidden
+                        .iter()
+                        .all(|value| !normalized.contains(&normalize(value)))
+                {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
+            })
+            .unwrap_or(ScoreLabel::Pending),
+            None,
+        ),
+        AcceptanceRule::ContainsAny { any_of, forbidden } => (
+            text.map(|text| {
+                let normalized = normalize(text);
+                if any_of
+                    .iter()
+                    .any(|value| normalized.contains(&normalize(value)))
+                    && forbidden
+                        .iter()
+                        .all(|value| !normalized.contains(&normalize(value)))
+                {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
+            })
+            .unwrap_or(ScoreLabel::Pending),
+            None,
+        ),
+        AcceptanceRule::MatchGroups {
+            required_groups,
+            forbidden,
+        } => (
+            text.map(|text| {
+                let normalized = normalize(text);
+                if required_groups.iter().all(|group| {
+                    group
+                        .iter()
+                        .any(|alias| normalized.contains(&normalize(alias)))
+                }) && forbidden
+                    .iter()
+                    .all(|value| !normalized.contains(&normalize(value)))
+                {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
+            })
+            .unwrap_or(ScoreLabel::Pending),
+            None,
+        ),
+        AcceptanceRule::ConstraintSet {
+            content,
+            constraints,
+        } => {
+            let (content_label, content_reason) = evaluate_acceptance(content, text, tool_calls);
+            if content_label != ScoreLabel::Correct {
+                return (content_label, content_reason);
+            }
+            let text = text.unwrap_or("");
+            let failed: Vec<String> = constraints
+                .iter()
+                .filter(|constraint| !check_constraint(constraint, text))
+                .map(OutputConstraint::describe)
+                .collect();
+            if failed.is_empty() {
+                (ScoreLabel::Correct, None)
+            } else {
+                (
+                    ScoreLabel::Incomplete,
+                    Some(format!("内容正确但约束未满足：{}", failed.join("；"))),
+                )
+            }
+        }
+        AcceptanceRule::Numeric {
+            expected,
+            tolerance,
+            unit,
+        } => (
+            text.and_then(first_number)
+                .map(|value| {
+                    let unit_ok = unit.as_ref().is_none_or(|unit| {
+                        text.is_some_and(|text| normalize(text).contains(&normalize(unit)))
+                    });
+                    if (value - expected).abs() <= *tolerance && unit_ok {
+                        ScoreLabel::Correct
+                    } else {
+                        ScoreLabel::Wrong
+                    }
+                })
+                .unwrap_or(ScoreLabel::Pending),
+            None,
+        ),
+        AcceptanceRule::ToolDecision {
+            allowed_tool_names,
+            required_arguments,
+            allow_no_call,
+        } => (
+            if tool_calls.is_empty() {
+                if *allow_no_call {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
+            } else if tool_calls.iter().all(|call| {
+                allowed_tool_names.iter().any(|name| name == &call.name)
+                    && required_arguments
+                        .iter()
+                        .all(|(key, value)| call.arguments.get(key) == Some(value))
+            }) {
+                ScoreLabel::Correct
+            } else {
+                ScoreLabel::Wrong
+            },
+            None,
+        ),
+        AcceptanceRule::NoCall {
+            accepted_explanations,
+        } => (
+            if !tool_calls.is_empty() {
+                ScoreLabel::Wrong
+            } else if text.is_none() {
+                ScoreLabel::Pending
+            } else if accepted_explanations.is_empty()
+                || text.is_some_and(|text| {
+                    accepted_explanations
+                        .iter()
+                        .any(|value| normalize(text).contains(&normalize(value)))
+                })
+            {
+                ScoreLabel::Correct
+            } else {
+                ScoreLabel::Wrong
+            },
+            None,
+        ),
+        AcceptanceRule::Pending { .. } => (ScoreLabel::Pending, None),
+    }
+}
+
+/// IFEval 式单条可验证约束的程序化校验。
+fn check_constraint(constraint: &OutputConstraint, text: &str) -> bool {
+    let normalized = normalize(text);
+    match constraint {
+        OutputConstraint::MaxChars(n) => normalized.chars().count() <= *n as usize,
+        OutputConstraint::MustContain(value) => normalized.contains(&normalize(value)),
+        OutputConstraint::MustNotContain(value) => !normalized.contains(&normalize(value)),
+        OutputConstraint::KeywordMinCount(value, n) => {
+            normalized.matches(&normalize(value)).count() >= *n as usize
+        }
+        OutputConstraint::JsonObject => serde_json::from_str::<Value>(text.trim())
+            .map(|value| value.is_object())
+            .unwrap_or(false),
+        OutputConstraint::JsonFieldCount(n) => serde_json::from_str::<Value>(text.trim())
+            .ok()
+            .and_then(|value| value.as_object().map(|object| object.len() == *n as usize))
+            .unwrap_or(false),
+        OutputConstraint::JsonRequiredFields(fields) => serde_json::from_str::<Value>(text.trim())
+            .ok()
+            .and_then(|value| {
+                value
+                    .as_object()
+                    .map(|object| fields.iter().all(|field| object.contains_key(field)))
+            })
+            .unwrap_or(false),
+        OutputConstraint::LineCount(n) => {
+            text.lines().filter(|line| !line.trim().is_empty()).count() == *n as usize
+        }
+        OutputConstraint::ParagraphCount(n) => {
+            text.replace("\r\n", "\n")
+                .split("\n\n")
+                .filter(|part| !part.trim().is_empty())
+                .count()
+                == *n as usize
+        }
+        OutputConstraint::WrappedTitle => text.find("[[").is_some_and(|start| {
+            text[start + 2..]
+                .find("]]")
+                .is_some_and(|end| !text[start + 2..start + 2 + end].trim().is_empty())
+        }),
+        OutputConstraint::StartsWith(prefix) => text.trim_start().starts_with(prefix.as_str()),
+        OutputConstraint::EndsWith(suffix) => text.trim_end().ends_with(suffix.as_str()),
+        OutputConstraint::NoChar(c) => !text.contains(*c),
+        OutputConstraint::QuotedOutput => {
+            const PAIRS: [(&str, &str); 4] = [("「", "」"), ("“", "”"), ("\"", "\""), ("'", "'")];
+            let trimmed = text.trim();
+            PAIRS.iter().any(|(open, close)| {
+                trimmed.starts_with(open) && trimmed.ends_with(close) && trimmed.len() > open.len()
+            })
+        }
+        OutputConstraint::ExactOrder(items) => {
+            let mut cursor = 0usize;
+            items.iter().all(|item| {
+                normalized[cursor..]
+                    .find(&normalize(item))
+                    .map(|position| {
+                        cursor += position + normalize(item).len();
+                    })
+                    .is_some()
+            })
         }
     }
 }
@@ -511,9 +1255,9 @@ pub fn scorecard_json(scorecard: &CapabilityScorecard) -> Result<String, serde_j
 }
 
 fn validate_catalog(samples: &[CapabilitySample]) -> Result<(), String> {
-    if samples.len() != 120 {
+    if samples.len() != 144 {
         return Err(format!(
-            "Capability catalog must contain 120 units, got {}",
+            "Capability catalog must contain 144 units, got {}",
             samples.len()
         ));
     }
@@ -533,13 +1277,17 @@ fn validate_catalog(samples: &[CapabilitySample]) -> Result<(), String> {
         return Err("Capability catalog contains duplicate sample IDs".into());
     }
     for category in CapabilityCategory::ALL {
+        let expected = match category {
+            CapabilityCategory::InstructionFollowing => 44,
+            _ => 20,
+        };
         let count = samples
             .iter()
             .filter(|sample| sample.category == category)
             .count();
-        if count != 20 {
+        if count != expected {
             return Err(format!(
-                "{} must contain 20 logical units, got {count}",
+                "{} must contain {expected} logical units, got {count}",
                 category.id()
             ));
         }
@@ -614,25 +1362,9 @@ fn sample_definition(
         _ => ("丁", "项目丁"),
     };
     match category {
-        CapabilityCategory::InstructionFollowing => match subdomain {
-            "material-facts" => (
-                format!("材料：{}的负责人是小林。任务：只回答负责人姓名。", item.1),
-                "小林".into(),
-            ),
-            "condition-filtering" => (
-                format!("材料：{}状态为已完成；{}状态为进行中。任务：只回答已完成项目。", item.1, if item.0 == "甲" { "项目乙" } else { "项目甲" }),
-                item.1.into(),
-            ),
-            "single-constraint" => (
-                format!("材料：{}预算为{}元。任务：只回答预算数字。", item.1, 10 + sample_index * 5),
-                (10 + sample_index * 5).to_string(),
-            ),
-            "multi-constraint" => (
-                format!("材料：{}属于华东地区且状态为开放；其他项目不满足两个条件。任务：只回答同时满足条件的项目。", item.1),
-                item.1.into(),
-            ),
-            _ => ("材料：记录中没有提供负责人信息。任务：只回答负责人。".into(), "未提供".into()),
-        },
+        CapabilityCategory::InstructionFollowing => {
+            unreachable!("C01 catalog is served by c01_bank()")
+        }
         CapabilityCategory::InformationExtraction => match subdomain {
             "single-object-fields" => (
                 format!("材料：{}，类型为服务，数量为{}。任务：只回答数量。", item.1, 10 + sample_index),
@@ -744,16 +1476,20 @@ mod tests {
     }
 
     #[test]
-    fn freezes_six_categories_and_120_chinese_units() {
+    fn freezes_six_categories_and_144_chinese_units() {
         let catalog = fixed_capability_catalog();
-        assert_eq!(catalog.len(), 120);
+        assert_eq!(catalog.len(), 144);
         for category in CapabilityCategory::ALL {
+            let expected = match category {
+                CapabilityCategory::InstructionFollowing => 44,
+                _ => 20,
+            };
             assert_eq!(
                 catalog
                     .iter()
                     .filter(|sample| sample.category == category)
                     .count(),
-                20
+                expected
             );
         }
         assert!(
@@ -936,14 +1672,14 @@ mod tests {
         )
         .unwrap();
         let summary = &scorecard.summaries[0];
-        assert_eq!(summary.planned, 20);
+        assert_eq!(summary.planned, 44);
         assert_eq!(
             summary.correct
                 + summary.wrong
                 + summary.pending
                 + summary.incomplete
                 + summary.missing,
-            20
+            44
         );
         assert_eq!(summary.valid_scored, summary.correct + summary.wrong);
         assert!(
@@ -1026,5 +1762,193 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn judged(acceptance: AcceptanceRule, text: Option<&str>) -> CapabilityObservation {
+        let sample = CapabilitySample {
+            id: "c01-test".into(),
+            category: CapabilityCategory::InstructionFollowing,
+            subdomain: "single-constraint".into(),
+            dataset_identity: DatasetIdentity::ProductOriginal,
+            source_ref: "test".into(),
+            language: CAPABILITY_LANGUAGE.into(),
+            prompt: "回答".into(),
+            expected: "进行中".into(),
+            acceptance,
+            generation_settings: BTreeMap::new(),
+            revision: CAPABILITY_VERSION.into(),
+            input_tokens: None,
+        };
+        evaluate_response(
+            &sample,
+            CapabilityResponse {
+                execution: ExecutionState::Valid,
+                text: text.map(str::to_string),
+                tool_calls: Vec::new(),
+                evidence_refs: vec!["evidence://c01-test".into()],
+            },
+        )
+    }
+
+    #[test]
+    fn contains_any_accepts_aliases_and_rejects_forbidden_values() {
+        let rule = AcceptanceRule::ContainsAny {
+            any_of: vec!["未提供".into(), "未知".into()],
+            forbidden: vec!["王五".into()],
+        };
+        assert_eq!(
+            judged(rule.clone(), Some("材料中未提供该信息")).label,
+            ScoreLabel::Correct
+        );
+        assert_eq!(judged(rule.clone(), Some("王五")).label, ScoreLabel::Wrong);
+        assert_eq!(judged(rule, None).label, ScoreLabel::Pending);
+    }
+
+    #[test]
+    fn match_groups_requires_every_group_and_blocks_forbidden() {
+        let rule = AcceptanceRule::MatchGroups {
+            required_groups: vec![vec!["项目乙".into(), "乙".into()], vec!["项目丁".into()]],
+            forbidden: vec!["甲".into()],
+        };
+        assert_eq!(
+            judged(rule.clone(), Some("项目乙、项目丁")).label,
+            ScoreLabel::Correct
+        );
+        assert_eq!(
+            judged(rule.clone(), Some("项目乙")).label,
+            ScoreLabel::Wrong
+        );
+        assert_eq!(
+            judged(rule, Some("项目甲、项目乙、项目丁")).label,
+            ScoreLabel::Wrong
+        );
+    }
+
+    #[test]
+    fn constraint_set_marks_content_right_constraint_missing_as_incomplete() {
+        let rule = AcceptanceRule::ConstraintSet {
+            content: Box::new(AcceptanceRule::ContainsAny {
+                any_of: vec!["进行中".into()],
+                forbidden: vec![],
+            }),
+            constraints: vec![OutputConstraint::MaxChars(10)],
+        };
+        let pass = judged(rule.clone(), Some("进行中"));
+        assert_eq!(pass.label, ScoreLabel::Correct);
+        let incomplete = judged(rule.clone(), Some("项目甲目前状态为进行中"));
+        assert_eq!(incomplete.label, ScoreLabel::Incomplete);
+        assert!(
+            incomplete
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("不超过10字"))
+        );
+        assert_eq!(judged(rule, Some("已完成")).label, ScoreLabel::Wrong);
+    }
+
+    #[test]
+    fn output_constraints_cover_each_verifiable_check() {
+        let cases: Vec<(OutputConstraint, &str, bool)> = vec![
+            (OutputConstraint::MaxChars(5), "进行中", true),
+            (OutputConstraint::MaxChars(2), "进行中", false),
+            (
+                OutputConstraint::MustContain("风险".into()),
+                "存在风险",
+                true,
+            ),
+            (
+                OutputConstraint::MustNotContain("预算".into()),
+                "含预算",
+                false,
+            ),
+            (
+                OutputConstraint::KeywordMinCount("安全".into(), 2),
+                "安全第一安全第二",
+                true,
+            ),
+            (OutputConstraint::JsonObject, "{\"owner\":\"小林\"}", true),
+            (OutputConstraint::JsonObject, "结果：{}", false),
+            (
+                OutputConstraint::JsonFieldCount(2),
+                "{\"a\":1,\"b\":2}",
+                true,
+            ),
+            (
+                OutputConstraint::JsonRequiredFields(vec!["name".into(), "owner".into()]),
+                "{\"name\":\"甲\",\"owner\":\"小林\"}",
+                true,
+            ),
+            (
+                OutputConstraint::JsonRequiredFields(vec!["name".into(), "owner".into()]),
+                "{\"name\":\"甲\"}",
+                false,
+            ),
+            (OutputConstraint::LineCount(2), "甲\n乙", true),
+            (OutputConstraint::LineCount(2), "甲\n乙\n丙", false),
+            (
+                OutputConstraint::ParagraphCount(2),
+                "第一段\n\n第二段",
+                true,
+            ),
+            (OutputConstraint::WrappedTitle, "[[项目汇报]]", true),
+            (OutputConstraint::WrappedTitle, "项目汇报", false),
+            (
+                OutputConstraint::StartsWith("结论：".into()),
+                "结论：小林",
+                true,
+            ),
+            (OutputConstraint::EndsWith("完毕".into()), "验收完毕", true),
+            (OutputConstraint::NoChar('，'), "甲，乙", false),
+            (OutputConstraint::QuotedOutput, "「小林」", true),
+            (OutputConstraint::QuotedOutput, "小林", false),
+            (
+                OutputConstraint::ExactOrder(vec!["丙".into(), "甲".into()]),
+                "项目丙、项目甲",
+                true,
+            ),
+            (
+                OutputConstraint::ExactOrder(vec!["丙".into(), "甲".into()]),
+                "项目甲、项目丙",
+                false,
+            ),
+        ];
+        for (constraint, text, expected) in cases {
+            assert_eq!(
+                check_constraint(&constraint, text),
+                expected,
+                "{constraint:?} on {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn c01_bank_covers_five_subdomains_with_real_acceptance_rules() {
+        let catalog = fixed_capability_catalog();
+        let c01: Vec<_> = catalog
+            .iter()
+            .filter(|sample| sample.category == CapabilityCategory::InstructionFollowing)
+            .collect();
+        assert_eq!(c01.len(), 44);
+        for (index, expected_count) in [8, 8, 12, 8, 8].iter().enumerate() {
+            let prefix = format!("C01-{}-", index + 1);
+            assert_eq!(
+                c01.iter()
+                    .filter(|sample| sample.id.starts_with(&prefix))
+                    .count(),
+                *expected_count,
+                "subdomain {prefix}"
+            );
+        }
+        assert!(c01.iter().all(|sample| matches!(
+            sample.acceptance,
+            AcceptanceRule::ContainsAny { .. }
+                | AcceptanceRule::MatchGroups { .. }
+                | AcceptanceRule::ConstraintSet { .. }
+        )));
+        let constrained = c01
+            .iter()
+            .filter(|sample| matches!(sample.acceptance, AcceptanceRule::ConstraintSet { .. }))
+            .count();
+        assert_eq!(constrained, 22);
     }
 }
