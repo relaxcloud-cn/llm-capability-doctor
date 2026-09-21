@@ -61,6 +61,15 @@ pub enum OutputFormat {
     Json,
 }
 
+/// 报告生成模式：custom 只把检测结论填进模板，不调用 AI 或 OhMyPi；
+/// dynamic 额外用 OhMyPi+模型对模块证据做语义分析后填进同一模板。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ValueEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportMode {
+    Custom,
+    Dynamic,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CliConfiguration {
     pub redacted_endpoint: String,
@@ -2630,7 +2639,10 @@ pub struct ProgressItemStats {
 
 /// 从各模块执行结果里提取"未通过小项数 / 小项总数"；提取不到时返回 None，
 /// 显示端退回只显示状态标签。
-fn module_item_stats(module_id: &str, payload: &serde_json::Value) -> Option<ProgressItemStats> {
+pub(crate) fn module_item_stats(
+    module_id: &str,
+    payload: &serde_json::Value,
+) -> Option<ProgressItemStats> {
     let stats =
         |failed: usize, total: usize| (total > 0).then(|| ProgressItemStats { failed, total });
     match module_id {
@@ -3177,13 +3189,7 @@ pub fn render_text(report: &CliRunReport) -> String {
             .reason
             .as_deref()
             .map_or(String::new(), |reason| format!("  {reason}"));
-        format!(
-            "  {}  {}  {}{}",
-            pad_display(state, state_width),
-            name,
-            result.module_id,
-            reason
-        )
+        format!("  {}  {}{}", pad_display(state, state_width), name, reason)
     }));
     lines.join("\n")
 }

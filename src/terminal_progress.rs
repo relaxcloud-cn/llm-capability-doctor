@@ -325,7 +325,7 @@ impl Inner {
             ModuleStatus::Waiting => {
                 let marker = self.paint("2", "○");
                 let state = self.paint("2", "等待中");
-                format!("{marker} {name} {}  {state}", module.id)
+                format!("{marker} {name}  {state}")
             }
             ModuleStatus::Running => {
                 let spin = SPINNER[self.spin_frame % SPINNER.len()];
@@ -336,7 +336,7 @@ impl Inner {
                     String::new()
                 };
                 let state = self.paint("33", &format!("进行中{counts}"));
-                format!("{marker} {name} {}  {state}", module.id)
+                format!("{marker} {name}  {state}")
             }
             ModuleStatus::Done { state, stats, .. } => {
                 let (marker, styled) = match state.as_str() {
@@ -357,7 +357,7 @@ impl Inner {
                     .elapsed
                     .map(|elapsed| format!(" {}", self.paint("2", &format_duration(elapsed))))
                     .unwrap_or_default();
-                format!("{marker} {name} {}  {styled}{elapsed}", module.id)
+                format!("{marker} {name}  {styled}{elapsed}")
             }
         }
     }
