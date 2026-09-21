@@ -105,6 +105,11 @@ impl ChatCompletionsTransport {
         })
     }
 
+    /// 返回当前检测目标（endpoint, model, api_key），供内置 OMP 运行时复用。
+    pub(crate) fn target(&self) -> (&str, &str, &str) {
+        (&self.endpoint, &self.model, &self.api_key)
+    }
+
     pub fn send(&self, request: ChatCompletionsRequest) -> ChatCompletionsResponse {
         let messages = request
             .messages

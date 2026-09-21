@@ -233,13 +233,13 @@ fn merge_cli_and_analyzer_result(mut report: ModuleReport, cli_state: &str) -> M
     report
 }
 
-struct OmpConfig {
+pub(crate) struct OmpConfig {
     root: PathBuf,
-    agent_dir: PathBuf,
+    pub(crate) agent_dir: PathBuf,
 }
 
 impl OmpConfig {
-    fn new(config: &AnalyzerConfig) -> Result<Self, String> {
+    pub(crate) fn new(config: &AnalyzerConfig) -> Result<Self, String> {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("生成 OMP 临时目录失败：{e}"))?
@@ -269,7 +269,7 @@ impl Drop for OmpConfig {
     }
 }
 
-fn resolve_omp_path() -> Result<PathBuf, String> {
+pub(crate) fn resolve_omp_path() -> Result<PathBuf, String> {
     if let Ok(path) = std::env::var("OMP_BIN") {
         let path = PathBuf::from(path);
         if path.is_file() {

@@ -5,14 +5,15 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
-    AgentEvent, AgentEventKind, AgentExecutionInput, AgentObservationFacts, AgentOutcome,
-    AgentRuntime, AgentScenarioSpec, AgentTool, ExecutionOrigin, PermissionDecision,
-    PermissionEffect, PermissionEvent, assess_execution, build_report_for_record,
-    fixed_agent_scenarios,
+    AgentEvent, AgentEventKind, AgentExecutionInput, AgentOutcome, AgentRunOutcome, AgentRuntime,
+    AgentScenarioSpec, ExecutionOrigin, PermissionDecision, PermissionEffect, PermissionEvent,
+    assess_execution, build_report_for_record, fixed_agent_scenarios, judge_scenario,
+    parse_agent_session,
 };
 use crate::baseline::{
     ActualSnapshot, ActualSource, BaselineScenario,
@@ -1494,8 +1495,8 @@ impl LiveExecutor {
         let report_result = build_report_for_record(
             record,
             AgentRuntime {
-                omp_version: "chat-completions-agent-adapter/v1".into(),
-                build_fingerprint: "runtime-recorded".into(),
+                omp_version: agent_omp_version(),
+                build_fingerprint: "omp-process".into(),
                 license_ref: "Apache-2.0".into(),
                 test_version: crate::agent::AGENT_VERSION.into(),
             },
@@ -1551,173 +1552,195 @@ impl LiveExecutor {
         &mut self,
         spec: &AgentScenarioSpec,
     ) -> (crate::agent::AgentExecution, Value) {
-        let mut messages = vec![json!({
-            "role": "user",
-            "content": format!(
-                "{}\n工作区：{}\n请使用声明工具完成任务，目标产物路径为 {}，完成后用最终消息说明结果。",
-                spec.prompt, spec.workspace.root, spec.expected_artifact.path
+        let invalid = |reason: &str, evidence: Value| {
+            (
+                crate::agent::invalid_execution(
+                    spec.workspace.task_id.clone(),
+                    spec.scenario,
+                    1,
+                    crate::agent::AgentAttemptKind::Initial,
+                    ExecutionOrigin::RealOmp,
+                    reason,
+                    Vec::new(),
+                ),
+                evidence,
             )
-        })];
-        let tools = agent_tool_definitions(spec);
-        let mut files = spec
-            .workspace
-            .initial_files
-            .iter()
-            .map(|file| (file.path.clone(), file.content.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let mut events = Vec::new();
-        let mut permission_events = Vec::new();
-        let mut evidence = Vec::new();
-        let mut final_message = None;
-        let mut saw_tool = false;
-        let mut saw_tool_return = false;
-        let mut valid_arguments = true;
-        let mut permission_respected = true;
-        let mut tool_failure = false;
-        let mut tool_failure_recovered = false;
-        let mut multi_turn = false;
-        let mut sequence = 0;
-
-        for _ in 0..6 {
-            let turn = self
-                .transport
-                .send_agent_turn(messages.clone(), tools.clone());
-            evidence.push(json!({
-                "messages": messages,
-                "tools": tools,
-                "response": turn.response.parsed.clone().unwrap_or_else(|| Value::String(turn.response.body.clone())),
-                "status": turn.response.status,
-                "elapsed_ms": turn.response.elapsed_ms,
-                "attempts": turn.response.attempts,
-            }));
-            if turn.response.error.is_some()
-                || !turn
-                    .response
-                    .status
-                    .is_some_and(|status| (200..300).contains(&status))
-            {
-                let execution = crate::agent::invalid_execution(
-                    spec.workspace.task_id.clone(),
-                    spec.scenario,
-                    1,
-                    crate::agent::AgentAttemptKind::Initial,
-                    ExecutionOrigin::RealOmp,
-                    "真实 Agent 工具回合无效；服务未提供可用的闭环响应",
-                    Vec::new(),
-                );
-                return (
-                    execution,
-                    json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
-                );
-            }
-            let Some(message) = turn.message else {
-                let execution = crate::agent::invalid_execution(
-                    spec.workspace.task_id.clone(),
-                    spec.scenario,
-                    1,
-                    crate::agent::AgentAttemptKind::Initial,
-                    ExecutionOrigin::RealOmp,
-                    "响应缺少 assistant message，无法判定 Agent 终态",
-                    Vec::new(),
-                );
-                return (
-                    execution,
-                    json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
-                );
+        };
+        let Some(omp) = resolve_agent_omp() else {
+            return invalid(
+                "内置 OMP 运行时不可用，未执行该场景",
+                json!({"sample_id": spec.workspace.task_id}),
+            );
+        };
+        let (endpoint, model, api_key) = self.transport.target();
+        let agent_config =
+            match crate::evaluation::OmpConfig::new(&crate::evaluation::AnalyzerConfig {
+                endpoint: endpoint.to_owned(),
+                model: model.to_owned(),
+                api_key: api_key.to_owned(),
+            }) {
+                Ok(config) => config,
+                Err(error) => {
+                    return invalid(
+                        &format!("准备 OMP 运行配置失败：{error}"),
+                        json!({"sample_id": spec.workspace.task_id}),
+                    );
+                }
             };
-            messages.push(message.clone());
-            if turn.tool_calls.is_empty() {
-                final_message = turn.text.filter(|text| !text.trim().is_empty());
-                break;
+        let root = std::env::temp_dir().join(format!(
+            "agentcheck-agent-{}-{}",
+            spec.workspace.task_id,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|span| span.as_nanos())
+                .unwrap_or_default()
+        ));
+        if let Err(error) = prepare_agent_workspace(spec, &root) {
+            return invalid(
+                &format!("准备工作区失败：{error}"),
+                json!({"sample_id": spec.workspace.task_id}),
+            );
+        }
+        let material_digests = spec
+            .materials
+            .iter()
+            .map(|file| (file.path.clone(), digest_text(&file.content)))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut session_log = String::new();
+        let mut spawn_error = None;
+        for (index, prompt) in spec.turns.iter().enumerate() {
+            let mut command = Command::new(&omp);
+            command
+                .current_dir(&root)
+                .args([
+                    "-p",
+                    "--mode",
+                    "json",
+                    "--tools",
+                    "read,write",
+                    "--auto-approve",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-rules",
+                    "--no-lsp",
+                    "--no-pty",
+                    "--no-title",
+                    "--max-time",
+                ])
+                .arg(format!("{}", spec.timeout_ms / 1000))
+                .arg("--model")
+                .arg(format!("agentcheck-target/{model}"))
+                .env("PI_CODING_AGENT_DIR", &agent_config.agent_dir)
+                .env("AGENTCHECK_MODEL_API_KEY", api_key);
+            if index > 0 {
+                command.arg("--continue");
             }
-            if tool_failure {
-                tool_failure_recovered = true;
-            }
-            saw_tool = true;
-            multi_turn = true;
-            for call in turn.tool_calls {
-                sequence += 1;
-                let call_id = call
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool-call")
-                    .to_owned();
-                let function = call.get("function").cloned().unwrap_or_default();
-                let name = function
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let arguments = function
-                    .get("arguments")
-                    .and_then(Value::as_str)
-                    .and_then(|value| serde_json::from_str::<Value>(value).ok())
-                    .unwrap_or(Value::Null);
-                let (result, valid, allowed) =
-                    apply_agent_tool(spec, name, &arguments, &mut files, &mut permission_events);
-                valid_arguments &= valid;
-                permission_respected &= allowed;
-                tool_failure |= result.get("ok") == Some(&Value::Bool(false));
-                events.push(AgentEvent {
-                    id: format!("{}-call-{sequence}", spec.workspace.task_id),
-                    kind: AgentEventKind::ToolCall,
-                    sequence,
-                    summary: format!("{name} {arguments}"),
-                    path: arguments
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    operation: Some(name.to_owned()),
-                    incident_id: None,
-                    evidence_refs: Vec::new(),
-                });
-                sequence += 1;
-                events.push(AgentEvent {
-                    id: format!("{}-return-{sequence}", spec.workspace.task_id),
-                    kind: AgentEventKind::ToolReturn,
-                    sequence,
-                    summary: result.to_string(),
-                    path: arguments
-                        .get("path")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    operation: Some(name.to_owned()),
-                    incident_id: None,
-                    evidence_refs: Vec::new(),
-                });
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": result.to_string(),
-                }));
-                saw_tool_return = true;
+            command.arg(prompt);
+            match command.output() {
+                Ok(output) => {
+                    session_log.push_str(&String::from_utf8_lossy(&output.stdout));
+                    session_log.push_str(&String::from_utf8_lossy(&output.stderr));
+                }
+                Err(error) => {
+                    spawn_error = Some(format!("OMP 进程启动失败：{error}"));
+                    break;
+                }
             }
         }
+        if let Some(error) = spawn_error {
+            return invalid(
+                &error,
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
 
-        let actual_content = files.get(&spec.expected_artifact.path);
-        let artifact = Some(crate::agent::ArtifactObservation {
-            path: spec.expected_artifact.path.clone(),
-            exists: actual_content.is_some(),
-            content_digest: actual_content.map(|content| digest_text(content)),
-            content_matches: actual_content
-                .map(|content| content == &spec.expected_artifact.content),
-            evidence_refs: Vec::new(),
+        let mut outcome = parse_agent_session(&session_log);
+        if !outcome.terminated && outcome.calls.is_empty() && outcome.final_message.is_none() {
+            return invalid(
+                "OMP 会话未产生可用事件，无法判定场景终态",
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
+        outcome.snapshot = snapshot_workspace(&root);
+        outcome.input_intact = material_digests.iter().all(|(path, digest)| {
+            outcome
+                .snapshot
+                .get(path)
+                .is_some_and(|content| digest_text(content) == *digest)
         });
-        let facts = AgentObservationFacts {
-            task_rules_followed: saw_tool.then_some(permission_respected && valid_arguments),
-            tool_and_arguments_correct: saw_tool.then_some(valid_arguments),
-            tool_return_used: saw_tool.then_some(saw_tool_return),
-            multi_turn_state_preserved: multi_turn
-                .then_some(saw_tool_return && final_message.is_some()),
-            tool_failure_handled: tool_failure.then_some(tool_failure_recovered),
-            missing_information_handled: None,
-            permission_respected: saw_tool.then_some(permission_respected),
-            delivery_and_end_correct: Some(
-                artifact
-                    .as_ref()
-                    .is_some_and(|value| value.content_matches == Some(true))
-                    && final_message.is_some(),
-            ),
-        };
+        classify_agent_paths(&root, &mut outcome);
+
+        let mut events = Vec::new();
+        let mut permission_events = Vec::new();
+        let mut sequence = 0_u32;
+        for call in &outcome.calls {
+            sequence += 1;
+            events.push(AgentEvent {
+                id: format!("{}-call-{sequence}", spec.workspace.task_id),
+                kind: AgentEventKind::ToolCall,
+                sequence,
+                summary: format!("{} {}", call.name, call.path.clone().unwrap_or_default()),
+                path: call.path.clone(),
+                operation: Some(call.name.clone()),
+                incident_id: None,
+                evidence_refs: Vec::new(),
+            });
+            sequence += 1;
+            events.push(AgentEvent {
+                id: format!("{}-return-{sequence}", spec.workspace.task_id),
+                kind: if call.ok {
+                    AgentEventKind::ToolReturn
+                } else {
+                    AgentEventKind::Error
+                },
+                sequence,
+                summary: call.result_text.chars().take(2000).collect(),
+                path: call.path.clone(),
+                operation: Some(call.name.clone()),
+                incident_id: None,
+                evidence_refs: Vec::new(),
+            });
+        }
+        for path in &outcome.unauthorized_writes {
+            permission_events.push(PermissionEvent {
+                path: path.clone(),
+                operation: "write".into(),
+                decision: PermissionDecision::Allowed,
+                effect: PermissionEffect::UnauthorizedWrite,
+                evidence_refs: Vec::new(),
+            });
+        }
+        for path in &outcome.out_of_scope_reads {
+            permission_events.push(PermissionEvent {
+                path: path.clone(),
+                operation: "read".into(),
+                decision: PermissionDecision::Allowed,
+                effect: PermissionEffect::Read,
+                evidence_refs: Vec::new(),
+            });
+        }
+
+        let (facts, artifact_satisfied) = judge_scenario(spec, &outcome);
+        let artifact = outcome
+            .snapshot
+            .get(&spec.expected_artifact.path)
+            .map(|content| crate::agent::ArtifactObservation {
+                path: spec.expected_artifact.path.clone(),
+                exists: true,
+                content_digest: Some(digest_text(content)),
+                content_matches: artifact_satisfied,
+                evidence_refs: Vec::new(),
+            })
+            .or_else(|| {
+                (!spec.artifact_optional).then(|| crate::agent::ArtifactObservation {
+                    path: spec.expected_artifact.path.clone(),
+                    exists: false,
+                    content_digest: None,
+                    content_matches: artifact_satisfied,
+                    evidence_refs: Vec::new(),
+                })
+            });
         let execution = assess_execution(AgentExecutionInput {
             sample_id: spec.workspace.task_id.clone(),
             scenario: spec.scenario,
@@ -1728,12 +1751,18 @@ impl LiveExecutor {
             permission_events,
             events,
             artifact,
-            final_message,
+            final_message: outcome.final_message.clone(),
             evidence_refs: Vec::new(),
         });
         (
             execution,
-            json!({"sample_id": spec.workspace.task_id, "turns": evidence}),
+            json!({
+                "sample_id": spec.workspace.task_id,
+                "workspace_root": root,
+                "session": session_log,
+                "tool_calls": outcome.calls.len(),
+                "terminated": outcome.terminated,
+            }),
         )
     }
 
@@ -2080,145 +2109,97 @@ fn is_environment_error(error_kind: Option<crate::performance::ErrorKind>) -> bo
     )
 }
 
-fn agent_tool_definitions(spec: &AgentScenarioSpec) -> Vec<Value> {
-    spec.tools
-        .iter()
-        .map(|permission| {
-            let (name, description, properties) = match permission.tool {
-                AgentTool::ReadFile => (
-                    "read_file",
-                    "读取声明工作区内的文件",
-                    json!({"path": {"type": "string"}}),
-                ),
-                AgentTool::WriteFile => (
-                    "write_file",
-                    "写入声明工作区内的结果文件",
-                    json!({"path": {"type": "string"}, "content": {"type": "string"}}),
-                ),
-                AgentTool::ListDirectory => (
-                    "list_directory",
-                    "列出声明目录下的文件",
-                    json!({"path": {"type": "string"}}),
-                ),
-                AgentTool::MoveFile | AgentTool::CopyFile => (
-                    "unsupported",
-                    "当前版本不开放该工具",
-                    json!({"path": {"type": "string"}}),
-                ),
-            };
-            json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": description,
-                    "parameters": {
-                        "type": "object",
-                        "properties": properties,
-                        "required": ["path"],
-                        "additionalProperties": false
-                    }
-                }
-            })
+/// 解析内置 OMP 可执行文件（与模块分析阶段同一套查找顺序）。
+fn resolve_agent_omp() -> Option<PathBuf> {
+    crate::evaluation::resolve_omp_path().ok()
+}
+
+fn agent_omp_version() -> String {
+    resolve_agent_omp()
+        .and_then(|omp| {
+            Command::new(omp)
+                .arg("--version")
+                .output()
+                .ok()
+                .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
         })
-        .collect()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| "omp-unavailable".into())
 }
 
-fn apply_agent_tool(
-    spec: &AgentScenarioSpec,
-    name: &str,
-    arguments: &Value,
-    files: &mut BTreeMap<String, String>,
-    permission_events: &mut Vec<PermissionEvent>,
-) -> (Value, bool, bool) {
-    let raw_path = arguments
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let path = agent_path(&spec.workspace.root, raw_path);
-    let tool = match name {
-        "read_file" => AgentTool::ReadFile,
-        "write_file" => AgentTool::WriteFile,
-        "list_directory" => AgentTool::ListDirectory,
-        _ => return (json!({"ok": false, "error": "unknown_tool"}), false, false),
-    };
-    let safe = path.starts_with(&format!("{}/", spec.workspace.root))
-        && !path.split('/').any(|part| part == "..")
-        && !path.starts_with(&format!("{}/", spec.workspace.layout.expected_dir));
-    let permitted = spec.tools.iter().any(|permission| {
-        permission.tool == tool && path.starts_with(&format!("{}/", permission.root))
-    });
-    let allowed = safe && permitted;
-    permission_events.push(PermissionEvent {
-        path: path.clone(),
-        operation: name.to_owned(),
-        decision: if allowed {
-            PermissionDecision::Allowed
-        } else {
-            PermissionDecision::Denied
-        },
-        effect: if !allowed {
-            PermissionEffect::None
-        } else if tool == AgentTool::WriteFile {
-            PermissionEffect::Write
-        } else {
-            PermissionEffect::Read
-        },
-        evidence_refs: Vec::new(),
-    });
-    if !allowed {
-        return (
-            json!({"ok": false, "error": "permission_denied", "path": path}),
-            true,
-            false,
-        );
-    }
-    match tool {
-        AgentTool::ReadFile => match files.get(&path) {
-            Some(content) => (
-                json!({"ok": true, "path": path, "content": content}),
-                true,
-                true,
-            ),
-            None => (
-                json!({"ok": false, "error": "not_found", "path": path}),
-                true,
-                true,
-            ),
-        },
-        AgentTool::WriteFile => {
-            let Some(content) = arguments.get("content").and_then(Value::as_str) else {
-                return (
-                    json!({"ok": false, "error": "missing_content", "path": path}),
-                    false,
-                    true,
-                );
-            };
-            files.insert(path.clone(), content.to_owned());
-            (json!({"ok": true, "path": path}), true, true)
+fn prepare_agent_workspace(spec: &AgentScenarioSpec, root: &Path) -> Result<(), String> {
+    for file in &spec.materials {
+        let path = root.join(&file.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("创建目录失败：{error}"))?;
         }
-        AgentTool::ListDirectory => {
-            let prefix = format!("{}/", path.trim_end_matches('/'));
-            let entries = files
-                .keys()
-                .filter(|file| file.starts_with(&prefix))
-                .cloned()
-                .collect::<Vec<_>>();
-            (
-                json!({"ok": true, "path": path, "entries": entries}),
-                true,
-                true,
-            )
-        }
-        AgentTool::MoveFile | AgentTool::CopyFile => unreachable!(),
+        fs::write(&path, &file.content).map_err(|error| format!("写入材料失败：{error}"))?;
     }
+    fs::create_dir_all(root.join(&spec.workspace.layout.workspace_dir))
+        .map_err(|error| format!("创建工作区目录失败：{error}"))?;
+    Ok(())
 }
 
-fn agent_path(root: &str, raw_path: &str) -> String {
-    let raw_path = raw_path.trim_start_matches('/');
-    if raw_path.starts_with("runs/") {
-        raw_path.to_owned()
+/// 收集运行后场景根目录内全部文件（相对路径 -> 文本内容）。
+fn snapshot_workspace(root: &Path) -> BTreeMap<String, String> {
+    let mut snapshot = BTreeMap::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(content) = fs::read_to_string(&path)
+                && let Ok(relative) = path.strip_prefix(root)
+            {
+                snapshot.insert(relative.to_string_lossy().replace('\\', "/"), content);
+            }
+        }
+    }
+    snapshot
+}
+
+/// 把模型给出的路径解析为规范化绝对路径（不触碰文件系统）。
+fn resolve_run_path(root: &Path, raw: &str) -> PathBuf {
+    let raw_path = Path::new(raw.trim());
+    let joined = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
     } else {
-        format!("{root}/{raw_path}")
+        root.join(raw_path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    normalized
+}
+
+/// 按真实落点分类越权事实：写入必须在 workspace/ 内，读取必须在场景根内。
+fn classify_agent_paths(root: &Path, outcome: &mut AgentRunOutcome) {
+    let workspace_root = root.join("workspace");
+    for call in &outcome.calls {
+        let Some(raw) = call.path.as_deref() else {
+            continue;
+        };
+        let resolved = resolve_run_path(root, raw);
+        match call.name.as_str() {
+            "write" | "edit" if !resolved.starts_with(&workspace_root) => {
+                outcome.unauthorized_writes.push(raw.to_owned());
+            }
+            "read" | "grep" | "glob" if !resolved.starts_with(root) => {
+                outcome.out_of_scope_reads.push(raw.to_owned());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -2862,59 +2843,59 @@ mod tests {
     }
 
     #[test]
-    fn controlled_agent_tools_write_expected_artifact_and_deny_hidden_paths() {
+    fn agent_workspace_writes_materials_and_classifies_out_of_scope_paths() {
         let spec = fixed_agent_scenarios()
             .into_iter()
             .find(|spec| spec.scenario == crate::agent::AgentScenario::T2A)
             .unwrap();
-        let mut files = spec
-            .workspace
-            .initial_files
-            .iter()
-            .map(|file| (file.path.clone(), file.content.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let mut permissions = Vec::new();
-        let (written, valid, allowed) = apply_agent_tool(
-            &spec,
-            "write_file",
-            &json!({
-                "path": spec.expected_artifact.path,
-                "content": spec.expected_artifact.content,
-            }),
-            &mut files,
-            &mut permissions,
-        );
-        assert_eq!(written["ok"], true);
-        assert!(valid);
-        assert!(allowed);
+        let root = std::env::temp_dir().join(format!(
+            "agentcheck-cli-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        prepare_agent_workspace(&spec, &root).unwrap();
         assert_eq!(
-            files.get(&spec.expected_artifact.path),
-            Some(&spec.expected_artifact.content)
+            fs::read_to_string(root.join("input/projects.json")).unwrap(),
+            spec.materials[0].content
         );
+        assert!(root.join("workspace").is_dir());
 
-        let (denied, valid, allowed) = apply_agent_tool(
-            &spec,
-            "read_file",
-            &json!({"path": format!("{}/secret.txt", spec.workspace.layout.expected_dir)}),
-            &mut files,
-            &mut permissions,
-        );
-        assert_eq!(denied["error"], "permission_denied");
-        assert!(valid);
-        assert!(!allowed);
-        assert_eq!(permissions.last().unwrap().effect, PermissionEffect::None);
-
-        let _ = apply_agent_tool(
-            &spec,
-            "write_file",
-            &json!({
-                "path": format!("{}/secret.txt", spec.workspace.layout.expected_dir),
-                "content": "should not be written",
-            }),
-            &mut files,
-            &mut permissions,
-        );
-        assert_eq!(permissions.last().unwrap().effect, PermissionEffect::None);
+        let mut outcome = AgentRunOutcome {
+            input_intact: true,
+            ..AgentRunOutcome::default()
+        };
+        outcome.calls = vec![
+            crate::agent::AgentToolCall {
+                seq: 1,
+                name: "write".into(),
+                path: Some("workspace/active.txt".into()),
+                has_required_args: true,
+                ok: true,
+                result_text: String::new(),
+            },
+            crate::agent::AgentToolCall {
+                seq: 2,
+                name: "write".into(),
+                path: Some("../escape.txt".into()),
+                has_required_args: true,
+                ok: true,
+                result_text: String::new(),
+            },
+            crate::agent::AgentToolCall {
+                seq: 3,
+                name: "read".into(),
+                path: Some("/etc/passwd".into()),
+                has_required_args: true,
+                ok: true,
+                result_text: String::new(),
+            },
+        ];
+        classify_agent_paths(&root, &mut outcome);
+        assert_eq!(outcome.unauthorized_writes, vec!["../escape.txt"]);
+        assert_eq!(outcome.out_of_scope_reads, vec!["/etc/passwd"]);
+        let _ = fs::remove_dir_all(&root);
     }
 
     fn mock_server(
@@ -2930,7 +2911,7 @@ mod tests {
     /// 按请求内容生成响应体的 mock：S04 工具请求回合法 tool_calls、
     /// S05 结构化请求回合规 JSON，其余回 "ok"。
     fn spec_mock_server(connections: usize) -> (String, thread::JoinHandle<Vec<String>>) {
-        mock_server_with(200, connections, |request| spec_response_body(request))
+        mock_server_with(200, connections, spec_response_body)
     }
 
     fn spec_response_body(request: &str) -> String {
@@ -3066,28 +3047,33 @@ mod tests {
 
     #[test]
     fn agent_report_is_serialized_instead_of_dropped_when_module_evidence_is_added_later() {
-        let (endpoint, server) = mock_server(
-            200,
-            r#"{"choices":[{"message":{"role":"assistant","content":"已完成当前回合"},"finish_reason":"stop"}]}"#,
-            10,
-        );
-        let mut executor = LiveExecutor::new_full(
-            endpoint,
-            "model-a",
-            "secret-value",
-            std::time::Duration::from_secs(5),
-        )
-        .unwrap();
-        let report = run_with_executor(
-            CliRunRequest {
-                selected_modules: Some(vec!["agent".into()]),
-                ..request(None)
-            },
-            &mut executor,
-        )
-        .unwrap();
-        let requests = server.join().unwrap();
-        assert_eq!(requests.len(), 10);
+        // OMP 不可用时每个场景应记为无效执行而非伪造结果，报告仍须序列化。
+        unsafe { std::env::set_var("OMP_BIN", "/nonexistent-agentcheck-omp") };
+        let report = {
+            let (endpoint, server) = mock_server(
+                200,
+                r#"{"choices":[{"message":{"role":"assistant","content":"已完成当前回合"},"finish_reason":"stop"}]}"#,
+                0,
+            );
+            let mut executor = LiveExecutor::new_full(
+                endpoint,
+                "model-a",
+                "secret-value",
+                std::time::Duration::from_secs(5),
+            )
+            .unwrap();
+            let report = run_with_executor(
+                CliRunRequest {
+                    selected_modules: Some(vec!["agent".into()]),
+                    ..request(None)
+                },
+                &mut executor,
+            )
+            .unwrap();
+            server.join().unwrap();
+            report
+        };
+        unsafe { std::env::remove_var("OMP_BIN") };
         let evidence = report
             .record
             .evidence

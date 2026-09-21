@@ -38,7 +38,7 @@ pub fn tier_tokens(sample_id: &str) -> Option<u64> {
         Some(digits) => (digits, 1_000),
         None => (rest, 1),
     };
-    Some(digits.parse::<u64>().ok()?.checked_mul(multiplier)?)
+    digits.parse::<u64>().ok()?.checked_mul(multiplier)
 }
 
 /// 校准请求：已知字符数的短文本，用于测服务端字符/token 密度。
