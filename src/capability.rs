@@ -202,6 +202,11 @@ pub enum AcceptanceRule {
         content: Box<AcceptanceRule>,
         constraints: Vec<OutputConstraint>,
     },
+    /// 多次工具调用集合匹配（BFCL 式）：每条预期调用须在响应中出现，
+    /// 函数名一致且预期参数为实际参数子集；实际不得多出未预期调用。
+    ToolCallsMatch {
+        expected_calls: Vec<ToolCall>,
+    },
     Numeric {
         expected: f64,
         tolerance: f64,
@@ -220,6 +225,13 @@ pub enum AcceptanceRule {
     },
 }
 
+/// 多轮样本中的一条消息（C04 用，按真实 messages 数组发送）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SampleMessage {
+    pub role: String,
+    pub content: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CapabilitySample {
     pub id: String,
@@ -229,6 +241,12 @@ pub struct CapabilitySample {
     pub source_ref: String,
     pub language: String,
     pub prompt: String,
+    /// 多轮样本的完整消息历史；存在时优先于 prompt 发送。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<SampleMessage>>,
+    /// 工具选择样本的真实 tools 定义（BFCL 式 JSON Schema）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
     pub expected: String,
     pub acceptance: AcceptanceRule,
     pub generation_settings: BTreeMap<String, String>,
@@ -315,48 +333,81 @@ pub struct CapabilityScorecard {
 pub fn fixed_capability_catalog() -> Vec<CapabilitySample> {
     let mut samples = Vec::with_capacity(144);
     for category in CapabilityCategory::ALL {
-        if category == CapabilityCategory::InstructionFollowing {
-            samples.extend(c01_bank());
-            continue;
-        }
-        for (subdomain_index, subdomain) in category.subdomains().into_iter().enumerate() {
-            for sample_index in 1..=4 {
-                let id = format!(
-                    "{}-{}-{:02}",
-                    category.id(),
-                    subdomain_index + 1,
-                    sample_index
-                );
-                let (prompt, expected) = sample_definition(category, subdomain, sample_index);
-                samples.push(CapabilitySample {
-                    id: id.clone(),
-                    category,
-                    subdomain: subdomain.into(),
-                    dataset_identity: DatasetIdentity::ProductOriginal,
-                    source_ref: format!("agentcheck://capability/{id}"),
-                    language: CAPABILITY_LANGUAGE.into(),
-                    prompt,
-                    expected: expected.clone(),
-                    acceptance: AcceptanceRule::ExactAny {
-                        accepted: vec![expected],
-                    },
-                    generation_settings: BTreeMap::from([
-                        (String::from("temperature"), String::from("0")),
-                        (String::from("language"), String::from(CAPABILITY_LANGUAGE)),
-                    ]),
-                    revision: CAPABILITY_VERSION.into(),
-                    input_tokens: (category == CapabilityCategory::LongContext)
-                        .then_some(1024 + sample_index * 128),
-                });
-            }
-        }
+        let bank = match category {
+            CapabilityCategory::InstructionFollowing => c01_bank(),
+            CapabilityCategory::InformationExtraction => c02_bank(),
+            CapabilityCategory::ToolSelection => c03_bank(),
+            CapabilityCategory::MultiTurn => c04_bank(),
+            CapabilityCategory::LongContext => c05_bank(),
+            CapabilityCategory::ReasoningAndMath => c06_bank(),
+        };
+        samples.extend(bank);
     }
     samples
+}
+
+/// 通用样本构造：题库函数只关心题目内容，其余字段统一补齐。
+fn sample(
+    category: CapabilityCategory,
+    subdomain_index: u32,
+    sample_index: u32,
+    subdomain: &str,
+    prompt: String,
+    expected: &str,
+    acceptance: AcceptanceRule,
+    messages: Option<Vec<SampleMessage>>,
+    tools: Option<Vec<Value>>,
+    input_tokens: Option<u32>,
+) -> CapabilitySample {
+    let id = format!("{}-{}-{:02}", category.id(), subdomain_index, sample_index);
+    CapabilitySample {
+        id: id.clone(),
+        category,
+        subdomain: subdomain.into(),
+        dataset_identity: DatasetIdentity::ProductOriginal,
+        source_ref: format!("agentcheck://capability/{id}"),
+        language: CAPABILITY_LANGUAGE.into(),
+        prompt,
+        messages,
+        tools,
+        expected: expected.into(),
+        acceptance,
+        generation_settings: BTreeMap::from([
+            (String::from("temperature"), String::from("0")),
+            (String::from("language"), String::from(CAPABILITY_LANGUAGE)),
+        ]),
+        revision: CAPABILITY_VERSION.into(),
+        input_tokens,
+    }
 }
 
 /// C01 文本理解与指令执行题库（44 题，方法借鉴 SQuAD 2.0 与 IFEval，
 /// 题目全部为产品原创中文受控材料）。子域序与 `subdomains()` 一致：
 /// 1 材料事实 2 条件筛选 3 单项约束 4 多项约束 5 信息不足。
+fn any(aliases: &[&str], forbidden: &[&str]) -> AcceptanceRule {
+    AcceptanceRule::ContainsAny {
+        any_of: aliases.iter().map(|value| value.to_string()).collect(),
+        forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
+    }
+}
+
+fn groups(required: &[&[&str]], forbidden: &[&str]) -> AcceptanceRule {
+    AcceptanceRule::MatchGroups {
+        required_groups: required
+            .iter()
+            .map(|group| group.iter().map(|value| value.to_string()).collect())
+            .collect(),
+        forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
+    }
+}
+
+fn set(content: AcceptanceRule, constraints: Vec<OutputConstraint>) -> AcceptanceRule {
+    AcceptanceRule::ConstraintSet {
+        content: Box::new(content),
+        constraints,
+    }
+}
+
 fn c01_bank() -> Vec<CapabilitySample> {
     const UNIFIED: &str = "只依据题目给出的材料和条件回答。先给最终答案；同时满足题目列出的所有输出要求。材料没有提供的信息必须明确说明未知，不要使用外部知识补全。";
     const FACTS_AB: &str =
@@ -364,27 +415,6 @@ fn c01_bank() -> Vec<CapabilitySample> {
     const FACTS_ABCD: &str = "材料：项目甲预算30万、华东、进行中；项目乙预算50万、华北、已完成；项目丙预算20万、华东、进行中；项目丁预算45万、华东、已完成。";
     const FACTS_SC: &str = "材料：项目甲预算30万、华东、进行中，负责人小林；项目乙预算50万、华北、已完成，负责人小周。";
 
-    fn any(aliases: &[&str], forbidden: &[&str]) -> AcceptanceRule {
-        AcceptanceRule::ContainsAny {
-            any_of: aliases.iter().map(|value| value.to_string()).collect(),
-            forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
-        }
-    }
-    fn groups(required: &[&[&str]], forbidden: &[&str]) -> AcceptanceRule {
-        AcceptanceRule::MatchGroups {
-            required_groups: required
-                .iter()
-                .map(|group| group.iter().map(|value| value.to_string()).collect())
-                .collect(),
-            forbidden: forbidden.iter().map(|value| value.to_string()).collect(),
-        }
-    }
-    fn set(content: AcceptanceRule, constraints: Vec<OutputConstraint>) -> AcceptanceRule {
-        AcceptanceRule::ConstraintSet {
-            content: Box::new(content),
-            constraints,
-        }
-    }
     use OutputConstraint as C;
 
     let defs: Vec<(usize, u32, &str, String, &str, AcceptanceRule)> = vec![
@@ -606,7 +636,13 @@ fn c01_bank() -> Vec<CapabilitySample> {
             format!("{FACTS_SC}任务：分别概括两个项目的状态，用两个自然段回答。{UNIFIED}"),
             "进行中、已完成",
             set(
-                groups(&[&["进行中"], &["已完成", "已经完成", "全部完成"]], &[]),
+                groups(
+                    &[
+                        &["进行中", "进行", "推进中"],
+                        &["已完成", "已经完成", "全部完成"],
+                    ],
+                    &[],
+                ),
                 vec![C::ParagraphCount(2)],
             ),
         ),
@@ -630,7 +666,7 @@ fn c01_bank() -> Vec<CapabilitySample> {
             3,
             10,
             "single-constraint",
-            format!("{FACTS_SC}任务：说明项目乙的验收情况，回答必须以“完毕”结尾。{UNIFIED}"),
+            format!("{FACTS_SC}任务：说明项目乙的完成状态，回答必须以“完毕”结尾。{UNIFIED}"),
             "已完成",
             set(any(&["已完成"], &[]), vec![C::EndsWith("完毕".into())]),
         ),
@@ -871,6 +907,8 @@ fn c01_bank() -> Vec<CapabilitySample> {
                 source_ref: format!("agentcheck://capability/C01-{sub_index}-{sample_index:02}"),
                 language: CAPABILITY_LANGUAGE.into(),
                 prompt,
+                messages: None,
+                tools: None,
                 expected: expected.into(),
                 acceptance,
                 generation_settings: BTreeMap::from([
@@ -954,8 +992,8 @@ fn strip_prompt_echo(text: &str, prompt: &str) -> String {
 /// 禁含值命中检查：命中项处在排除性语境（"除…外""不在""未超过"等）
 /// 时不算违规，只统计以断言/列举形式出现的禁含值。
 fn forbidden_hit(normalized: &str, forbidden: &[String]) -> bool {
-    const EXCLUSION: [&str; 9] = [
-        "除", "不", "未", "非", "排除", "以外", "之外", "不符", "其他",
+    const EXCLUSION: [&str; 11] = [
+        "除", "不", "未", "非", "排除", "以外", "之外", "不符", "其他", "原", "之前",
     ];
     forbidden.iter().any(|raw| {
         let needle = normalize(raw);
@@ -1045,60 +1083,24 @@ fn evaluate_acceptance(
                 .unwrap_or(ScoreLabel::Pending),
             None,
         ),
-        AcceptanceRule::ContainsAll {
-            required,
-            forbidden,
-        } => (
+        AcceptanceRule::ContainsAll { .. }
+        | AcceptanceRule::ContainsAny { .. }
+        | AcceptanceRule::MatchGroups { .. } => (
             answer
-                .map(|text| {
-                    let normalized = normalize(text);
-                    if required
-                        .iter()
-                        .all(|value| normalized.contains(&normalize(value)))
-                        && !forbidden_hit(&normalized, forbidden)
-                    {
-                        ScoreLabel::Correct
-                    } else {
-                        ScoreLabel::Wrong
-                    }
-                })
-                .unwrap_or(ScoreLabel::Pending),
-            None,
-        ),
-        AcceptanceRule::ContainsAny { any_of, forbidden } => (
-            answer
-                .map(|text| {
-                    let normalized = normalize(text);
-                    if any_of
-                        .iter()
-                        .any(|value| normalized.contains(&normalize(value)))
-                        && !forbidden_hit(&normalized, forbidden)
-                    {
-                        ScoreLabel::Correct
-                    } else {
-                        ScoreLabel::Wrong
-                    }
-                })
-                .unwrap_or(ScoreLabel::Pending),
-            None,
-        ),
-        AcceptanceRule::MatchGroups {
-            required_groups,
-            forbidden,
-        } => (
-            answer
-                .map(|text| {
-                    let normalized = normalize(text);
-                    if required_groups.iter().all(|group| {
-                        group
-                            .iter()
-                            .any(|alias| normalized.contains(&normalize(alias)))
-                    }) && !forbidden_hit(&normalized, forbidden)
-                    {
-                        ScoreLabel::Correct
-                    } else {
-                        ScoreLabel::Wrong
-                    }
+                .map(|region| match content_verdict(rule, region) {
+                    Some(true) => ScoreLabel::Correct,
+                    Some(false) => ScoreLabel::Wrong,
+                    // 答案区既无别名也无禁含（如答案在中间段、末段是声明），
+                    // 回退到剥离复述后的全文再判一次。
+                    None => text
+                        .map(|full| {
+                            if content_verdict(rule, full).unwrap_or(false) {
+                                ScoreLabel::Correct
+                            } else {
+                                ScoreLabel::Wrong
+                            }
+                        })
+                        .unwrap_or(ScoreLabel::Wrong),
                 })
                 .unwrap_or(ScoreLabel::Pending),
             None,
@@ -1160,13 +1162,42 @@ fn evaluate_acceptance(
                 }
             } else if tool_calls.iter().all(|call| {
                 allowed_tool_names.iter().any(|name| name == &call.name)
-                    && required_arguments
-                        .iter()
-                        .all(|(key, value)| call.arguments.get(key) == Some(value))
+                    && required_arguments.iter().all(|(key, value)| {
+                        call.arguments
+                            .get(key)
+                            .is_some_and(|actual| normalize(actual) == normalize(value))
+                    })
             }) {
                 ScoreLabel::Correct
             } else {
                 ScoreLabel::Wrong
+            },
+            None,
+        ),
+        AcceptanceRule::ToolCallsMatch { expected_calls } => (
+            {
+                let mut used = vec![false; tool_calls.len()];
+                let matched = expected_calls.iter().all(|expected| {
+                    tool_calls
+                        .iter()
+                        .enumerate()
+                        .find(|(index, call)| {
+                            !used[*index]
+                                && call.name == expected.name
+                                && expected.arguments.iter().all(|(key, value)| {
+                                    call.arguments
+                                        .get(key)
+                                        .is_some_and(|actual| normalize(actual) == normalize(value))
+                                })
+                        })
+                        .map(|(index, _)| used[index] = true)
+                        .is_some()
+                });
+                if matched && tool_calls.len() == expected_calls.len() {
+                    ScoreLabel::Correct
+                } else {
+                    ScoreLabel::Wrong
+                }
             },
             None,
         ),
@@ -1192,6 +1223,45 @@ fn evaluate_acceptance(
         ),
         AcceptanceRule::Pending { .. } => (ScoreLabel::Pending, None),
     }
+}
+
+/// 内容型规则（ContainsAll/ContainsAny/MatchGroups）在一段文本上的判定：
+/// Some(true)=通过，Some(false)=违规（命中禁含值），None=无结论（既无别名也无禁含）。
+fn content_verdict(rule: &AcceptanceRule, region: &str) -> Option<bool> {
+    let normalized = normalize(region);
+    let (aliases_ok, forbidden) = match rule {
+        AcceptanceRule::ContainsAll {
+            required,
+            forbidden,
+        } => (
+            required
+                .iter()
+                .all(|value| normalized.contains(&normalize(value))),
+            forbidden,
+        ),
+        AcceptanceRule::ContainsAny { any_of, forbidden } => (
+            any_of
+                .iter()
+                .any(|value| normalized.contains(&normalize(value))),
+            forbidden,
+        ),
+        AcceptanceRule::MatchGroups {
+            required_groups,
+            forbidden,
+        } => (
+            required_groups.iter().all(|group| {
+                group
+                    .iter()
+                    .any(|alias| normalized.contains(&normalize(alias)))
+            }),
+            forbidden,
+        ),
+        _ => return Some(false),
+    };
+    if forbidden_hit(&normalized, forbidden) {
+        return Some(false);
+    }
+    if aliases_ok { Some(true) } else { None }
 }
 
 /// IFEval 式单条可验证约束的程序化校验。
@@ -1391,6 +1461,18 @@ fn validate_catalog(samples: &[CapabilitySample]) -> Result<(), String> {
             ));
         }
     }
+    for sample in samples {
+        if !sample
+            .category
+            .subdomains()
+            .contains(&sample.subdomain.as_str())
+        {
+            return Err(format!(
+                "{} has unknown subdomain {}",
+                sample.id, sample.subdomain
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1449,79 +1531,1620 @@ fn summarize(
     }
 }
 
-fn sample_definition(
-    category: CapabilityCategory,
-    subdomain: &str,
-    sample_index: u32,
-) -> (String, String) {
-    let item = match sample_index {
-        1 => ("甲", "项目甲"),
-        2 => ("乙", "项目乙"),
-        3 => ("丙", "项目丙"),
-        _ => ("丁", "项目丁"),
-    };
-    match category {
-        CapabilityCategory::InstructionFollowing => {
-            unreachable!("C01 catalog is served by c01_bank()")
-        }
-        CapabilityCategory::InformationExtraction => match subdomain {
-            "single-object-fields" => (
-                format!("材料：{}，类型为服务，数量为{}。任务：只回答数量。", item.1, 10 + sample_index),
-                (10 + sample_index).to_string(),
+/// C02 信息提取与结构化填写题库（20 题，方法借鉴 SGD 的槽位/字段抽取组织方式，
+/// 材料为产品原创中文工单与登记记录）。子域序与 `subdomains()` 一致：
+/// 1 单对象字段 2 多对象关系 3 字段类型 4 缺失值 5 冲突信息。
+fn c02_bank() -> Vec<CapabilitySample> {
+    const UNIFIED: &str =
+        "只依据材料回答。材料没有提供的信息必须明确说明未知，不要使用外部知识补全。";
+    const TICKETS: &str = "材料：【工单W-1024】类型：报修；区域：华东；负责人：陈晨；优先级：高；提交时间：2024-03-15；状态：待处理。【工单W-1025】类型：咨询；区域：华北；负责人：赵敏；优先级：低；提交时间：2024-03-16；状态：已关闭。";
+    const REGISTRY: &str = "材料：【登记表A】设备名称：空压机；资产编号：ZC-3301；所属部门：动力车间；购置日期：2023-11-02；启用状态：已启用。";
+    const CONFLICT: &str = "材料：登记记录（2024-01-10）：项目甲预算30万。变更记录（2024-02-20）：项目甲预算调整为45万。";
+
+    use OutputConstraint as C;
+
+    let defs: Vec<(u32, u32, &str, String, &str, AcceptanceRule)> = vec![
+        // ---- 子域 1：单对象字段（4 题）----
+        (
+            1,
+            1,
+            "single-object-fields",
+            format!("{TICKETS}任务：工单W-1024的负责人是谁？{UNIFIED}"),
+            "陈晨",
+            any(&["陈晨"], &["赵敏"]),
+        ),
+        (
+            1,
+            2,
+            "single-object-fields",
+            format!("{TICKETS}任务：工单W-1025的状态是什么？{UNIFIED}"),
+            "已关闭",
+            any(&["已关闭", "关闭"], &["待处理"]),
+        ),
+        (
+            1,
+            3,
+            "single-object-fields",
+            format!("{TICKETS}任务：工单W-1024的提交时间是哪天？{UNIFIED}"),
+            "2024-03-15",
+            any(
+                &["2024-03-15", "2024年3月15日", "3月15日"],
+                &["2024-03-16", "3月16日"],
             ),
-            "multi-object-relations" => (
-                format!("材料：小林负责{}，小周负责其他项目。任务：只回答小林负责的项目。", item.1),
-                item.1.into(),
+        ),
+        (
+            1,
+            4,
+            "single-object-fields",
+            format!("{REGISTRY}任务：该设备的资产编号是什么？{UNIFIED}"),
+            "ZC-3301",
+            any(&["ZC-3301", "ZC3301"], &[]),
+        ),
+        // ---- 子域 2：多对象关系（4 题）----
+        (
+            2,
+            1,
+            "multi-object-relations",
+            format!("{TICKETS}任务：陈晨负责的工单编号是什么？{UNIFIED}"),
+            "W-1024",
+            any(&["W-1024", "W1024"], &["W-1025"]),
+        ),
+        (
+            2,
+            2,
+            "multi-object-relations",
+            format!("{TICKETS}任务：华北区域的工单编号是什么？{UNIFIED}"),
+            "W-1025",
+            any(&["W-1025", "W1025"], &[]),
+        ),
+        (
+            2,
+            3,
+            "multi-object-relations",
+            format!("{TICKETS}任务：状态为“待处理”的工单，其负责人和优先级分别是什么？{UNIFIED}"),
+            "陈晨、高",
+            groups(&[&["陈晨"], &["高"]], &["赵敏"]),
+        ),
+        (
+            2,
+            4,
+            "multi-object-relations",
+            format!(
+                "{REGISTRY}材料补充：动力车间隶属于生产部。任务：空压机所属的上一级部门是什么？{UNIFIED}"
             ),
-            "field-types" => (
-                "材料：库存数量为 12 件。任务：只回答数量和单位。".into(),
-                "12件".into(),
+            "生产部",
+            any(&["生产部"], &["动力车间"]),
+        ),
+        // ---- 子域 3：字段类型（4 题，含格式约束）----
+        (
+            3,
+            1,
+            "field-types",
+            format!(
+                "{TICKETS}任务：提取工单W-1024的提交时间，输出格式为 YYYY-MM-DD，不要输出其他文字。{UNIFIED}"
             ),
-            "missing-values" => ("材料：项目已登记，但没有填写负责人。任务：只回答负责人。".into(), "未提供".into()),
-            _ => ("材料：项目甲旧名称为北区，新名称为东区，最新记录覆盖旧记录。任务：只回答最新名称。".into(), "东区".into()),
-        },
-        CapabilityCategory::ToolSelection => match subdomain {
-            "tool-selection" => ("任务：查询北京今天的天气。可用工具：查询天气、计算。只回答应选择的工具名。".into(), "查询天气".into()),
-            "argument-filling" => ("任务：查询北京今天的天气。只回答工具参数。".into(), "城市=北京，日期=今天".into()),
-            "argument-types" => ("任务：计算 12 加 8。可用工具：查询、计算。只回答工具名和数字参数。".into(), "计算，数字=12和8".into()),
-            "multiple-tools" => ("任务：先查询北京气温，再计算摄氏温度加 2。可用工具：查询天气、计算。只回答调用顺序。".into(), "查询天气→计算".into()),
-            _ => ("任务：把一句话改写得更正式。可用工具：查询天气、计算。此任务不需要工具，只回答是否调用。".into(), "不调用工具".into()),
-        },
-        CapabilityCategory::MultiTurn => match subdomain {
-            "condition-retention" => ("第1轮：项目甲预算100元，负责人小林。第2轮：请列出负责人。任务：只回答负责人。".into(), "小林".into()),
-            "condition-update" => ("第1轮：项目甲预算100元。第2轮：预算改为120元。任务：只回答当前预算。".into(), "120元".into()),
-            "condition-revocation" => ("第1轮：只列出华东项目。第2轮：取消地区限制。任务：说明当前是否还有地区限制。".into(), "没有地区限制".into()),
-            "object-switching" => ("第1轮：项目甲负责人小林，项目乙负责人小周。第2轮：现在问项目乙负责人。任务：只回答姓名。".into(), "小周".into()),
-            _ => ("第1轮：输出项目名和预算。第2轮：只把项目名改为列表格式，预算要求不变。任务：只回答项目甲及其100元预算。".into(), "项目甲，100元".into()),
-        },
-        CapabilityCategory::LongContext => match subdomain {
-            "localization" => (
-                format!(
-                    "材料：开头有无关说明。第{}段写着：目标编号为 L{}。结尾有其他说明。任务：只回答目标编号。",
-                    sample_index + 1,
-                    sample_index
-                ),
-                format!("L{}", sample_index),
+            "2024-03-15",
+            set(
+                any(&["2024-03-15"], &["2024-03-16"]),
+                vec![C::MustNotContain("年".into()), C::MaxChars(12)],
             ),
-            "cross-section-relation" => ("材料前段：项目甲负责人小林。材料后段：小林所在团队为 T2。任务：只回答项目甲所在团队。".into(), "T2".into()),
-            "distractor-rejection" => ("材料：项目甲团队 T2；项目乙团队 T9。问题：项目甲团队是什么？只回答团队。".into(), "T2".into()),
-            "length-variation" => ("材料包含一段重复说明，唯一有效事实是：服务等级为标准。任务：只回答服务等级。".into(), "标准".into()),
-            _ => ("材料：项目甲数量 7，项目乙数量 5。任务：只回答两项目数量之和。".into(), "12".into()),
-        },
-        CapabilityCategory::ReasoningAndMath => match subdomain {
-            "condition-judgement" => ("已知：温度高于 30 度才需要预警；今天温度 32 度。任务：只回答是否预警。".into(), "是".into()),
-            "temporal-order" => ("事件顺序：提交申请、审核、发布。任务：只回答审核发生在发布之前还是之后。".into(), "之前".into()),
-            "quantity-comparison" => ("甲有 8 件，乙有 5 件。任务：只回答谁更多。".into(), "甲".into()),
-            "basic-calculation" => (format!("任务：计算 {} + {}。只回答结果。", sample_index + 2, sample_index + 3), (2 * sample_index + 5).to_string()),
-            _ => ("已知：甲比乙多 3，乙为 5，丙比甲少 2。任务：只回答丙的数值。".into(), "6".into()),
-        },
-    }
+        ),
+        (
+            3,
+            2,
+            "field-types",
+            format!(
+                "{REGISTRY}材料补充：库存记录显示该设备备件现有12件。任务：提取备件数量，只输出阿拉伯数字，不带单位。{UNIFIED}"
+            ),
+            "12",
+            set(
+                any(&["12"], &[]),
+                vec![C::MustNotContain("件".into()), C::MaxChars(4)],
+            ),
+        ),
+        (
+            3,
+            3,
+            "field-types",
+            format!(
+                "{TICKETS}任务：用JSON对象输出工单W-1025的负责人和优先级，字段名用中文，不要输出JSON以外的文字。{UNIFIED}"
+            ),
+            "赵敏、低",
+            set(
+                groups(&[&["赵敏"], &["低"]], &["陈晨"]),
+                vec![
+                    C::JsonObject,
+                    C::JsonRequiredFields(vec!["负责人".into(), "优先级".into()]),
+                ],
+            ),
+        ),
+        (
+            3,
+            4,
+            "field-types",
+            format!(
+                "{TICKETS}任务：按提交时间从早到晚，每行一个列出工单编号，不要输出其他文字。{UNIFIED}"
+            ),
+            "W-1024、W-1025",
+            set(
+                groups(&[&["W-1024"], &["W-1025"]], &[]),
+                vec![
+                    C::LineCount(2),
+                    C::ExactOrder(vec!["W-1024".into(), "W-1025".into()]),
+                ],
+            ),
+        ),
+        // ---- 子域 4：缺失值（4 题）----
+        (
+            4,
+            1,
+            "missing-values",
+            format!("{TICKETS}任务：工单W-1024的验收日期是哪天？{UNIFIED}"),
+            "未提供",
+            any(
+                &["未提供", "未说明", "未知", "没有提供", "无此信息"],
+                &["2024"],
+            ),
+        ),
+        (
+            4,
+            2,
+            "missing-values",
+            format!(
+                "材料：【工单W-2001】类型：报修；区域：华南；负责人：（空）；优先级：中。任务：该工单的负责人是谁？{UNIFIED}"
+            ),
+            "未提供",
+            any(
+                &["未提供", "未填写", "为空", "未知", "无"],
+                &["陈晨", "赵敏"],
+            ),
+        ),
+        (
+            4,
+            3,
+            "missing-values",
+            format!(
+                "{REGISTRY}任务：用JSON对象输出该设备的资产编号和报废日期，字段名用中文；材料没有的字段值填 null。{UNIFIED}"
+            ),
+            "ZC-3301、null",
+            set(
+                groups(&[&["ZC-3301", "ZC3301"], &["null", "未提供"]], &[]),
+                vec![C::JsonObject],
+            ),
+        ),
+        (
+            4,
+            4,
+            "missing-values",
+            format!("{TICKETS}任务：工单W-3000的负责人是谁？{UNIFIED}"),
+            "未提供",
+            any(
+                &["不存在", "未提供", "未知", "没有", "无此工单", "材料中没有"],
+                &["陈晨", "赵敏"],
+            ),
+        ),
+        // ---- 子域 5：冲突信息（4 题）----
+        (
+            5,
+            1,
+            "conflicting-information",
+            format!("{CONFLICT}任务：以最新登记为准，项目甲当前预算是多少？{UNIFIED}"),
+            "45万",
+            any(&["45万", "450000"], &[]),
+        ),
+        (
+            5,
+            2,
+            "conflicting-information",
+            format!(
+                "材料：记录一：项目乙验收人是王五。记录二：项目乙验收人是王六。两条记录均有效。任务：项目乙的验收人是谁？{UNIFIED}"
+            ),
+            "无法确定",
+            any(
+                &[
+                    "无法确定",
+                    "冲突",
+                    "不一致",
+                    "矛盾",
+                    "两条记录",
+                    "王五和王六",
+                    "王五、王六",
+                ],
+                &[],
+            ),
+        ),
+        (
+            5,
+            3,
+            "conflicting-information",
+            format!(
+                "材料：2024-03-01登记：设备状态为“停用”。2024-04-10登记：设备状态更新为“在用”。任务：按最新登记回答设备当前状态。{UNIFIED}"
+            ),
+            "在用",
+            any(&["在用"], &["停用"]),
+        ),
+        (
+            5,
+            4,
+            "conflicting-information",
+            format!(
+                "材料：有两个同名“项目甲”：华东区项目甲（负责人小林）和华南区项目甲（负责人老周）。任务：项目甲的负责人是谁？{UNIFIED}"
+            ),
+            "无法确定",
+            any(
+                &[
+                    "无法确定",
+                    "两个",
+                    "需要明确",
+                    "哪一个",
+                    "同名",
+                    "未知",
+                    "未明确",
+                    "不明确",
+                    "可能是",
+                ],
+                &[],
+            ),
+        ),
+    ];
+
+    defs.into_iter()
+        .map(|(si, qi, sub, prompt, expected, acceptance)| {
+            sample(
+                CapabilityCategory::InformationExtraction,
+                si,
+                qi,
+                sub,
+                prompt,
+                expected,
+                acceptance,
+                None,
+                None,
+                None,
+            )
+        })
+        .collect()
 }
 
+/// C03 工具选择与参数填写题库（20 题，方法借鉴 BFCL：真实 tools 定义随请求发送，
+/// 判定函数名与参数值而非提示词复述）。子域序与 `subdomains()` 一致：
+/// 1 工具选择 2 参数填写 3 参数类型 4 多工具调用 5 正确不调用。
+fn c03_bank() -> Vec<CapabilitySample> {
+    use serde_json::json;
+    fn tool(name: &str, description: &str, props: Value, required: &[&str]) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": required,
+                }
+            }
+        })
+    }
+    fn s(p: &str) -> Value {
+        json!({"type": "string", "description": p})
+    }
+    fn call(name: &str, args: &[(&str, &str)]) -> ToolCall {
+        ToolCall {
+            name: name.into(),
+            arguments: args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+    fn pick(names: &[&str]) -> AcceptanceRule {
+        AcceptanceRule::ToolDecision {
+            allowed_tool_names: names.iter().map(|n| n.to_string()).collect(),
+            required_arguments: BTreeMap::new(),
+            allow_no_call: false,
+        }
+    }
+    fn call_with(name: &str, args: &[(&str, &str)]) -> AcceptanceRule {
+        AcceptanceRule::ToolCallsMatch {
+            expected_calls: vec![call(name, args)],
+        }
+    }
+    fn calls(calls: Vec<ToolCall>) -> AcceptanceRule {
+        AcceptanceRule::ToolCallsMatch {
+            expected_calls: calls,
+        }
+    }
+
+    let weather = tool(
+        "query_weather",
+        "查询指定城市指定日期的天气",
+        json!({"city": s("城市名"), "date": s("日期，如“今天”")}),
+        &["city", "date"],
+    );
+    let calc = tool(
+        "calculate",
+        "计算一个算术表达式的值",
+        json!({"expression": s("算术表达式")}),
+        &["expression"],
+    );
+    let inventory = tool(
+        "query_inventory",
+        "查询某仓库中某物料的库存数量",
+        json!({"warehouse": s("仓库名"), "item": s("物料名")}),
+        &["warehouse", "item"],
+    );
+    let notify = tool(
+        "send_notification",
+        "向指定对象发送一条通知消息",
+        json!({"target": s("接收人"), "message": s("通知内容")}),
+        &["target", "message"],
+    );
+    let project = tool(
+        "query_project",
+        "查询项目基本信息字段",
+        json!({"project": s("项目名"), "field": s("字段名")}),
+        &["project", "field"],
+    );
+    let meeting = tool(
+        "book_meeting_room",
+        "预订会议室",
+        json!({"room": s("会议室名称"), "attendees": json!({"type": "integer", "description": "参会人数"}), "duration_hours": json!({"type": "integer", "description": "时长（小时）"})}),
+        &["room", "attendees", "duration_hours"],
+    );
+    let alert = tool(
+        "set_alert",
+        "设置指标告警开关",
+        json!({"metric": s("指标名"), "enabled": json!({"type": "boolean", "description": "是否开启"})}),
+        &["metric", "enabled"],
+    );
+
+    let all3 = Some(vec![weather.clone(), calc.clone(), inventory.clone()]);
+    let all4 = Some(vec![
+        weather.clone(),
+        calc.clone(),
+        inventory.clone(),
+        notify.clone(),
+    ]);
+    let all5 = Some(vec![
+        weather.clone(),
+        calc.clone(),
+        inventory.clone(),
+        notify.clone(),
+        project.clone(),
+    ]);
+
+    let defs: Vec<(
+        u32,
+        u32,
+        &str,
+        String,
+        &str,
+        AcceptanceRule,
+        Option<Vec<Value>>,
+    )> = vec![
+        // ---- 子域 1：工具选择（4 题）----
+        (
+            1,
+            1,
+            "tool-selection",
+            "帮我查一下北京明天的天气。".into(),
+            "query_weather",
+            pick(&["query_weather"]),
+            all3.clone(),
+        ),
+        (
+            1,
+            2,
+            "tool-selection",
+            "帮我算一下 128 乘以 46 等于多少。".into(),
+            "calculate",
+            pick(&["calculate"]),
+            all3.clone(),
+        ),
+        (
+            1,
+            3,
+            "tool-selection",
+            "华东仓的零件A还剩多少库存？".into(),
+            "query_inventory",
+            pick(&["query_inventory"]),
+            all3.clone(),
+        ),
+        (
+            1,
+            4,
+            "tool-selection",
+            "给小周发一条通知，内容是下午三点开项目例会。".into(),
+            "send_notification",
+            pick(&["send_notification"]),
+            all4.clone(),
+        ),
+        // ---- 子域 2：参数填写（4 题）----
+        (
+            2,
+            1,
+            "argument-filling",
+            "查一下上海后天的天气。".into(),
+            "city=上海,date=后天",
+            call_with("query_weather", &[("city", "上海"), ("date", "后天")]),
+            all4.clone(),
+        ),
+        (
+            2,
+            2,
+            "argument-filling",
+            "华北仓的零件B库存还剩多少？".into(),
+            "warehouse=华北仓,item=零件B",
+            call_with(
+                "query_inventory",
+                &[("warehouse", "华北仓"), ("item", "零件B")],
+            ),
+            all4.clone(),
+        ),
+        (
+            2,
+            3,
+            "argument-filling",
+            "查一下项目甲的负责人是谁。".into(),
+            "project=项目甲,field=负责人",
+            call_with(
+                "query_project",
+                &[("project", "项目甲"), ("field", "负责人")],
+            ),
+            all5.clone(),
+        ),
+        (
+            2,
+            4,
+            "argument-filling",
+            "给赵敏发通知，说明天上午十点验收。".into(),
+            "target=赵敏",
+            call_with("send_notification", &[("target", "赵敏")]),
+            all4.clone(),
+        ),
+        // ---- 子域 3：参数类型（4 题）----
+        (
+            3,
+            1,
+            "argument-types",
+            "预订3号会议室，8个人参加，用2小时。".into(),
+            "attendees=8,duration_hours=2",
+            call_with(
+                "book_meeting_room",
+                &[
+                    ("room", "3号会议室"),
+                    ("attendees", "8"),
+                    ("duration_hours", "2"),
+                ],
+            ),
+            Some(vec![meeting.clone()]),
+        ),
+        (
+            3,
+            2,
+            "argument-types",
+            "把库存告警开关打开。".into(),
+            "enabled=true",
+            call_with("set_alert", &[("enabled", "true")]),
+            Some(vec![alert.clone()]),
+        ),
+        (
+            3,
+            3,
+            "argument-types",
+            "算一下 12 加 30。".into(),
+            "expression=12+30",
+            call_with("calculate", &[("expression", "12+30")]),
+            all4.clone(),
+        ),
+        (
+            3,
+            4,
+            "argument-types",
+            "查项目乙的预算。".into(),
+            "field=预算",
+            call_with("query_project", &[("project", "项目乙"), ("field", "预算")]),
+            all5.clone(),
+        ),
+        // ---- 子域 4：多工具调用（4 题）----
+        (
+            4,
+            1,
+            "multiple-tools",
+            "北京和上海明天的天气分别怎么样？".into(),
+            "query_weather×2",
+            calls(vec![
+                call("query_weather", &[("city", "北京"), ("date", "明天")]),
+                call("query_weather", &[("city", "上海"), ("date", "明天")]),
+            ]),
+            all4.clone(),
+        ),
+        (
+            4,
+            2,
+            "multiple-tools",
+            "先查华东仓零件A的库存，然后给小周发个通知告诉他结果。".into(),
+            "query_inventory+send_notification",
+            calls(vec![
+                call(
+                    "query_inventory",
+                    &[("warehouse", "华东仓"), ("item", "零件A")],
+                ),
+                call("send_notification", &[("target", "小周")]),
+            ]),
+            all4.clone(),
+        ),
+        (
+            4,
+            3,
+            "multiple-tools",
+            "查一下项目甲的预算和负责人。".into(),
+            "query_project×2",
+            calls(vec![
+                call("query_project", &[("project", "项目甲"), ("field", "预算")]),
+                call(
+                    "query_project",
+                    &[("project", "项目甲"), ("field", "负责人")],
+                ),
+            ]),
+            all5.clone(),
+        ),
+        (
+            4,
+            4,
+            "multiple-tools",
+            "分别计算 12+30 和 50-8 的结果。".into(),
+            "calculate×2",
+            calls(vec![
+                call("calculate", &[("expression", "12+30")]),
+                call("calculate", &[("expression", "50-8")]),
+            ]),
+            all4.clone(),
+        ),
+        // ---- 子域 5：正确不调用（4 题）----
+        (
+            5,
+            1,
+            "correct-no-call",
+            "你好，今天过得怎么样？".into(),
+            "不调用工具",
+            AcceptanceRule::NoCall {
+                accepted_explanations: vec![],
+            },
+            all3.clone(),
+        ),
+        (
+            5,
+            2,
+            "correct-no-call",
+            "材料：项目甲负责人是小林。任务：项目甲负责人是谁？只依据材料回答，不要调用工具。"
+                .into(),
+            "小林",
+            AcceptanceRule::NoCall {
+                accepted_explanations: vec!["小林".into()],
+            },
+            all5.clone(),
+        ),
+        (
+            5,
+            3,
+            "correct-no-call",
+            "不用调用任何工具，直接告诉我 3+5 等于几。".into(),
+            "8",
+            AcceptanceRule::NoCall {
+                accepted_explanations: vec!["8".into(), "八".into()],
+            },
+            all3.clone(),
+        ),
+        (
+            5,
+            4,
+            "correct-no-call",
+            "帮我订一张明天去上海的高铁票。".into(),
+            "不调用工具",
+            AcceptanceRule::NoCall {
+                accepted_explanations: vec![],
+            },
+            all3.clone(),
+        ),
+    ];
+
+    defs.into_iter()
+        .map(|(si, qi, sub, prompt, expected, acceptance, tools)| {
+            sample(
+                CapabilityCategory::ToolSelection,
+                si,
+                qi,
+                sub,
+                prompt,
+                expected,
+                acceptance,
+                None,
+                tools,
+                None,
+            )
+        })
+        .collect()
+}
+
+/// C04 多轮对话与条件承接题库（20 题，方法借鉴 Multi-IF：真实 messages 数组、
+/// 条件逐轮叠加/变更/撤销）。子域序与 `subdomains()` 一致：
+/// 1 条件保持 2 条件更新 3 条件撤销 4 对象切换 5 新旧区分。
+fn c04_bank() -> Vec<CapabilitySample> {
+    fn m(role: &str, content: &str) -> SampleMessage {
+        SampleMessage {
+            role: role.into(),
+            content: content.into(),
+        }
+    }
+    fn msgs(turns: &[(&str, &str)]) -> Option<Vec<SampleMessage>> {
+        Some(turns.iter().map(|(r, c)| m(r, c)).collect())
+    }
+    use OutputConstraint as C;
+
+    let defs: Vec<(
+        u32,
+        u32,
+        &str,
+        String,
+        &str,
+        AcceptanceRule,
+        Option<Vec<SampleMessage>>,
+    )> = vec![
+        // ---- 子域 1：条件保持（4 题）----
+        (
+            1,
+            1,
+            "condition-retention",
+            "那3000元的设备采购报销呢？需要总监签字吗？".into(),
+            "需要总监签字",
+            any(&["需要", "要", "必须"], &["不需要"]),
+            msgs(&[
+                ("user", "记住这个规则：报销金额超过2000元需要总监签字。"),
+                (
+                    "assistant",
+                    "好的，已记录：报销金额超过2000元需要总监签字。",
+                ),
+                ("user", "我有一笔1500元的差旅报销。"),
+                ("assistant", "1500元未超过2000元，不需要总监签字。"),
+                ("user", "那3000元的设备采购报销呢？需要总监签字吗？"),
+            ]),
+        ),
+        (
+            1,
+            2,
+            "condition-retention",
+            "那周二呢？".into(),
+            "赵敏",
+            any(&["赵敏"], &["陈晨"]),
+            msgs(&[
+                ("user", "本周值班表：周一陈晨，周二赵敏，周三老钱。"),
+                ("assistant", "已记录值班表。"),
+                ("user", "周一谁值班？"),
+                ("assistant", "陈晨。"),
+                ("user", "那周二呢？"),
+            ]),
+        ),
+        (
+            1,
+            3,
+            "condition-retention",
+            "项目乙的编号呢？".into(),
+            "B-202",
+            any(&["B-202", "B202"], &["A-101"]),
+            msgs(&[
+                (
+                    "user",
+                    "项目编号对照：项目甲是A-101，项目乙是B-202，项目丙是C-303。",
+                ),
+                ("assistant", "已记录编号对照。"),
+                ("user", "项目甲的编号是什么？"),
+                ("assistant", "A-101。"),
+                ("user", "项目乙的编号呢？"),
+            ]),
+        ),
+        (
+            1,
+            4,
+            "condition-retention",
+            "住宿费报销上限是多少？".into(),
+            "5000",
+            any(&["5000", "五千"], &["2000", "3000"]),
+            msgs(&[
+                ("user", "记住：本月报销总额上限是5000元。"),
+                ("assistant", "好的，已记录：本月报销总额上限5000元。"),
+                ("user", "交通费报销上限是多少？"),
+                ("assistant", "交通费适用总额上限5000元。"),
+                ("user", "住宿费报销上限是多少？"),
+            ]),
+        ),
+        // ---- 子域 2：条件更新（4 题）----
+        (
+            2,
+            1,
+            "condition-update",
+            "项目甲当前预算是多少？".into(),
+            "45万",
+            any(&["45万", "450000"], &[]),
+            msgs(&[
+                ("user", "记录：项目甲预算30万。"),
+                ("assistant", "已记录：项目甲预算30万。"),
+                ("user", "更正一下：项目甲预算调整为45万。"),
+                ("assistant", "已更新：项目甲预算45万。"),
+                ("user", "项目甲当前预算是多少？"),
+            ]),
+        ),
+        (
+            2,
+            2,
+            "condition-update",
+            "项目甲现在谁负责？".into(),
+            "小周",
+            any(&["小周"], &[]),
+            msgs(&[
+                ("user", "项目甲的负责人是小林。"),
+                ("assistant", "好的。"),
+                ("user", "更正：负责人改为小周。"),
+                ("assistant", "已更新：负责人为小周。"),
+                ("user", "项目甲现在谁负责？"),
+            ]),
+        ),
+        (
+            2,
+            3,
+            "condition-update",
+            "评审会现在是哪天？".into(),
+            "3月20日",
+            any(&["3月20日", "三月二十"], &["3月15日"]),
+            msgs(&[
+                ("user", "评审会定在3月15日。"),
+                ("assistant", "已记录：评审会3月15日。"),
+                ("user", "通知有变化：评审会改到3月20日。"),
+                ("assistant", "已更新：评审会3月20日。"),
+                ("user", "评审会现在是哪天？"),
+            ]),
+        ),
+        (
+            2,
+            4,
+            "condition-update",
+            "当前库存多少？".into(),
+            "60",
+            any(&["60"], &["100", "80"]),
+            msgs(&[
+                ("user", "库存100件。"),
+                ("assistant", "已记录：库存100件。"),
+                ("user", "出库20件。"),
+                ("assistant", "已更新：库存80件。"),
+                ("user", "又出库20件。"),
+                ("assistant", "已更新：库存60件。"),
+                ("user", "当前库存多少？"),
+            ]),
+        ),
+        // ---- 子域 3：条件撤销（4 题）----
+        (
+            3,
+            1,
+            "condition-revocation",
+            "项目甲负责人是谁？（已知：小林）".into(),
+            "小林",
+            set(any(&["小林"], &[]), vec![C::MustNotContain("完毕".into())]),
+            msgs(&[
+                ("user", "从现在开始，你的每条回答末尾都要加“完毕”两个字。"),
+                ("assistant", "好的，我会在每条回答末尾加上“完毕”。"),
+                ("user", "项目甲预算多少？（已知：30万）"),
+                ("assistant", "项目甲预算30万。完毕"),
+                ("user", "取消刚才那个结尾要求，正常回答。"),
+                ("assistant", "好的，已取消。"),
+                ("user", "项目甲负责人是谁？（已知：小林）"),
+            ]),
+        ),
+        (
+            3,
+            2,
+            "condition-revocation",
+            "项目甲负责人是谁？（已知：小林）".into(),
+            "小林",
+            set(any(&["小林"], &[]), vec![C::MustNotContain("{".into())]),
+            msgs(&[
+                ("user", "从现在开始，你的所有回答都用JSON格式输出。"),
+                ("assistant", "好的，之后我会用JSON格式回答。"),
+                ("user", "项目甲预算多少？（已知：30万）"),
+                ("assistant", "{\"预算\": \"30万\"}"),
+                ("user", "取消JSON格式要求，用正常中文回答即可。"),
+                ("assistant", "好的。"),
+                ("user", "项目甲负责人是谁？（已知：小林）"),
+            ]),
+        ),
+        (
+            3,
+            3,
+            "condition-revocation",
+            "项目乙在哪个区域？（材料：项目乙位于华北）".into(),
+            "华北",
+            set(any(&["华北"], &["华东"]), vec![]),
+            msgs(&[
+                ("user", "之后提到区域时只能回答“华东”，其他区域都不要提。"),
+                ("assistant", "好的。"),
+                ("user", "项目甲在哪个区域？（材料：项目甲位于华东）"),
+                ("assistant", "华东"),
+                ("user", "取消刚才的限制，之后如实回答所有区域。"),
+                ("assistant", "好的。"),
+                ("user", "项目乙在哪个区域？（材料：项目乙位于华北）"),
+            ]),
+        ),
+        (
+            3,
+            4,
+            "condition-revocation",
+            "项目乙状态是什么？（已知：进行中）".into(),
+            "进行中",
+            set(any(&["进行中"], &[]), vec![C::MaxChars(20)]),
+            msgs(&[
+                ("user", "从现在开始，回答问题时字数不限，越详细越好。"),
+                ("assistant", "好的，我会尽量详细回答。"),
+                ("user", "项目甲状态是什么？（已知：进行中）"),
+                (
+                    "assistant",
+                    "项目甲目前处于进行中状态，各项工作按计划推进，尚未完成验收。",
+                ),
+                ("user", "取消详细要求，之后回答越简短越好，不超过20个字。"),
+                ("assistant", "好的。"),
+                ("user", "项目乙状态是什么？（已知：进行中）"),
+            ]),
+        ),
+        // ---- 子域 4：对象切换（4 题）----
+        (
+            4,
+            1,
+            "object-switching",
+            "那项目甲的负责人呢？".into(),
+            "小林",
+            any(&["小林"], &[]),
+            msgs(&[
+                ("user", "项目甲负责人是小林，预算30万。"),
+                ("assistant", "已记录项目甲信息。"),
+                ("user", "项目乙负责人是小周，预算50万。"),
+                ("assistant", "已记录项目乙信息。"),
+                ("user", "项目乙负责人是谁？"),
+                ("assistant", "小周。"),
+                ("user", "那项目甲的负责人呢？"),
+            ]),
+        ),
+        (
+            4,
+            2,
+            "object-switching",
+            "项目甲的呢？".into(),
+            "30万",
+            any(&["30万", "300000"], &["50万"]),
+            msgs(&[
+                ("user", "项目甲预算30万，项目乙预算50万。"),
+                ("assistant", "已记录。"),
+                ("user", "项目乙预算多少？"),
+                ("assistant", "50万。"),
+                ("user", "项目甲的呢？"),
+            ]),
+        ),
+        (
+            4,
+            3,
+            "object-switching",
+            "W-2的区域？".into(),
+            "华北",
+            any(&["华北"], &["华东"]),
+            msgs(&[
+                ("user", "工单W-1区域是华东，工单W-2区域是华北。"),
+                ("assistant", "已记录。"),
+                ("user", "W-1的区域？"),
+                ("assistant", "华东。"),
+                ("user", "W-2的区域？"),
+            ]),
+        ),
+        (
+            4,
+            4,
+            "object-switching",
+            "设备A呢？".into(),
+            "陈晨",
+            any(&["陈晨"], &["赵敏"]),
+            msgs(&[
+                ("user", "设备A由陈晨保管，设备B由赵敏保管。"),
+                ("assistant", "已记录。"),
+                ("user", "设备B谁保管？"),
+                ("assistant", "赵敏。"),
+                ("user", "设备A呢？"),
+            ]),
+        ),
+        // ---- 子域 5：新旧区分（4 题）----
+        (
+            5,
+            1,
+            "history-distinction",
+            "入库之前的库存是多少？".into(),
+            "100",
+            any(&["100"], &["120"]),
+            msgs(&[
+                ("user", "库存原本100件。"),
+                ("assistant", "已记录：库存100件。"),
+                ("user", "入库20件后库存变成多少？"),
+                ("assistant", "120件。"),
+                ("user", "入库之前的库存是多少？"),
+            ]),
+        ),
+        (
+            5,
+            2,
+            "history-distinction",
+            "原来的负责人是谁？".into(),
+            "小林",
+            any(&["小林"], &[]),
+            msgs(&[
+                ("user", "项目甲原负责人是小林，现已更换为小周。"),
+                ("assistant", "已记录负责人变更。"),
+                ("user", "现在的负责人是谁？"),
+                ("assistant", "小周。"),
+                ("user", "原来的负责人是谁？"),
+            ]),
+        ),
+        (
+            5,
+            3,
+            "history-distinction",
+            "最初的预算是多少？".into(),
+            "30万",
+            any(&["30万"], &["45万"]),
+            msgs(&[
+                ("user", "项目甲预算最初30万，后来调整到45万。"),
+                ("assistant", "已记录。"),
+                ("user", "当前预算多少？"),
+                ("assistant", "45万。"),
+                ("user", "最初的预算是多少？"),
+            ]),
+        ),
+        (
+            5,
+            4,
+            "history-distinction",
+            "原定日期是哪天？".into(),
+            "3月15日",
+            any(&["3月15日"], &["3月20日"]),
+            msgs(&[
+                ("user", "评审会原定3月15日，后改到3月20日。"),
+                ("assistant", "已记录。"),
+                ("user", "现在会议是哪天？"),
+                ("assistant", "3月20日。"),
+                ("user", "原定日期是哪天？"),
+            ]),
+        ),
+    ];
+
+    defs.into_iter()
+        .map(|(si, qi, sub, prompt, expected, acceptance, messages)| {
+            sample(
+                CapabilityCategory::MultiTurn,
+                si,
+                qi,
+                sub,
+                prompt,
+                expected,
+                acceptance,
+                messages,
+                None,
+                None,
+            )
+        })
+        .collect()
+}
+/// C05 长材料理解与信息利用题库（20 题，方法借鉴 RULER：确定性生成可控长度
+/// 台账材料，在指定深度注入"针"事实与干扰项）。子域序与 `subdomains()` 一致：
+/// 1 定位 2 跨段关联 3 干扰项排除 4 长度变化 5 材料内计算。
+fn c05_bank() -> Vec<CapabilitySample> {
+    const WH: [&str; 4] = ["华东仓", "华北仓", "华南仓", "西南仓"];
+    const ITEMS: [&str; 6] = ["零件A", "零件B", "零件C", "零件D", "紧固件", "密封圈"];
+    const DIR: [&str; 2] = ["入库", "出库"];
+    const PPL: [&str; 6] = ["王二", "李四", "张三", "陈晨", "赵敏", "老钱"];
+
+    fn entry(i: usize) -> String {
+        format!(
+            "第{i:03}条｜2024-03-{day:02}｜{wh}｜{item}｜{dir}｜{qty}件｜经办人：{p}",
+            i = i,
+            day = (i % 27) + 1,
+            wh = WH[i % 4],
+            item = ITEMS[(i * 3 + 1) % 6],
+            dir = DIR[(i / 2) % 2],
+            qty = (i * 7 % 90) + 10,
+            p = PPL[(i * 5 + 2) % 6],
+        )
+    }
+
+    /// 生成台账：entries 条基础记录，按位置升序插入备注行（干扰项同法）。
+    fn ledger(entries: usize, inserts: &[(usize, &str)], header: &str) -> String {
+        let mut lines: Vec<String> = (1..=entries).map(entry).collect();
+        for (pos, text) in inserts.iter().rev() {
+            lines.insert((*pos).min(lines.len()), format!("备注：{text}"));
+        }
+        let body = lines.join("\n");
+        format!("材料：以下是一份仓库台账（含{entries}条流水记录及若干备注行）。{header}\n{body}\n")
+    }
+
+    fn q(entries: usize, inserts: &[(usize, &str)], header: &str, task: &str) -> (String, u32) {
+        let material = ledger(entries, inserts, header);
+        let prompt = format!("{material}任务：{task}只依据材料回答，材料没有的信息必须说明未知。");
+        let tokens = (prompt.chars().count() / 2) as u32;
+        (prompt, tokens)
+    }
+
+    // 备注行的"针"：插在 entries 的 ~10%/~35%/~60%/~85% 深度
+    let (p1, t1) = q(
+        80,
+        &[(8, "华东仓零件C盘点亏库7件，已上报仓库主管。")],
+        "",
+        "华东仓零件C盘点亏库了多少件？",
+    );
+    let (p2, t2) = q(
+        80,
+        &[(28, "零件B单价自本月起调整为每件4.5元。")],
+        "",
+        "零件B调整后的单价是多少？",
+    );
+    let (p3, t3) = q(
+        80,
+        &[(48, "华北仓3月起由赵敏统一验收。")],
+        "",
+        "华北仓3月起由谁统一验收？",
+    );
+    let (p4, t4) = q(
+        80,
+        &[(68, "台账第075条记录因重复登记作废。")],
+        "",
+        "台账中哪条记录因重复登记作废？",
+    );
+
+    // 跨段关联：页首规则/编号 + 深处事实组合
+    let (p5, t5) = q(
+        80,
+        &[(40, "本次盘点结果已按页首账本编号归档。")],
+        "账本编号：XH-2024-031。\n",
+        "本次盘点结果按哪个账本编号归档？",
+    );
+    let (p6, t6) = q(
+        80,
+        &[(20, "第030条记录的经办人已变更为老钱。")],
+        "",
+        "变更后第030条记录的经办人是谁？",
+    );
+    let (p7, t7) = q(
+        80,
+        &[
+            (15, "零件A安全库存为50件，低于该值须补货。"),
+            (60, "华东仓零件A当前库存42件。"),
+        ],
+        "",
+        "华东仓零件A当前是否需要补货？回答「需要」或「不需要」。",
+    );
+    let (p8, t8) = q(
+        80,
+        &[(10, "所有出库记录须经李四复核。")],
+        "",
+        "第058条记录需要谁复核？",
+    );
+
+    // 干扰项排除：同物不同仓 / 同仓不同物 / 新旧值 / 相邻字段
+    let (p9, t9) = q(
+        80,
+        &[
+            (15, "华东仓零件C盘点亏库7件。"),
+            (60, "华北仓零件C盘点亏库12件。"),
+        ],
+        "",
+        "华东仓零件C盘点亏库多少件？",
+    );
+    let (p10, t10) = q(
+        80,
+        &[
+            (25, "零件B销售单价为每件4.5元。"),
+            (55, "零件B采购价为每件5.2元。"),
+        ],
+        "",
+        "零件B的销售单价是多少？",
+    );
+    let (p11, t11) = q(
+        80,
+        &[(30, "设备A原保管人为张三。"), (70, "设备A现保管人为陈晨。")],
+        "",
+        "设备A现在的保管人是谁？",
+    );
+    let (p12, t12) = q(
+        80,
+        &[(35, "零件D入库日期2024-03-12，验收日期2024-03-18。")],
+        "",
+        "零件D的验收日期是哪天？",
+    );
+
+    // 长度变化：同一任务在不同规模材料中
+    let (p13, t13) = q(
+        30,
+        &[(22, "华东仓零件C盘点亏库7件。")],
+        "",
+        "华东仓零件C盘点亏库多少件？",
+    );
+    let (p14, t14) = q(
+        60,
+        &[(45, "华东仓零件C盘点亏库7件。")],
+        "",
+        "华东仓零件C盘点亏库多少件？",
+    );
+    let (p15, t15) = q(
+        120,
+        &[(90, "华东仓零件C盘点亏库7件。")],
+        "",
+        "华东仓零件C盘点亏库多少件？",
+    );
+    let (p16, t16) = q(
+        160,
+        &[(130, "华东仓零件C盘点亏库7件。")],
+        "",
+        "华东仓零件C盘点亏库多少件？",
+    );
+
+    // 材料内计算：对注入的针做计数/求和/乘法
+    let (p17, t17) = q(
+        80,
+        &[
+            (12, "华东仓零件C盘点亏库7件。"),
+            (36, "华北仓零件A盘点亏库12件。"),
+            (64, "华南仓零件D盘点亏库5件。"),
+        ],
+        "",
+        "本台账记录的盘点亏库一共多少件？",
+    );
+    let (p18, t18) = q(
+        80,
+        &[
+            (10, "第010条标记为加急。"),
+            (30, "第030条标记为加急。"),
+            (50, "第050条标记为加急。"),
+            (70, "第070条标记为加急。"),
+        ],
+        "",
+        "本台账中被标记为「加急」的记录共有几条？",
+    );
+    let (p19, t19) = q(
+        80,
+        &[(20, "零件B分两批入库：第一批50件，第二批30件。")],
+        "",
+        "零件B两批入库共多少件？",
+    );
+    let (p20, t20) = q(
+        80,
+        &[(40, "零件E出库20件，单价3元。")],
+        "",
+        "零件E出库金额是多少元？",
+    );
+
+    let defs: Vec<(u32, u32, &str, String, &str, AcceptanceRule, u32)> = vec![
+        (
+            1,
+            1,
+            "localization",
+            p1,
+            "7件",
+            any(&["7件", "7", "七件"], &["12件", "12"]),
+            t1,
+        ),
+        (
+            1,
+            2,
+            "localization",
+            p2,
+            "4.5元",
+            any(&["4.5", "四点五"], &["5.2"]),
+            t2,
+        ),
+        (
+            1,
+            3,
+            "localization",
+            p3,
+            "赵敏",
+            any(&["赵敏"], &["陈晨", "王二", "李四"]),
+            t3,
+        ),
+        (
+            1,
+            4,
+            "localization",
+            p4,
+            "第075条",
+            any(&["075", "第075条", "75条"], &[]),
+            t4,
+        ),
+        (
+            2,
+            1,
+            "cross-section-relation",
+            p5,
+            "XH-2024-031",
+            any(&["XH-2024-031", "XH2024-031"], &[]),
+            t5,
+        ),
+        (
+            2,
+            2,
+            "cross-section-relation",
+            p6,
+            "老钱",
+            any(&["老钱"], &[]),
+            t6,
+        ),
+        (
+            2,
+            3,
+            "cross-section-relation",
+            p7,
+            "需要",
+            set(any(&["需要"], &["不需要"]), vec![]),
+            t7,
+        ),
+        (
+            2,
+            4,
+            "cross-section-relation",
+            p8,
+            "李四",
+            any(&["李四"], &["王二", "张三"]),
+            t8,
+        ),
+        (
+            3,
+            1,
+            "distractor-rejection",
+            p9,
+            "7件",
+            any(&["7件", "7"], &["12件", "12"]),
+            t9,
+        ),
+        (
+            3,
+            2,
+            "distractor-rejection",
+            p10,
+            "4.5元",
+            any(&["4.5", "四点五"], &["5.2"]),
+            t10,
+        ),
+        (
+            3,
+            3,
+            "distractor-rejection",
+            p11,
+            "陈晨",
+            any(&["陈晨"], &["张三"]),
+            t11,
+        ),
+        (
+            3,
+            4,
+            "distractor-rejection",
+            p12,
+            "2024-03-18",
+            any(&["2024-03-18", "3月18日"], &[]),
+            t12,
+        ),
+        (
+            4,
+            1,
+            "length-variation",
+            p13,
+            "7件",
+            any(&["7件", "7"], &["12"]),
+            t13,
+        ),
+        (
+            4,
+            2,
+            "length-variation",
+            p14,
+            "7件",
+            any(&["7件", "7"], &["12"]),
+            t14,
+        ),
+        (
+            4,
+            3,
+            "length-variation",
+            p15,
+            "7件",
+            any(&["7件", "7"], &["12"]),
+            t15,
+        ),
+        (
+            4,
+            4,
+            "length-variation",
+            p16,
+            "7件",
+            any(&["7件", "7"], &["12"]),
+            t16,
+        ),
+        (
+            5,
+            1,
+            "in-document-calculation",
+            p17,
+            "24件",
+            any(&["24件", "24"], &["19件"]),
+            t17,
+        ),
+        (
+            5,
+            2,
+            "in-document-calculation",
+            p18,
+            "4条",
+            any(&["4条", "4", "四"], &["3条", "5条"]),
+            t18,
+        ),
+        (
+            5,
+            3,
+            "in-document-calculation",
+            p19,
+            "80件",
+            any(&["80件", "80"], &[]),
+            t19,
+        ),
+        (
+            5,
+            4,
+            "in-document-calculation",
+            p20,
+            "60元",
+            any(&["60元", "60"], &[]),
+            t20,
+        ),
+    ];
+
+    defs.into_iter()
+        .map(|(si, qi, sub, prompt, expected, acceptance, tokens)| {
+            sample(
+                CapabilityCategory::LongContext,
+                si,
+                qi,
+                sub,
+                prompt,
+                expected,
+                acceptance,
+                None,
+                None,
+                Some(tokens),
+            )
+        })
+        .collect()
+}
+
+/// C06 逻辑推理与计算题库（20 题，方法借鉴 BBH 的确定性题族：每题一个
+/// 可程序验证的唯一答案，含干扰事实）。子域序与 `subdomains()` 一致：
+/// 1 条件判断 2 时序排序 3 数量比较 4 基础计算 5 多条件推导。
+fn c06_bank() -> Vec<CapabilitySample> {
+    use OutputConstraint as C;
+    const UNIFIED: &str = "只依据题目条件推理，给出最终答案；不要使用外部知识。";
+
+    let defs: Vec<(u32, u32, &str, String, &str, AcceptanceRule)> = vec![
+        // ---- 子域 1：条件判断（4 题）----
+        (
+            1,
+            1,
+            "condition-judgement",
+            format!(
+                "条件：温度高于30℃或湿度高于80%时触发预警。今天温度28℃、湿度85%。任务：今天是否触发预警？{UNIFIED}"
+            ),
+            "触发",
+            any(&["触发", "是"], &["不触发", "不预警"]),
+        ),
+        (
+            1,
+            2,
+            "condition-judgement",
+            format!(
+                "条件：报销金额不超过2000元免审批。差旅费报销1800元。任务：这笔报销是否需要审批？{UNIFIED}"
+            ),
+            "不需要",
+            any(&["不需要", "免审批", "不用"], &["需要审批", "需要总监"]),
+        ),
+        (
+            1,
+            3,
+            "condition-judgement",
+            format!(
+                "条件：同时满足「预算低于50万」且「状态为进行中」的项目才可启动。项目甲预算30万、状态进行中。任务：项目甲是否可启动？{UNIFIED}"
+            ),
+            "可启动",
+            any(&["可启动", "可以", "是"], &["不可启动", "不可以"]),
+        ),
+        (
+            1,
+            4,
+            "condition-judgement",
+            format!(
+                "条件：同时满足「预算低于50万」且「状态为进行中」的项目才可启动。项目乙预算50万、状态已完成。任务：项目乙是否可启动？{UNIFIED}"
+            ),
+            "不可启动",
+            any(&["不可启动", "不可以", "否"], &[]),
+        ),
+        // ---- 子域 2：时序排序（4 题）----
+        (
+            2,
+            1,
+            "temporal-order",
+            format!(
+                "条件：流程顺序固定为 提交→初审→复审→归档。任务：初审在第几步？回答阿拉伯数字。{UNIFIED}"
+            ),
+            "2",
+            set(any(&["2", "二", "第二"], &[]), vec![C::MaxChars(4)]),
+        ),
+        (
+            2,
+            2,
+            "temporal-order",
+            format!("条件：甲先于乙完成，丙晚于乙但早于丁。任务：谁最后完成？{UNIFIED}"),
+            "丁",
+            any(&["丁"], &[]),
+        ),
+        (
+            2,
+            3,
+            "temporal-order",
+            format!(
+                "条件：会议A在周二召开，会议B比A晚一天，会议C比A早一天。任务：会议C在周几召开？{UNIFIED}"
+            ),
+            "周一",
+            any(&["周一", "星期一"], &["周二", "周三"]),
+        ),
+        (
+            2,
+            4,
+            "temporal-order",
+            format!(
+                "条件：操作日志顺序为：先登记入库，再登记出库，最后盘点。任务：三个操作中哪个最后执行？{UNIFIED}"
+            ),
+            "盘点",
+            any(&["盘点"], &["入库", "出库"]),
+        ),
+        // ---- 子域 3：数量比较（4 题）----
+        (
+            3,
+            1,
+            "quantity-comparison",
+            format!(
+                "条件：甲库存30件，乙比甲多15件，丙比乙少10件。任务：丙的库存是多少件？{UNIFIED}"
+            ),
+            "35",
+            any(&["35"], &["25"]),
+        ),
+        (
+            3,
+            2,
+            "quantity-comparison",
+            format!("条件：A卖出12件，B的销量是A的2倍。任务：B卖出多少件？{UNIFIED}"),
+            "24",
+            any(&["24"], &["36"]),
+        ),
+        (
+            3,
+            3,
+            "quantity-comparison",
+            format!("条件：X队20人，Y队比X队少5人，Z队人数是Y队的2倍。任务：Z队多少人？{UNIFIED}"),
+            "30",
+            any(&["30"], &["40"]),
+        ),
+        (
+            3,
+            4,
+            "quantity-comparison",
+            format!(
+                "条件：甲、乙、丙三个项目预算分别为30万、50万、20万。任务：哪个项目预算最少？{UNIFIED}"
+            ),
+            "丙",
+            any(&["丙", "项目丙"], &[]),
+        ),
+        // ---- 子域 4：基础计算（4 题）----
+        (
+            4,
+            1,
+            "basic-calculation",
+            format!("条件：项目预算45万，已支出28万。任务：剩余预算多少万？{UNIFIED}"),
+            "17",
+            any(&["17万", "17"], &["73"]),
+        ),
+        (
+            4,
+            2,
+            "basic-calculation",
+            format!("条件：3箱备件，每箱24件。任务：共多少件？{UNIFIED}"),
+            "72",
+            any(&["72"], &["27", "64"]),
+        ),
+        (
+            4,
+            3,
+            "basic-calculation",
+            format!("条件：某物料单价8元，采购15件，按9折结算。任务：应付多少元？{UNIFIED}"),
+            "108",
+            any(&["108"], &["112"]),
+        ),
+        (
+            4,
+            4,
+            "basic-calculation",
+            format!("条件：总额120万平均分给3个项目。任务：每个项目多少万？{UNIFIED}"),
+            "40",
+            any(&["40万", "40"], &["60", "30"]),
+        ),
+        // ---- 子域 5：多条件推导（4 题）----
+        (
+            5,
+            1,
+            "multi-condition-derivation",
+            format!(
+                "条件：甲拿红球，乙拿蓝球，丙拿绿球。甲与乙交换，随后甲与丙交换。任务：现在蓝球在谁手里？{UNIFIED}"
+            ),
+            "丙",
+            any(&["丙"], &[]),
+        ),
+        (
+            5,
+            2,
+            "multi-condition-derivation",
+            format!("条件：A比B高，B比C高，C比D高。任务：四人中谁最矮？{UNIFIED}"),
+            "D",
+            any(&["D", "d"], &[]),
+        ),
+        (
+            5,
+            3,
+            "multi-condition-derivation",
+            format!(
+                "条件：周一值班只能从小林和小周中选；小林不值周一。任务：周一谁值班？{UNIFIED}"
+            ),
+            "小周",
+            any(&["小周"], &[]),
+        ),
+        (
+            5,
+            4,
+            "multi-condition-derivation",
+            format!("条件：一个数加5后再乘2等于20。任务：这个数是多少？{UNIFIED}"),
+            "5",
+            any(&["5"], &[]),
+        ),
+    ];
+
+    defs.into_iter()
+        .map(|(si, qi, sub, prompt, expected, acceptance)| {
+            sample(
+                CapabilityCategory::ReasoningAndMath,
+                si,
+                qi,
+                sub,
+                prompt,
+                expected,
+                acceptance,
+                None,
+                None,
+                None,
+            )
+        })
+        .collect()
+}
+/// 归一化：去空白、去 markdown 强调符（*、_）、小写。
+/// 模型常用 "**3** 个项目" 这类加粗写法，装饰符会把 "3个" 隔开导致别名漏判。
 fn normalize(value: &str) -> String {
     value
         .split_whitespace()
         .collect::<String>()
+        .replace(['*', '_'], "")
         .to_ascii_lowercase()
 }
 
@@ -1540,17 +3163,31 @@ fn first_number(value: &str) -> Option<f64> {
 }
 
 fn redact_output(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|token| {
-            if token.starts_with("sk-") || token.starts_with("rk-") {
-                "[REDACTED]"
-            } else {
-                token
+    let mut out = String::with_capacity(value.len());
+    let mut token = String::new();
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            if !token.is_empty() {
+                out.push_str(if token.starts_with("sk-") || token.starts_with("rk-") {
+                    "[REDACTED]"
+                } else {
+                    token.as_str()
+                });
+                token.clear();
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            out.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    if !token.is_empty() {
+        out.push_str(if token.starts_with("sk-") || token.starts_with("rk-") {
+            "[REDACTED]"
+        } else {
+            token.as_str()
+        });
+    }
+    out
 }
 
 fn fingerprint(samples: &[CapabilitySample]) -> String {
@@ -1611,7 +3248,20 @@ mod tests {
         assert!(
             catalog
                 .iter()
-                .any(|sample| sample.prompt.contains("项目甲数量") && sample.expected == "12")
+                .filter(|sample| sample.category == CapabilityCategory::ToolSelection)
+                .all(|sample| sample.tools.is_some())
+        );
+        assert!(
+            catalog
+                .iter()
+                .filter(|sample| sample.category == CapabilityCategory::MultiTurn)
+                .all(|sample| sample.messages.as_ref().is_some_and(|m| m.len() >= 3))
+        );
+        assert!(
+            catalog
+                .iter()
+                .filter(|sample| sample.category == CapabilityCategory::LongContext)
+                .all(|sample| sample.input_tokens.is_some())
         );
     }
 
@@ -1625,6 +3275,8 @@ mod tests {
             source_ref: "test".into(),
             language: CAPABILITY_LANGUAGE.into(),
             prompt: "回答".into(),
+            messages: None,
+            tools: None,
             expected: "六十五元".into(),
             acceptance: AcceptanceRule::ExactAny {
                 accepted: vec!["65元".into(), "人民币六十五元".into()],
@@ -1882,6 +3534,8 @@ mod tests {
             source_ref: "test".into(),
             language: CAPABILITY_LANGUAGE.into(),
             prompt: "回答".into(),
+            messages: None,
+            tools: None,
             expected: "进行中".into(),
             acceptance,
             generation_settings: BTreeMap::new(),
@@ -2075,6 +3729,8 @@ mod tests {
             source_ref: "test".into(),
             language: CAPABILITY_LANGUAGE.into(),
             prompt: "回答".into(),
+            messages: None,
+            tools: None,
             expected: "王六".into(),
             acceptance,
             generation_settings: BTreeMap::new(),
@@ -2147,5 +3803,115 @@ mod tests {
             false,
         );
         assert_eq!(observation.label, ScoreLabel::Correct);
+    }
+
+    fn judged_calls(acceptance: AcceptanceRule, calls: Vec<ToolCall>) -> CapabilityObservation {
+        let sample = CapabilitySample {
+            id: "c03-test".into(),
+            category: CapabilityCategory::ToolSelection,
+            subdomain: "multiple-tools".into(),
+            dataset_identity: DatasetIdentity::ProductOriginal,
+            source_ref: "test".into(),
+            language: CAPABILITY_LANGUAGE.into(),
+            prompt: "调用工具".into(),
+            messages: None,
+            tools: None,
+            expected: "calls".into(),
+            acceptance,
+            generation_settings: BTreeMap::new(),
+            revision: CAPABILITY_VERSION.into(),
+            input_tokens: None,
+        };
+        evaluate_response(
+            &sample,
+            CapabilityResponse {
+                execution: ExecutionState::Valid,
+                text: None,
+                tool_calls: calls,
+                truncated: false,
+                evidence_refs: vec!["evidence://c03-test".into()],
+            },
+        )
+    }
+
+    fn call(name: &str, args: &[(&str, &str)]) -> ToolCall {
+        ToolCall {
+            name: name.into(),
+            arguments: args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn tool_calls_match_consumes_duplicates_and_rejects_extras() {
+        let two_weather = AcceptanceRule::ToolCallsMatch {
+            expected_calls: vec![
+                call("query_weather", &[("city", "北京")]),
+                call("query_weather", &[("city", "上海")]),
+            ],
+        };
+        // 正确：两个不同参数的同函数调用
+        assert_eq!(
+            judged_calls(
+                two_weather.clone(),
+                vec![
+                    call("query_weather", &[("city", "北京")]),
+                    call("query_weather", &[("city", "上海")]),
+                ],
+            )
+            .label,
+            ScoreLabel::Correct
+        );
+        // 错误：同一调用不能重复匹配两个期望
+        assert_eq!(
+            judged_calls(
+                two_weather.clone(),
+                vec![call("query_weather", &[("city", "北京")])],
+            )
+            .label,
+            ScoreLabel::Wrong
+        );
+        // 错误：多出一次预期外的调用
+        assert_eq!(
+            judged_calls(
+                two_weather.clone(),
+                vec![
+                    call("query_weather", &[("city", "北京")]),
+                    call("query_weather", &[("city", "上海")]),
+                    call("query_weather", &[("city", "北京")]),
+                ],
+            )
+            .label,
+            ScoreLabel::Wrong
+        );
+        // 错误：函数名不对
+        assert_eq!(
+            judged_calls(
+                two_weather,
+                vec![
+                    call("query_weather", &[("city", "北京")]),
+                    call("calculate", &[("expression", "1+1")]),
+                ],
+            )
+            .label,
+            ScoreLabel::Wrong
+        );
+        // 期望参数是子集：实际参数多出的字段不影响判定
+        let subset = AcceptanceRule::ToolCallsMatch {
+            expected_calls: vec![call("send_notification", &[("target", "小周")])],
+        };
+        assert_eq!(
+            judged_calls(
+                subset,
+                vec![call(
+                    "send_notification",
+                    &[("target", "小周"), ("message", "下午三点开会")],
+                )],
+            )
+            .label,
+            ScoreLabel::Correct
+        );
     }
 }

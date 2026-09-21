@@ -10,6 +10,10 @@ const MAX_ATTEMPTS: u8 = 3;
 pub struct ChatCompletionsRequest {
     pub module_id: String,
     pub prompt: String,
+    /// 预置多轮消息（能力 C04 用）；为 None 时用 prompt 构造单条 user 消息。
+    pub messages: Option<Vec<Value>>,
+    /// 随请求发送的工具定义（能力 C03 用）。
+    pub tools: Option<Vec<Value>>,
     pub max_tokens: u32,
     pub stream: bool,
 }
@@ -102,13 +106,21 @@ impl ChatCompletionsTransport {
     }
 
     pub fn send(&self, request: ChatCompletionsRequest) -> ChatCompletionsResponse {
-        let payload = json!({
+        let messages = request
+            .messages
+            .clone()
+            .unwrap_or_else(|| vec![json!({"role": "user", "content": request.prompt})]);
+        let mut payload = json!({
             "model": self.model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": messages,
             "temperature": 0,
             "max_tokens": request.max_tokens,
             "stream": request.stream,
         });
+        if let Some(tools) = request.tools.clone() {
+            payload["tools"] = Value::Array(tools);
+            payload["tool_choice"] = Value::String("auto".into());
+        }
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
         for attempt in 1..=MAX_ATTEMPTS {
@@ -455,6 +467,8 @@ impl ChatCompletionsTransport {
                 "endpoint": redact_endpoint(&self.endpoint),
                 "model": self.model,
                 "prompt": request.prompt,
+                "messages": request.messages,
+                "tools": request.tools,
                 "max_tokens": request.max_tokens,
                 "stream": request.stream,
             },
@@ -705,6 +719,8 @@ mod tests {
         .unwrap();
         let request = ChatCompletionsRequest {
             module_id: "capability".into(),
+            messages: None,
+            tools: None,
             prompt: "hello".into(),
             max_tokens: 16,
             stream: false,
@@ -748,6 +764,8 @@ mod tests {
         .unwrap();
         let stream = transport.send_stream(ChatCompletionsRequest {
             module_id: "performance".into(),
+            messages: None,
+            tools: None,
             prompt: "stream".into(),
             max_tokens: 16,
             stream: true,
@@ -812,6 +830,8 @@ mod tests {
         .unwrap();
         let response = transport.send(ChatCompletionsRequest {
             module_id: "performance".into(),
+            messages: None,
+            tools: None,
             prompt: "hello".into(),
             max_tokens: 16,
             stream: false,
@@ -840,6 +860,8 @@ mod tests {
         .unwrap();
         let response = transport.send(ChatCompletionsRequest {
             module_id: "specification".into(),
+            messages: None,
+            tools: None,
             prompt: "hello".into(),
             max_tokens: 16,
             stream: false,

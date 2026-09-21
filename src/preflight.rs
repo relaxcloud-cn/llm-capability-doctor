@@ -78,6 +78,8 @@ pub fn check_model_connectivity(
     };
     let response = transport.send(ChatCompletionsRequest {
         module_id: "startup-preflight".into(),
+        messages: None,
+        tools: None,
         prompt: PREFLIGHT_PROMPT.into(),
         max_tokens: PREFLIGHT_MAX_TOKENS,
         stream: false,

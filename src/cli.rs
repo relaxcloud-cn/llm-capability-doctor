@@ -19,7 +19,7 @@ use crate::baseline::{
     build_report_for_record as build_baseline_report, fixed_baseline_catalog,
 };
 use crate::capability::{
-    CapabilityResponse, CapabilitySettings, ExecutionState, build_scorecard,
+    CapabilityResponse, CapabilitySettings, ExecutionState, ToolCall, build_scorecard,
     fixed_capability_catalog,
 };
 use crate::conclusion::{CustomerConclusionReport, build_default_customer_report};
@@ -221,6 +221,8 @@ impl LiveExecutor {
     fn execute_smoke(&mut self, module_id: &str) -> ModuleRunResult {
         let request = ChatCompletionsRequest {
             module_id: module_id.into(),
+            messages: None,
+            tools: None,
             prompt: probe_prompt(module_id).into(),
             max_tokens: 64,
             stream: false,
@@ -403,6 +405,8 @@ impl LiveExecutor {
                 });
                 let request = ChatCompletionsRequest {
                     module_id: "specification".into(),
+                    messages: None,
+                    tools: None,
                     prompt: format!(
                         "规格样本 {sample_id}。{}",
                         plan.fixed_settings
@@ -547,6 +551,8 @@ impl LiveExecutor {
         let calibration_chars = calibration_prompt.len();
         let calibration_request = ChatCompletionsRequest {
             module_id: "specification".into(),
+            messages: None,
+            tools: None,
             prompt: calibration_prompt,
             max_tokens: 64,
             stream: false,
@@ -578,6 +584,8 @@ impl LiveExecutor {
             let estimated_tokens = (prompt.len() as f64 / density) as u64;
             let request = ChatCompletionsRequest {
                 module_id: "specification".into(),
+                messages: None,
+                tools: None,
                 prompt,
                 max_tokens: 256,
                 stream: false,
@@ -1011,14 +1019,23 @@ impl LiveExecutor {
                     samples.len()
                 ),
             });
+            let messages = sample.messages.as_ref().map(|turns| {
+                turns
+                    .iter()
+                    .map(|turn| json!({"role": turn.role, "content": turn.content}))
+                    .collect::<Vec<serde_json::Value>>()
+            });
             let request = ChatCompletionsRequest {
                 module_id: "capability".into(),
                 prompt: sample.prompt.clone(),
+                messages,
+                tools: sample.tools.clone(),
                 max_tokens: 1024,
                 stream: false,
             };
             let response = self.transport.send(request.clone());
             let text = completion_text(response.parsed.as_ref());
+            let tool_calls = parse_tool_calls(response.parsed.as_ref());
             let truncated =
                 response_finish_reason(response.parsed.as_ref()).as_deref() == Some("length");
             let execution = if response.error.is_some()
@@ -1037,7 +1054,7 @@ impl LiveExecutor {
                 CapabilityResponse {
                     execution,
                     text,
-                    tool_calls: Vec::new(),
+                    tool_calls,
                     truncated,
                     evidence_refs: Vec::new(),
                 },
@@ -1747,6 +1764,8 @@ impl LiveExecutor {
             });
             let request = ChatCompletionsRequest {
                 module_id: "baseline".into(),
+                messages: None,
+                tools: None,
                 prompt: format!("基线场景 {}：{}", scenario.id(), scenario.title()),
                 max_tokens: 256,
                 stream: matches!(
@@ -1888,6 +1907,8 @@ fn performance_request(
 ) -> ChatCompletionsRequest {
     ChatCompletionsRequest {
         module_id: "performance".into(),
+        messages: None,
+        tools: None,
         prompt: format!(
             "性能计划 {category} {:?} 第 {} 次；输入目标 {input_tokens}；输出目标 {target_output_tokens}；返回短文本并保持正常结束。",
             workload,
@@ -2254,6 +2275,50 @@ fn completion_text(value: Option<&serde_json::Value>) -> Option<String> {
                     .map(str::to_owned)
             })
         })
+}
+
+fn parse_tool_calls(value: Option<&serde_json::Value>) -> Vec<ToolCall> {
+    let Some(value) = value else {
+        return Vec::new();
+    };
+    value
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(serde_json::Value::as_array)
+        .map(|calls| {
+            calls
+                .iter()
+                .filter_map(|call| {
+                    let function = call.get("function")?;
+                    let name = function.get("name")?.as_str()?.to_string();
+                    let arguments = function
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        .and_then(|raw| {
+                            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(raw)
+                                .ok()
+                        })
+                        .map(|object| {
+                            object
+                                .into_iter()
+                                .map(|(key, value)| {
+                                    let rendered = match value {
+                                        serde_json::Value::String(text) => text,
+                                        other => other.to_string(),
+                                    };
+                                    (key, rendered)
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Some(ToolCall { name, arguments })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

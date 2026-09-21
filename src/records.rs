@@ -617,23 +617,40 @@ fn digest_json<T: Serialize>(value: &T) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// 逐词脱敏但保留原始空白（含换行/缩进）——证据文本的行结构影响
+/// LineCount 等约束的重放判定，不能为了脱敏破坏证据原文。
 fn redact_text(value: &str) -> String {
-    let mut result = Vec::new();
+    let mut out = String::with_capacity(value.len());
+    let mut token = String::new();
     let mut redact_next = false;
-    for token in value.split_whitespace() {
-        if redact_next {
-            result.push("[REDACTED]");
-            redact_next = false;
-        } else if token.eq_ignore_ascii_case("bearer") {
-            result.push(token);
-            redact_next = true;
-        } else if token.starts_with("sk-") || token.starts_with("rk-") {
-            result.push("[REDACTED]");
+    for ch in value.chars() {
+        if ch.is_whitespace() {
+            emit_redacted_token(&mut out, &mut token, &mut redact_next);
+            out.push(ch);
         } else {
-            result.push(token);
+            token.push(ch);
         }
     }
-    result.join(" ")
+    emit_redacted_token(&mut out, &mut token, &mut redact_next);
+    out
+}
+
+fn emit_redacted_token(out: &mut String, token: &mut String, redact_next: &mut bool) {
+    if token.is_empty() {
+        return;
+    }
+    if *redact_next {
+        out.push_str("[REDACTED]");
+        *redact_next = false;
+    } else if token.eq_ignore_ascii_case("bearer") {
+        out.push_str(token);
+        *redact_next = true;
+    } else if token.starts_with("sk-") || token.starts_with("rk-") {
+        out.push_str("[REDACTED]");
+    } else {
+        out.push_str(token);
+    }
+    token.clear();
 }
 
 fn redact_value(value: Value, key: Option<&str>) -> RedactionResult {

@@ -27,13 +27,58 @@ fn main() {
         let text = body["choices"][0]["message"]["content"]
             .as_str()
             .map(str::to_string);
+        let tool_calls = body["choices"][0]["message"]["tool_calls"]
+            .as_array()
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|call| {
+                        let function = call.get("function")?;
+                        let name = function.get("name")?.as_str()?.to_string();
+                        let arguments = function
+                            .get("arguments")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(|raw| {
+                                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(
+                                    raw,
+                                )
+                                .ok()
+                            })
+                            .map(|object| {
+                                object
+                                    .into_iter()
+                                    .map(|(key, value)| {
+                                        let rendered = match value {
+                                            serde_json::Value::String(t) => t,
+                                            other => other.to_string(),
+                                        };
+                                        (key, rendered)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        Some(ToolCall { name, arguments })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let truncated = body["choices"][0]["finish_reason"].as_str() == Some("length");
+        let status = ev["payload"]["response"]["status"].as_u64();
+        let has_error = !ev["payload"]["response"]["error"].is_null();
+        let execution =
+            if has_error || !status.is_some_and(|code| (200..300).contains(&(code as u16))) {
+                ExecutionState::Invalid {
+                    reason: "真实服务请求未得到可评分响应".into(),
+                }
+            } else {
+                ExecutionState::Valid
+            };
         let obs = evaluate_response(
             sample,
             CapabilityResponse {
-                execution: ExecutionState::Valid,
+                execution,
                 text,
-                tool_calls: vec![],
+                tool_calls,
                 truncated,
                 evidence_refs: vec![],
             },
