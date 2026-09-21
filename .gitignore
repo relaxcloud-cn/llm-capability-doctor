@@ -3,5 +3,6 @@ target/
 runs/
 coverage/
 dist/
+agentcheck-report/
 .DS_Store
 npm-debug.log*

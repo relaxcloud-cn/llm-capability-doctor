@@ -629,7 +629,11 @@ final class Workbench: ObservableObject {
     progressMessage = Self.customerProgressMessage(event.message)
     if event.phase == "module_started" {
       guard let moduleID = event.moduleID, Self.uiModule(moduleID) != nil else { return }
-      var items = Self.progressItems(for: moduleID)
+      // 优先使用事件携带的小项清单（CLI 单源下发）；旧版 CLI 无该字段时退回本地模板。
+      var items =
+        event.items?.map {
+          ProgressItem(id: $0.id, name: $0.name, completed: 0, total: $0.total, state: "等待中")
+        } ?? Self.progressItems(for: moduleID)
       if !items.isEmpty { items[0].state = "进行中" }
       progressItems = items
       moduleProgressSnapshots[moduleID] = items

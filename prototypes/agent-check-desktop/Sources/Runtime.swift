@@ -36,6 +36,12 @@ struct LaunchConfiguration {
   }
 }
 
+struct ProgressPlanItem: Decodable {
+  var id: String
+  var name: String
+  var total: Int
+}
+
 struct ProgressEvent: Decodable {
   var phase: String
   var moduleID: String?
@@ -49,6 +55,7 @@ struct ProgressEvent: Decodable {
   var detailIndex: Int?
   var detailTotal: Int?
   var detailID: String?
+  var items: [ProgressPlanItem]?
 
   enum CodingKeys: String, CodingKey {
     case phase
@@ -63,6 +70,7 @@ struct ProgressEvent: Decodable {
     case detailIndex = "detail_index"
     case detailTotal = "detail_total"
     case detailID = "detail_id"
+    case items
   }
 
   init(from decoder: Decoder) throws {
@@ -79,6 +87,7 @@ struct ProgressEvent: Decodable {
     detailIndex = try values.decodeIfPresent(Int.self, forKey: .detailIndex)
     detailTotal = try values.decodeIfPresent(Int.self, forKey: .detailTotal)
     detailID = try values.decodeIfPresent(String.self, forKey: .detailID)
+    items = try values.decodeIfPresent([ProgressPlanItem].self, forKey: .items)
   }
 }
 

@@ -2340,6 +2340,116 @@ pub struct ProgressEvent {
     pub detail_total: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<ProgressPlanItem>>,
+    /// run_started 事件携带的本次选中模块列表，供显示端预渲染完整清单。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub modules: Option<Vec<String>>,
+}
+
+/// 模块内部检测小项的展示定义；module_started 事件携带，
+/// 让 CLI 终端和 GUI 使用同一份小项清单渲染进度。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgressPlanItem {
+    pub id: String,
+    pub name: String,
+    pub total: usize,
+}
+
+/// 后端模块 ID 对应的客户可见名称，与 GUI 展示保持一致。
+pub fn module_display_name(module_id: &str) -> &'static str {
+    match module_id {
+        "ingress" => "服务接入",
+        "specification" => "模型规格实测",
+        "capability" => "模型能力跑分",
+        "performance" => "模型性能实测",
+        "agent" => "智能体实测",
+        "baseline" => "模型基线对比",
+        _ => "未知项目",
+    }
+}
+
+/// 模块结果状态的中文标签，与 GUI statusLabel 映射一致。
+pub fn module_state_label(state: &str) -> &'static str {
+    match state {
+        "pass" => "通过",
+        "fail" => "失败",
+        "unsupported" => "不支持",
+        "inconclusive" => "待确认",
+        "invalid_execution" => "执行无效",
+        "not_applicable" => "不适用",
+        "not_selected" => "未选择",
+        "unverified" => "未验证",
+        _ => "未知",
+    }
+}
+
+/// 各模块的检测小项清单（id、客户可见名称、子项数量），
+/// 与 GUI progressItems 模板保持一致。
+pub fn module_plan_items(module_id: &str) -> Option<Vec<ProgressPlanItem>> {
+    let entries: &[(&str, &str, usize)] = match module_id {
+        "specification" => &[
+            ("S01", "协议可接受上限", 4),
+            ("S04", "工具调用", 5),
+            ("S05", "结构化输出", 2),
+            ("S06", "消息与多轮输入", 4),
+            ("S07", "流式输出", 2),
+        ],
+        "capability" => &[
+            ("C01", "文本理解与指令执行", 20),
+            ("C02", "信息提取与结构化填写", 20),
+            ("C03", "工具选择与参数填写", 20),
+            ("C04", "多轮对话与条件承接", 20),
+            ("C05", "长材料理解与信息利用", 20),
+            ("C06", "逻辑推理与计算", 20),
+        ],
+        "performance" => &[
+            ("P01", "首字响应时间", 2),
+            ("P02", "完整响应时间", 1),
+            ("P03", "并发处理能力", 4),
+            ("P04", "持续运行稳定性", 1),
+            ("P05", "长文本负载", 7),
+        ],
+        "agent" => &[
+            ("T1-A", "遵守任务规则", 1),
+            ("T1-B", "处理外部注入", 1),
+            ("T2-A", "选择正确工具", 1),
+            ("T2-B", "校验路径与参数", 1),
+            ("T3-A", "使用工具返回驱动下一步", 1),
+            ("T3-B", "处理工具返回的信息缺失", 1),
+            ("T4-A", "跨轮次保留状态", 1),
+            ("T4-B", "跨轮次响应条件变化", 1),
+            ("T5-A", "处理可恢复工具失败", 1),
+            ("T5-B", "处理信息不足与提前结束", 1),
+        ],
+        "baseline" => &[
+            ("BC01", "响应外层", 1),
+            ("BC02", "候选回复", 1),
+            ("BC03", "回复消息", 1),
+            ("BC04", "用量统计", 1),
+            ("BC05", "细分用量", 1),
+            ("BC06", "附加信息", 1),
+            ("BC07", "工具调用结构", 1),
+            ("BC08", "函数名称与参数", 1),
+            ("BC09", "分块外层", 1),
+            ("BC10", "增量候选", 1),
+            ("BC11", "消息增量", 1),
+            ("BC12", "工具调用增量", 1),
+            ("BC13", "流式用量返回", 1),
+            ("BC14", "错误对象", 1),
+        ],
+        _ => return None,
+    };
+    Some(
+        entries
+            .iter()
+            .map(|(id, name, total)| ProgressPlanItem {
+                id: (*id).into(),
+                name: (*name).into(),
+                total: *total,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2460,6 +2570,8 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         detail_index: None,
         detail_total: None,
         detail_id: None,
+        items: None,
+        modules: Some(selected.clone()),
     });
     let stop_index = request
         .stop_after
@@ -2476,10 +2588,12 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             index,
             total: selected.len(),
             state: None,
-            message: format!("开始检测 {module_id}"),
+            message: format!("开始检测 {}", module_display_name(module_id)),
             detail_index: None,
             detail_total: None,
             detail_id: None,
+            items: module_plan_items(module_id),
+            modules: None,
         });
         let mut detail_progress = |detail: ProgressDetail| {
             progress.emit(ProgressEvent {
@@ -2492,6 +2606,8 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 detail_index: Some(detail.index),
                 detail_total: Some(detail.total),
                 detail_id: Some(detail.id),
+                items: None,
+                modules: None,
             });
         };
         let result =
@@ -2566,6 +2682,8 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             detail_index: None,
             detail_total: None,
             detail_id: None,
+            items: None,
+            modules: None,
         });
         if stop_index == Some(index) {
             stop_run(
@@ -2584,6 +2702,8 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 detail_index: None,
                 detail_total: None,
                 detail_id: None,
+                items: None,
+                modules: None,
             });
             break;
         }
@@ -2600,6 +2720,8 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             detail_index: None,
             detail_total: None,
             detail_id: None,
+            items: None,
+            modules: None,
         });
     }
     let overall = if stopped {
@@ -2647,24 +2769,86 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
     })
 }
 
+fn display_width(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if (ch as u32) >= 0x2e80 { 2 } else { 1 })
+        .sum()
+}
+
+fn pad_display(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(display_width(text));
+    format!("{text}{}", " ".repeat(padding))
+}
+
+fn lifecycle_display(state: crate::records::LifecycleState) -> &'static str {
+    match state {
+        crate::records::LifecycleState::Planned => "待执行",
+        crate::records::LifecycleState::Running => "运行中",
+        crate::records::LifecycleState::Stopping => "停止中",
+        crate::records::LifecycleState::Stopped => "已停止",
+        crate::records::LifecycleState::Completed => "已完成",
+    }
+}
+
+fn result_counts(record: &crate::records::DetectionRecord) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for result in &record.module_results {
+        let label = module_state_label(module_result_label(result.state));
+        if let Some(entry) = counts.iter_mut().find(|(name, _)| *name == label) {
+            entry.1 += 1;
+        } else {
+            counts.push((label, 1));
+        }
+    }
+    counts
+        .iter()
+        .map(|(name, count)| format!("{count} {name}"))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
 pub fn render_text(report: &CliRunReport) -> String {
+    let state_width = report
+        .record
+        .module_results
+        .iter()
+        .map(|result| display_width(module_state_label(module_result_label(result.state))))
+        .max()
+        .unwrap_or(0);
+    let name_width = report
+        .record
+        .module_results
+        .iter()
+        .map(|result| display_width(module_display_name(&result.module_id)))
+        .max()
+        .unwrap_or(0);
     let mut lines = vec![
-        format!("模型：{}", report.configuration.model),
-        format!("地址：{}", report.configuration.redacted_endpoint),
-        format!("选择：{}", report.selected_modules.join(", ")),
-        format!("未选：{}", report.unselected_modules.join(", ")),
-        format!("运行：{}", lifecycle_label(report.record.lifecycle)),
-        format!("结论：{}", report.customer_conclusion.text),
+        format!("检测结果  {}", report.record.id),
+        "─".repeat(40),
+        format!("模型      {}", report.configuration.model),
+        format!("地址      {}", report.configuration.redacted_endpoint),
+        format!(
+            "运行      {} · {}",
+            lifecycle_display(report.record.lifecycle),
+            result_counts(&report.record)
+        ),
+        format!("结论      {}", report.customer_conclusion.text),
+        String::new(),
+        "检测项目".to_string(),
     ];
     lines.extend(report.record.module_results.iter().map(|result| {
+        let state = module_state_label(module_result_label(result.state));
+        let name = pad_display(module_display_name(&result.module_id), name_width);
+        let reason = result
+            .reason
+            .as_deref()
+            .map_or(String::new(), |reason| format!("  {reason}"));
         format!(
-            "项目 {}：{}{}",
+            "  {}  {}  {}{}",
+            pad_display(state, state_width),
+            name,
             result.module_id,
-            module_result_label(result.state),
-            result
-                .reason
-                .as_deref()
-                .map_or(String::new(), |reason| format!("（{reason}）"))
+            reason
         )
     }));
     lines.join("\n")
@@ -2728,16 +2912,6 @@ fn overall_for_record(record: &DetectionRecord) -> OverallConclusion {
         OverallConclusion::Inconclusive
     } else {
         OverallConclusion::Usable
-    }
-}
-
-fn lifecycle_label(state: crate::records::LifecycleState) -> &'static str {
-    match state {
-        crate::records::LifecycleState::Planned => "planned",
-        crate::records::LifecycleState::Running => "running",
-        crate::records::LifecycleState::Stopping => "stopping",
-        crate::records::LifecycleState::Stopped => "stopped",
-        crate::records::LifecycleState::Completed => "completed",
     }
 }
 
@@ -3296,7 +3470,7 @@ mod tests {
                 == crate::records::MODULE_IDS.len()
         );
         let text = render_text(&report);
-        assert!(text.contains("inconclusive"));
+        assert!(text.contains("待确认"));
         assert!(!text.contains("secret"));
     }
 

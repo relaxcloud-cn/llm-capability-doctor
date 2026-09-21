@@ -17,6 +17,7 @@ pub mod runtime;
 pub mod specification;
 pub mod stream_probe;
 pub mod structured_probe;
+pub mod terminal_progress;
 pub mod tool_probe;
 pub mod transport;
 pub mod validation;

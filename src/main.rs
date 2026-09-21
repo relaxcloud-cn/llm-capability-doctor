@@ -1,8 +1,7 @@
 use clap::Parser;
 use llm_capability_doctor::cli::{
     CliRunRequest, JsonlProgressSink, LiveExecutor, OutputFormat, generated_run_id,
-    generated_timestamp, render_report, run_with_executor, run_with_executor_reporting,
-    write_report,
+    generated_timestamp, render_report, run_with_executor_reporting, write_report,
 };
 use llm_capability_doctor::evaluation::{
     AnalyzerConfig, analyze_modules, render_html, write_bundled_module_inputs,
@@ -10,7 +9,9 @@ use llm_capability_doctor::evaluation::{
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
 };
+use llm_capability_doctor::ingress::redact_endpoint;
 use llm_capability_doctor::preflight::{ConnectivityState, preflight_token, run_startup_preflight};
+use llm_capability_doctor::terminal_progress::TerminalProgressSink;
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
@@ -208,7 +209,19 @@ fn main() {
             let mut progress = JsonlProgressSink::new(file);
             run_with_executor_reporting(request, &mut executor, &mut progress)
         }
-        None => run_with_executor(request, &mut executor),
+        None => {
+            let interactive = std::io::IsTerminal::is_terminal(&std::io::stderr())
+                && env::var_os("TERM").is_none_or(|term| term != "dumb");
+            let color = interactive && env::var_os("NO_COLOR").is_none();
+            let mut progress = TerminalProgressSink::new(
+                std::io::stderr(),
+                interactive,
+                color,
+                model.clone(),
+                redact_endpoint(&endpoint),
+            );
+            run_with_executor_reporting(request, &mut executor, &mut progress)
+        }
     };
     let report = match report_result {
         Ok(report) => report,
@@ -302,24 +315,24 @@ fn main() {
 
 fn print_preflight_results(preflight: &llm_capability_doctor::preflight::StartupPreflight) {
     let connectivity = &preflight.connectivity;
-    let connectivity_state = match connectivity.state {
-        ConnectivityState::Passed => "通过",
-        ConnectivityState::Failed => "失败",
-        ConnectivityState::NotRun => "未执行",
+    let (marker, connectivity_state) = match connectivity.state {
+        ConnectivityState::Passed => ("✓", "模型连通性通过"),
+        ConnectivityState::Failed => ("✗", "模型连通性失败"),
+        ConnectivityState::NotRun => ("○", "模型连通性未执行"),
     };
-    eprintln!(
-        "[启动检查] 模型连通性：{connectivity_state}（{}，耗时 {} ms）",
-        connectivity.reason, connectivity.elapsed_ms
-    );
-
-    let desktop_state = if preflight.desktop.supported {
-        "可用"
+    let timing = if connectivity.elapsed_ms > 0 {
+        format!("，耗时 {}ms", connectivity.elapsed_ms)
     } else {
-        "不可用"
+        String::new()
+    };
+    let desktop_state = if preflight.desktop.supported {
+        "桌面环境可用"
+    } else {
+        "桌面环境不可用"
     };
     eprintln!(
-        "[启动检查] 桌面环境：{desktop_state}（{}）",
-        preflight.desktop.reason
+        "{marker} 启动检查  {connectivity_state}（{}{timing}）· {desktop_state}",
+        connectivity.reason
     );
 }
 
