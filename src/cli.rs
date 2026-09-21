@@ -1787,10 +1787,23 @@ impl LiveExecutor {
                 command.arg("--continue");
             }
             command.arg(prompt);
-            match command.output() {
+            // OMP 自身有 --max-time；看门狗再兜底覆盖子进程无响应、
+            // 管道不关闭等 --max-time 失效的场景，避免 CLI 永久挂住。
+            let watchdog_ms = spec.timeout_ms.saturating_add(60_000);
+            match crate::evaluation::run_command_with_timeout(
+                &mut command,
+                std::time::Duration::from_millis(watchdog_ms),
+            ) {
                 Ok(output) => {
                     session_log.push_str(&String::from_utf8_lossy(&output.stdout));
                     session_log.push_str(&String::from_utf8_lossy(&output.stderr));
+                    if output.status.is_none() {
+                        spawn_error = Some(format!(
+                            "OMP 会话超过看门狗时限 {} 秒，已终止该进程",
+                            watchdog_ms / 1000
+                        ));
+                        break;
+                    }
                 }
                 Err(error) => {
                     spawn_error = Some(format!("OMP 进程启动失败：{error}"));
@@ -2603,6 +2616,62 @@ pub struct ProgressEvent {
     /// run_started 事件携带的本次选中模块列表，供显示端预渲染完整清单。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modules: Option<Vec<String>>,
+    /// module_completed 事件携带的小项判定统计（未通过数 / 总数）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_stats: Option<ProgressItemStats>,
+}
+
+/// 模块内检测小项的判定统计：未通过多少项、共多少项。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgressItemStats {
+    pub failed: usize,
+    pub total: usize,
+}
+
+/// 从各模块执行结果里提取"未通过小项数 / 小项总数"；提取不到时返回 None，
+/// 显示端退回只显示状态标签。
+fn module_item_stats(module_id: &str, payload: &serde_json::Value) -> Option<ProgressItemStats> {
+    let stats =
+        |failed: usize, total: usize| (total > 0).then(|| ProgressItemStats { failed, total });
+    match module_id {
+        "specification" => {
+            let rows = payload["report"]["rows"].as_array()?;
+            let failed = rows
+                .iter()
+                .filter(|row| row["result"].as_str() == Some("failed"))
+                .count();
+            stats(failed, rows.len())
+        }
+        "capability" => {
+            let summaries = payload["scorecard"]["summaries"].as_array()?;
+            let failed = summaries
+                .iter()
+                .filter(|summary| {
+                    summary["wrong"].as_u64().unwrap_or(0)
+                        + summary["missing"].as_u64().unwrap_or(0)
+                        > 0
+                })
+                .count();
+            stats(failed, summaries.len())
+        }
+        "agent" => {
+            let checks = payload["report"]["check_summaries"].as_array()?;
+            let failed = checks
+                .iter()
+                .filter(|check| check["fail"].as_u64().unwrap_or(0) > 0)
+                .count();
+            stats(failed, checks.len())
+        }
+        "baseline" => {
+            let comparisons = payload["report"]["comparisons"].as_array()?;
+            let failed = comparisons
+                .iter()
+                .filter(|comparison| comparison["status"].as_str() == Some("different"))
+                .count();
+            stats(failed, comparisons.len())
+        }
+        _ => None,
+    }
 }
 
 /// 模块内部检测小项的展示定义；module_started 事件携带，
@@ -2631,7 +2700,7 @@ pub fn module_display_name(module_id: &str) -> &'static str {
 pub fn module_state_label(state: &str) -> &'static str {
     match state {
         "pass" => "通过",
-        "fail" => "失败",
+        "fail" => "未通过",
         "unsupported" => "不支持",
         "inconclusive" => "待确认",
         "invalid_execution" => "执行无效",
@@ -2654,7 +2723,7 @@ pub fn module_plan_items(module_id: &str) -> Option<Vec<ProgressPlanItem>> {
             ("S07", "流式输出", 2),
         ],
         "capability" => &[
-            ("C01", "文本理解与指令执行", 20),
+            ("C01", "文本理解与指令执行", 44),
             ("C02", "信息提取与结构化填写", 20),
             ("C03", "工具选择与参数填写", 20),
             ("C04", "多轮对话与条件承接", 20),
@@ -2830,6 +2899,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         detail_id: None,
         items: None,
         modules: Some(selected.clone()),
+        item_stats: None,
     });
     let stop_index = request
         .stop_after
@@ -2852,6 +2922,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             detail_id: None,
             items: module_plan_items(module_id),
             modules: None,
+            item_stats: None,
         });
         let mut detail_progress = |detail: ProgressDetail| {
             progress.emit(ProgressEvent {
@@ -2866,10 +2937,12 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 detail_id: Some(detail.id),
                 items: None,
                 modules: None,
+                item_stats: None,
             });
         };
         let result =
             executor.execute_with_record_progress(module_id, &mut record, &mut detail_progress);
+        let item_stats = module_item_stats(module_id, &result.evidence_payload);
         let evidence = add_evidence(
             &mut record,
             &format!("cli-{module_id}-{index}"),
@@ -2942,6 +3015,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             detail_id: None,
             items: None,
             modules: None,
+            item_stats,
         });
         if stop_index == Some(index) {
             stop_run(
@@ -2962,6 +3036,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
                 detail_id: None,
                 items: None,
                 modules: None,
+                item_stats: None,
             });
             break;
         }
@@ -2980,6 +3055,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             detail_id: None,
             items: None,
             modules: None,
+            item_stats: None,
         });
     }
     let overall = if stopped {

@@ -1,7 +1,8 @@
 //! 终端进度渲染：把 ProgressEvent 流渲染成与 GUI 一致的进度界面。
 //!
 //! 交互终端（TTY）下维护一个原地重绘的区块：每个检测模块一行，
-//! 正在执行的模块下方显示当前小项，底部是总进度条。
+//! 正在执行的模块下方显示当前小项，底部是总进度条；后台线程按
+//! 120ms 刷新转动动画与耗时。
 //! 非 TTY（管道、CI、重定向）退化为每个事件一行纯文本。
 //! 全部输出走调用方给的 writer（main 里接 stderr），不污染 stdout。
 
@@ -11,16 +12,26 @@ use crate::cli::{
 };
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const BAR_WIDTH: usize = 24;
 const MAX_LINE_WIDTH: usize = 100;
+const TICK: Duration = Duration::from_millis(120);
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ModuleStatus {
     Waiting,
     Running,
-    Done { state: String, reason: String },
+    Done {
+        state: String,
+        reason: String,
+        /// （未通过小项数，小项总数），事件未携带统计时为 None。
+        stats: Option<(usize, usize)>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +41,9 @@ struct ModuleView {
     items: Vec<ProgressPlanItem>,
     started: Option<Instant>,
     elapsed: Option<Duration>,
+    /// 模块内样本进度（ProgressEvent.detail_*）。
+    detail_index: usize,
+    detail_total: usize,
 }
 
 impl ModuleView {
@@ -40,6 +54,8 @@ impl ModuleView {
             items: Vec::new(),
             started: None,
             elapsed: None,
+            detail_index: 0,
+            detail_total: 0,
         }
     }
 }
@@ -47,19 +63,19 @@ impl ModuleView {
 #[derive(Debug, Clone)]
 struct ActiveDetail {
     module_pos: usize,
+    detail_id: String,
     label: String,
-    /// 模块内已推进的样本位置与样本总量（来自 ProgressEvent.detail_*）。
     index: usize,
     total: usize,
 }
 
-/// 把 ProgressEvent 渲染到终端的进度显示端。
-pub struct TerminalProgressSink<W: Write> {
-    writer: W,
+/// 渲染状态，可在线程间共享（后台线程负责动画帧）。
+struct Inner {
     interactive: bool,
     color: bool,
     model: String,
     endpoint: String,
+    line_width: usize,
     run_started: Option<Instant>,
     modules: Vec<ModuleView>,
     positions: BTreeMap<String, usize>,
@@ -67,7 +83,16 @@ pub struct TerminalProgressSink<W: Write> {
     completed: usize,
     active: Option<ActiveDetail>,
     drawn: usize,
+    spin_frame: usize,
     last_plain_detail: Option<String>,
+}
+
+/// 把 ProgressEvent 渲染到终端的进度显示端。
+pub struct TerminalProgressSink<W: Write> {
+    inner: Arc<Mutex<Inner>>,
+    writer: W,
+    ticker_stop: Arc<AtomicBool>,
+    ticker: Option<JoinHandle<()>>,
 }
 
 impl<W: Write> TerminalProgressSink<W> {
@@ -79,22 +104,90 @@ impl<W: Write> TerminalProgressSink<W> {
         endpoint: impl Into<String>,
     ) -> Self {
         Self {
+            inner: Arc::new(Mutex::new(Inner {
+                interactive,
+                color,
+                model: model.into(),
+                endpoint: endpoint.into(),
+                line_width: term_width().saturating_sub(1).clamp(20, MAX_LINE_WIDTH),
+                run_started: None,
+                modules: Vec::new(),
+                positions: BTreeMap::new(),
+                total: 0,
+                completed: 0,
+                active: None,
+                drawn: 0,
+                spin_frame: 0,
+                last_plain_detail: None,
+            })),
             writer,
-            interactive,
-            color,
-            model: model.into(),
-            endpoint: endpoint.into(),
-            run_started: None,
-            modules: Vec::new(),
-            positions: BTreeMap::new(),
-            total: 0,
-            completed: 0,
-            active: None,
-            drawn: 0,
-            last_plain_detail: None,
+            ticker_stop: Arc::new(AtomicBool::new(false)),
+            ticker: None,
         }
     }
 
+    fn start_ticker(&mut self) {
+        if self.ticker.is_some() {
+            return;
+        }
+        let inner = Arc::clone(&self.inner);
+        let stop = Arc::clone(&self.ticker_stop);
+        self.ticker = Some(std::thread::spawn(move || {
+            let mut stderr = std::io::stderr();
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(TICK);
+                let mut guard = inner.lock().unwrap();
+                guard.spin_frame = guard.spin_frame.wrapping_add(1);
+                guard.redraw(&mut stderr);
+            }
+        }));
+    }
+
+    fn stop_ticker(&mut self) {
+        self.ticker_stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.ticker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl<W: Write> Drop for TerminalProgressSink<W> {
+    fn drop(&mut self) {
+        self.stop_ticker();
+    }
+}
+
+impl<W: Write> ProgressSink for TerminalProgressSink<W> {
+    fn emit(&mut self, event: ProgressEvent) {
+        let finished = matches!(
+            event.phase,
+            ProgressPhase::RunCompleted | ProgressPhase::RunStopped
+        );
+        let mut spawn_ticker = false;
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let first = inner.run_started.is_none();
+            inner.handle(&event);
+            if !inner.interactive {
+                inner.emit_plain(&mut self.writer, &event);
+            } else if first && matches!(event.phase, ProgressPhase::RunStarted) {
+                inner.print_header(&mut self.writer);
+                inner.redraw(&mut self.writer);
+                spawn_ticker = true;
+            } else {
+                inner.redraw(&mut self.writer);
+            }
+        }
+        if spawn_ticker {
+            self.start_ticker();
+        }
+        if finished {
+            self.stop_ticker();
+        }
+    }
+}
+
+impl Inner {
     fn paint(&self, code: &str, text: &str) -> String {
         if self.color {
             format!("\x1b[{code}m{text}\x1b[0m")
@@ -169,11 +262,14 @@ impl<W: Write> TerminalProgressSink<W> {
                 let module = &mut self.modules[pos];
                 module.status = ModuleStatus::Running;
                 module.started = Some(Instant::now());
+                module.detail_index = 0;
+                module.detail_total = 0;
                 if let Some(items) = &event.items {
                     module.items = items.clone();
                 }
                 self.active = Some(ActiveDetail {
                     module_pos: pos,
+                    detail_id: String::new(),
                     label: "准备中".into(),
                     index: 0,
                     total: 0,
@@ -185,11 +281,15 @@ impl<W: Write> TerminalProgressSink<W> {
                 };
                 let pos = self.module_mut(id);
                 let label = self.detail_label(event, pos);
+                let module = &mut self.modules[pos];
+                module.detail_index = event.detail_index.unwrap_or(0);
+                module.detail_total = event.detail_total.unwrap_or(0);
                 self.active = Some(ActiveDetail {
                     module_pos: pos,
+                    detail_id: event.detail_id.clone().unwrap_or_default(),
                     label,
-                    index: event.detail_index.unwrap_or(0),
-                    total: event.detail_total.unwrap_or(0),
+                    index: module.detail_index,
+                    total: module.detail_total,
                 });
             }
             ProgressPhase::ModuleCompleted => {
@@ -201,6 +301,10 @@ impl<W: Write> TerminalProgressSink<W> {
                 self.modules[pos].status = ModuleStatus::Done {
                     state: event.state.clone().unwrap_or_else(|| "unknown".into()),
                     reason: event.message.clone(),
+                    stats: event
+                        .item_stats
+                        .as_ref()
+                        .map(|stats| (stats.failed, stats.total)),
                 };
                 self.modules[pos].elapsed = elapsed;
                 self.completed = event.index;
@@ -210,44 +314,114 @@ impl<W: Write> TerminalProgressSink<W> {
                 self.active = None;
             }
         }
+        // 每个事件顺手推进一帧动画，后台线程停顿时也有动感。
+        self.spin_frame = self.spin_frame.wrapping_add(1);
     }
 
     fn module_line(&self, pos: usize) -> String {
         let module = &self.modules[pos];
         let name = module_display_name(&module.id);
-        let line = match &module.status {
+        match &module.status {
             ModuleStatus::Waiting => {
                 let marker = self.paint("2", "○");
                 let state = self.paint("2", "等待中");
                 format!("{marker} {name} {}  {state}", module.id)
             }
             ModuleStatus::Running => {
-                let marker = self.paint("33", "●");
-                let state = self.paint("33", "进行中");
+                let spin = SPINNER[self.spin_frame % SPINNER.len()];
+                let marker = self.paint("33", spin);
+                let counts = if module.detail_total > 0 {
+                    format!(" {}/{}", module.detail_index, module.detail_total)
+                } else {
+                    String::new()
+                };
+                let state = self.paint("33", &format!("进行中{counts}"));
                 format!("{marker} {name} {}  {state}", module.id)
             }
-            ModuleStatus::Done { state, reason } => {
+            ModuleStatus::Done { state, stats, .. } => {
                 let (marker, styled) = match state.as_str() {
                     "pass" => (self.paint("32", "✓"), self.paint("32", "通过")),
-                    "fail" => (self.paint("31", "✗"), self.paint("31", "失败")),
+                    "fail" => {
+                        let label = stats.map_or_else(
+                            || "未通过".to_string(),
+                            |(failed, total)| format!("{failed}/{total} 未通过"),
+                        );
+                        (self.paint("31", "✗"), self.paint("31", &label))
+                    }
                     _ => (
                         self.paint("33", "●"),
                         self.paint("33", module_state_label(state)),
                     ),
                 };
-                let mut suffix = String::new();
-                if let Some(elapsed) = module.elapsed {
-                    suffix = format!(" {}", format_duration(elapsed));
-                }
-                let note = if reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(" {}", self.paint("2", &truncate(reason, 40)))
-                };
-                format!("{marker} {name} {}  {styled}{note}{suffix}", module.id)
+                let elapsed = module
+                    .elapsed
+                    .map(|elapsed| format!(" {}", self.paint("2", &format_duration(elapsed))))
+                    .unwrap_or_default();
+                format!("{marker} {name} {}  {styled}{elapsed}", module.id)
             }
+        }
+    }
+
+    /// 运行中模块的小项明细：小项总数与样本总数一致时按偏移量算出每项
+    /// 的 x/y 完成度；对不上的模块（性能按维度、Agent 按调用计数）按
+    /// detail_id 或序号定位当前项，只画状态标记。
+    fn item_lines(&self, pos: usize) -> Vec<String> {
+        let module = &self.modules[pos];
+        let Some(active) = self.active.as_ref() else {
+            return Vec::new();
         };
-        line
+        if active.module_pos != pos || module.items.is_empty() {
+            return Vec::new();
+        }
+        let spin = SPINNER[self.spin_frame % SPINNER.len()];
+        let sum: usize = module.items.iter().map(|item| item.total).sum();
+        let use_counts = sum == active.total && active.total > 0;
+        let active_pos = module
+            .items
+            .iter()
+            .position(|item| item.id == active.detail_id)
+            .or_else(|| {
+                module.items.iter().position(|item| {
+                    !active.detail_id.is_empty() && active.detail_id.starts_with(&item.id)
+                })
+            })
+            .unwrap_or_else(|| active.index.min(module.items.len().saturating_sub(1)));
+        let mut offset = 0usize;
+        let mut lines = Vec::with_capacity(module.items.len());
+        for (item_pos, item) in module.items.iter().enumerate() {
+            let (marker, tail) = if use_counts {
+                let done = active.index.saturating_sub(offset).min(item.total);
+                let finished = done >= item.total && active.index >= offset;
+                let running =
+                    !finished && active.index >= offset && active.index < offset + item.total;
+                offset += item.total;
+                if finished {
+                    (
+                        self.paint("32", "✓"),
+                        self.paint("2", &format!("{}/{}", item.total, item.total)),
+                    )
+                } else if running {
+                    (self.paint("36", spin), format!("{done}/{}", item.total))
+                } else {
+                    (self.paint("2", "○"), String::new())
+                }
+            } else if item_pos < active_pos
+                || (item_pos == active_pos && active.detail_id.is_empty())
+            {
+                (self.paint("2", "○"), String::new())
+            } else if item_pos == active_pos {
+                (self.paint("36", spin), String::new())
+            } else {
+                (self.paint("2", "○"), String::new())
+            };
+            let tail = if tail.is_empty() {
+                tail
+            } else {
+                format!(" {tail}")
+            };
+            lines.push(format!("   {marker} {} {}{tail}", item.id, item.name));
+        }
+        lines
     }
 
     fn block(&self) -> Vec<String> {
@@ -259,12 +433,17 @@ impl<W: Write> TerminalProgressSink<W> {
                 .as_ref()
                 .is_some_and(|active| active.module_pos == pos)
             {
-                let label = self
-                    .active
-                    .as_ref()
-                    .map(|active| self.paint("36", &active.label))
-                    .unwrap_or_default();
-                lines.push(format!("   └ {label}"));
+                let items = self.item_lines(pos);
+                if items.is_empty() {
+                    let label = self
+                        .active
+                        .as_ref()
+                        .map(|active| self.paint("36", &active.label))
+                        .unwrap_or_default();
+                    lines.push(format!("   └ {label}"));
+                } else {
+                    lines.extend(items);
+                }
             }
         }
         lines.push(String::new());
@@ -276,7 +455,13 @@ impl<W: Write> TerminalProgressSink<W> {
         let detail_fraction = self
             .active
             .as_ref()
-            .map(|active| self.detail_fraction(active))
+            .map(|active| {
+                if active.total == 0 {
+                    0.0
+                } else {
+                    (active.index as f64 / active.total as f64).min(1.0)
+                }
+            })
             .unwrap_or(0.0);
         let fraction = if self.total == 0 {
             0.0
@@ -296,14 +481,7 @@ impl<W: Write> TerminalProgressSink<W> {
         )
     }
 
-    fn detail_fraction(&self, active: &ActiveDetail) -> f64 {
-        if active.total == 0 {
-            return 0.0;
-        }
-        (active.index as f64 / active.total as f64).min(1.0)
-    }
-
-    fn redraw(&mut self) {
+    fn redraw(&mut self, writer: &mut dyn Write) {
         let lines = self.block();
         let mut output = String::new();
         if self.drawn > 0 {
@@ -311,32 +489,50 @@ impl<W: Write> TerminalProgressSink<W> {
         }
         for line in &lines {
             output.push_str("\r\x1b[2K");
-            output.push_str(&truncate(line, MAX_LINE_WIDTH));
+            output.push_str(&truncate(line, self.line_width));
             output.push('\n');
         }
-        if lines.len() < self.drawn {
-            for _ in lines.len()..self.drawn {
-                output.push_str("\r\x1b[2K\n");
-            }
-            output.push_str(&format!("\x1b[{}A", self.drawn - lines.len()));
-        }
+        // 清掉上一帧在区块下方可能残留的行（换行溢出、模块行变少）。
+        output.push_str("\x1b[J");
         self.drawn = lines.len();
-        let _ = self.writer.write_all(output.as_bytes());
-        let _ = self.writer.flush();
+        let _ = writer.write_all(output.as_bytes());
+        let _ = writer.flush();
     }
 
-    fn print_line(&mut self, line: &str) {
-        let _ = writeln!(self.writer, "{line}");
-        let _ = self.writer.flush();
+    fn print_line(&self, writer: &mut dyn Write, line: &str) {
+        let _ = writeln!(writer, "{line}");
+        let _ = writer.flush();
     }
 
-    fn emit_plain(&mut self, event: &ProgressEvent) {
+    fn print_header(&self, writer: &mut dyn Write) {
+        self.print_line(
+            writer,
+            &format!(
+                "{}  {}",
+                self.paint("34;1", "AgentCheck"),
+                self.paint("2", "模型服务能力检测")
+            ),
+        );
+        self.print_line(
+            writer,
+            &format!(
+                "{}  {}   {}  {}",
+                self.paint("2", "模型"),
+                self.model,
+                self.paint("2", "地址"),
+                truncate(&self.endpoint, 60)
+            ),
+        );
+        self.print_line(writer, "");
+    }
+
+    fn emit_plain(&mut self, writer: &mut dyn Write, event: &ProgressEvent) {
         match event.phase {
             ProgressPhase::RunStarted => {
-                self.print_line(&format!(
-                    "[开始] 模型 {} · 共 {} 个检测项目",
-                    self.model, event.total
-                ));
+                self.print_line(
+                    writer,
+                    &format!("[开始] 模型 {} · 共 {} 个检测项目", self.model, event.total),
+                );
             }
             ProgressPhase::ModuleStarted => {
                 let name = event
@@ -344,11 +540,10 @@ impl<W: Write> TerminalProgressSink<W> {
                     .as_deref()
                     .map(module_display_name)
                     .unwrap_or("未知项目");
-                self.print_line(&format!(
-                    "[{}/{}] {name} 开始检测",
-                    event.index + 1,
-                    event.total
-                ));
+                self.print_line(
+                    writer,
+                    &format!("[{}/{}] {name} 开始检测", event.index + 1, event.total),
+                );
             }
             ProgressPhase::ModuleProgress => {
                 if let Some(active) = &self.active {
@@ -358,7 +553,10 @@ impl<W: Write> TerminalProgressSink<W> {
                         return;
                     }
                     self.last_plain_detail = Some(label.clone());
-                    self.print_line(&format!("[{}/{}]   {label}", event.index + 1, event.total));
+                    self.print_line(
+                        writer,
+                        &format!("[{}/{}]   {label}", event.index + 1, event.total),
+                    );
                 }
             }
             ProgressPhase::ModuleCompleted => {
@@ -367,63 +565,78 @@ impl<W: Write> TerminalProgressSink<W> {
                     .as_deref()
                     .map(module_display_name)
                     .unwrap_or("未知项目");
-                let state = event
+                let state_label = event
                     .state
                     .as_deref()
                     .map(module_state_label)
                     .unwrap_or("未知");
+                let state = match (event.state.as_deref(), &event.item_stats) {
+                    (Some("fail"), Some(stats)) => {
+                        format!("{state_label} {}/{}", stats.failed, stats.total)
+                    }
+                    _ => state_label.to_string(),
+                };
                 let reason = if event.message.is_empty() {
                     String::new()
                 } else {
                     format!("（{}）", event.message)
                 };
-                self.print_line(&format!(
-                    "[{}/{}] {name} {state}{reason}",
-                    event.index, event.total
-                ));
+                self.print_line(
+                    writer,
+                    &format!("[{}/{}] {name} {state}{reason}", event.index, event.total),
+                );
             }
             ProgressPhase::RunCompleted => {
-                self.print_line(&format!(
-                    "[完成] 全部检测结束 · 用时 {}",
-                    self.elapsed_text()
-                ));
+                self.print_line(
+                    writer,
+                    &format!("[完成] 全部检测结束 · 用时 {}", self.elapsed_text()),
+                );
             }
             ProgressPhase::RunStopped => {
-                self.print_line(&format!(
-                    "[停止] {} · 用时 {}",
-                    event.message,
-                    self.elapsed_text()
-                ));
+                self.print_line(
+                    writer,
+                    &format!("[停止] {} · 用时 {}", event.message, self.elapsed_text()),
+                );
             }
         }
     }
 }
 
-impl<W: Write> ProgressSink for TerminalProgressSink<W> {
-    fn emit(&mut self, event: ProgressEvent) {
-        let first = self.run_started.is_none();
-        self.handle(&event);
-        if !self.interactive {
-            self.emit_plain(&event);
-            return;
+#[cfg(unix)]
+fn stty_width() -> Option<usize> {
+    for flag in ["-f", "-F"] {
+        if let Ok(output) = std::process::Command::new("stty")
+            .args([flag, "/dev/tty", "size"])
+            .output()
+        {
+            if output.status.success() {
+                let text = String::from_utf8_lossy(&output.stdout);
+                if let Some(cols) = text
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|cols| *cols > 0)
+                {
+                    return Some(cols);
+                }
+            }
         }
-        if first && matches!(event.phase, ProgressPhase::RunStarted) {
-            self.print_line(&format!(
-                "{}  {}",
-                self.paint("34;1", "AgentCheck"),
-                self.paint("2", "模型服务能力检测")
-            ));
-            self.print_line(&format!(
-                "{}  {}   {}  {}",
-                self.paint("2", "模型"),
-                self.model,
-                self.paint("2", "地址"),
-                self.endpoint
-            ));
-            self.print_line("");
-        }
-        self.redraw();
     }
+    None
+}
+
+#[cfg(not(unix))]
+fn stty_width() -> Option<usize> {
+    None
+}
+
+fn term_width() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|width: &usize| *width > 0)
+        .or_else(stty_width)
+        .unwrap_or(80)
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -487,6 +700,7 @@ mod tests {
             detail_id: None,
             items: None,
             modules: None,
+            item_stats: None,
         }
     }
 
@@ -502,7 +716,7 @@ mod tests {
             sink.emit(started);
             let mut progress = event(ProgressPhase::ModuleProgress, Some("capability"));
             progress.detail_id = Some("C03".into());
-            progress.detail_index = Some(52);
+            progress.detail_index = Some(76);
             progress.detail_total = Some(144);
             sink.emit(progress);
             let mut done = event(ProgressPhase::ModuleCompleted, Some("capability"));
@@ -516,21 +730,21 @@ mod tests {
         assert!(output.contains("模型 model-a · 共 2 个检测项目"));
         assert!(output.contains("[1/2] 模型能力跑分 开始检测"));
         assert!(output.contains("C03 工具选择与参数填写 12/20"));
-        assert!(output.contains("[1/2] 模型能力跑分 失败（144 个样本未通过）"));
+        assert!(output.contains("[1/2] 模型能力跑分 未通过（144 个样本未通过）"));
         assert!(output.contains("[完成] 全部检测结束"));
     }
 
     #[test]
     fn detail_label_uses_item_prefix_for_sub_turns() {
-        let mut sink = TerminalProgressSink::new(Vec::new(), false, false, "m", "e");
+        let sink = TerminalProgressSink::new(Vec::new(), false, false, "m", "e");
         let mut started = event(ProgressPhase::ModuleStarted, Some("agent"));
         started.items = crate::cli::module_plan_items("agent");
-        sink.handle(&started);
+        sink.inner.lock().unwrap().handle(&started);
         let mut progress = event(ProgressPhase::ModuleProgress, Some("agent"));
         progress.detail_id = Some("T3-A-call-2".into());
         progress.detail_index = Some(5);
         progress.detail_total = Some(10);
-        let label = sink.detail_label(&progress, 0);
+        let label = sink.inner.lock().unwrap().detail_label(&progress, 0);
         assert!(label.starts_with("T3-A 使用工具返回驱动下一步"));
     }
 
@@ -546,5 +760,25 @@ mod tests {
         assert!(output.contains("AgentCheck"));
         assert!(output.contains("\x1b["));
         assert!(output.contains("服务接入"));
+    }
+
+    #[test]
+    fn running_module_shows_sample_counts() {
+        let sink = TerminalProgressSink::new(Vec::new(), true, false, "m", "e");
+        sink.inner
+            .lock()
+            .unwrap()
+            .handle(&event(ProgressPhase::RunStarted, None));
+        sink.inner
+            .lock()
+            .unwrap()
+            .handle(&event(ProgressPhase::ModuleStarted, Some("specification")));
+        let mut progress = event(ProgressPhase::ModuleProgress, Some("specification"));
+        progress.detail_index = Some(5);
+        progress.detail_total = Some(18);
+        let mut inner = sink.inner.lock().unwrap();
+        inner.handle(&progress);
+        let line = inner.module_line(0);
+        assert!(line.contains("进行中 5/18"));
     }
 }

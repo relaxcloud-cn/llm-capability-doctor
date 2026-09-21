@@ -153,7 +153,7 @@ fn missing_analyzer_keeps_evidence_and_html_without_external_rules() {
     #[cfg(unix)]
     {
         assert!(detached_gui.0.status.success());
-        assert!(String::from_utf8_lossy(&detached_gui.0.stderr).contains("GUI：启动成功"));
+        assert!(String::from_utf8_lossy(&detached_gui.0.stderr).contains("GUI 已启动"));
         assert!(
             detached_gui.1 < Duration::from_secs(3),
             "GUI 不应保持 CLI 输出管道打开"

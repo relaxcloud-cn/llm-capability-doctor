@@ -125,7 +125,7 @@ fn main() {
     print_preflight_results(&preflight);
 
     if preflight.connectivity.state != ConnectivityState::Passed {
-        eprintln!("[启动方式] 未开始正式检测：请先修正模型配置或连接问题");
+        eprintln!("✗ 启动检查  未开始正式检测：请先修正模型配置或连接问题");
         std::process::exit(2);
     }
 
@@ -144,7 +144,7 @@ fn main() {
         let cli_path = match env::current_exe() {
             Ok(path) => path,
             Err(error) => {
-                eprintln!("[启动方式] 读取 CLI 路径失败，回退到纯 CLI：{error}");
+                eprintln!("✗ 启动方式  读取 CLI 路径失败，回退到纯 CLI：{error}");
                 std::path::PathBuf::new()
             }
         };
@@ -164,17 +164,17 @@ fn main() {
                 preflight_token: preflight_token(&endpoint, &model, &api_key),
             };
             match launcher.launch(&request) {
-                Ok(path) => {
-                    eprintln!("[启动方式] GUI：启动成功（{}）", path.display());
+                Ok(_path) => {
+                    eprintln!("✓ 启动方式  GUI 已启动");
                     return;
                 }
-                Err(error) => eprintln!("[启动方式] GUI：启动失败（{error}），回退到纯 CLI"),
+                Err(error) => eprintln!("✗ 启动方式  GUI 启动失败（{error}），回退到纯 CLI"),
             }
         }
     } else if cli.no_gui {
-        eprintln!("[启动方式] CLI：已指定 --no-gui");
+        eprintln!("· 启动方式  CLI（已指定 --no-gui）");
     } else {
-        eprintln!("[启动方式] CLI：当前环境不自动启动原生 GUI");
+        eprintln!("· 启动方式  CLI（当前环境不自动启动原生 GUI）");
     }
     let request = CliRunRequest {
         endpoint: endpoint.clone(),
