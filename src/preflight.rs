@@ -83,6 +83,8 @@ pub fn check_model_connectivity(
         prompt: PREFLIGHT_PROMPT.into(),
         max_tokens: PREFLIGHT_MAX_TOKENS,
         stream: false,
+        allow_retry: true,
+        timeout_ms: None,
     });
     let elapsed_ms = response.elapsed_ms;
 

@@ -10,12 +10,16 @@ const MAX_ATTEMPTS: u8 = 3;
 pub struct ChatCompletionsRequest {
     pub module_id: String,
     pub prompt: String,
-    /// 预置多轮消息（能力 C04 用）；为 None 时用 prompt 构造单条 user 消息。
+    /// 预置多轮消息（能力 C04、性能历史增长档用）；为 None 时用 prompt 构造单条 user 消息。
     pub messages: Option<Vec<Value>>,
     /// 随请求发送的工具定义（能力 C03 用）。
     pub tools: Option<Vec<Value>>,
     pub max_tokens: u32,
     pub stream: bool,
+    /// 是否允许传输层自动重试；性能实测必须为 false，避免重试污染计时与错误统计。
+    pub allow_retry: bool,
+    /// 覆盖客户端默认超时的单请求超时；性能实测用它封顶单请求时长。
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,9 +60,18 @@ pub struct StreamResponse {
     pub content: String,
     pub terminated: bool,
     pub parse_errors: Vec<String>,
+    /// 服务端在流末返回的 usage（需请求 stream_options.include_usage）。
+    pub usage: Option<Value>,
 }
 
-type ParsedStream = (String, Vec<StreamEvent>, String, bool, Vec<String>);
+type ParsedStream = (
+    String,
+    Vec<StreamEvent>,
+    String,
+    bool,
+    Vec<String>,
+    Option<Value>,
+);
 
 #[derive(Clone)]
 pub struct ChatCompletionsTransport {
@@ -128,14 +141,19 @@ impl ChatCompletionsTransport {
         }
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
-        for attempt in 1..=MAX_ATTEMPTS {
+        let max_attempts = if request.allow_retry { MAX_ATTEMPTS } else { 1 };
+        for attempt in 1..=max_attempts {
+            let timeout_ms = request.timeout_ms;
             let result = self.runtime.block_on(async {
-                self.client
+                let mut builder = self
+                    .client
                     .post(&self.endpoint)
                     .bearer_auth(&self.api_key)
-                    .json(&payload)
-                    .send()
-                    .await
+                    .json(&payload);
+                if let Some(timeout_ms) = timeout_ms {
+                    builder = builder.timeout(Duration::from_millis(timeout_ms));
+                }
+                builder.send().await
             });
             let response = match result {
                 Ok(response) => {
@@ -156,7 +174,7 @@ impl ChatCompletionsTransport {
                             body: String::new(),
                             parsed: None,
                             elapsed_ms: started.elapsed().as_millis(),
-                            error: Some(format!("读取 HTTP 响应失败：{error}")),
+                            error: Some(format_read_error(&error)),
                             attempts: attempt,
                             retry_reasons: retry_reasons.clone(),
                         },
@@ -167,7 +185,7 @@ impl ChatCompletionsTransport {
                     body: String::new(),
                     parsed: None,
                     elapsed_ms: started.elapsed().as_millis(),
-                    error: Some(format!("发送 HTTP 请求失败：{error}")),
+                    error: Some(format_send_error(&error)),
                     attempts: attempt,
                     retry_reasons: retry_reasons.clone(),
                 },
@@ -176,7 +194,7 @@ impl ChatCompletionsTransport {
                 || response
                     .status
                     .is_some_and(|status| status == 429 || status >= 500);
-            if !retryable || attempt == MAX_ATTEMPTS {
+            if !retryable || attempt == max_attempts {
                 return response;
             }
             retry_reasons.push(format!(
@@ -184,7 +202,7 @@ impl ChatCompletionsTransport {
                 response.status
             ));
         }
-        unreachable!("MAX_ATTEMPTS is positive")
+        unreachable!("max_attempts is positive")
     }
 
     pub fn send_agent_turn(&self, messages: Vec<Value>, tools: Vec<Value>) -> AgentTurnResponse {
@@ -228,46 +246,59 @@ impl ChatCompletionsTransport {
     pub fn send_stream(&self, request: ChatCompletionsRequest) -> StreamResponse {
         let payload = json!({
             "model": self.model,
-            "messages": [{"role": "user", "content": request.prompt}],
+            "messages": request_messages(&request),
             "temperature": 0,
             "max_tokens": request.max_tokens,
             "stream": true,
+            "stream_options": {"include_usage": true},
         });
-        self.send_stream_payload(payload)
+        self.send_stream_payload(payload, request.allow_retry, request.timeout_ms)
     }
 
     /// 发送自定义流式 payload（供 S07 带 tools/tool_choice 的探测使用）。
-    pub(crate) fn send_stream_payload(&self, payload: Value) -> StreamResponse {
+    pub(crate) fn send_stream_payload(
+        &self,
+        payload: Value,
+        allow_retry: bool,
+        timeout_ms: Option<u64>,
+    ) -> StreamResponse {
         let started = Instant::now();
         let mut retry_reasons = Vec::new();
-        for attempt in 1..=MAX_ATTEMPTS {
+        let max_attempts = if allow_retry { MAX_ATTEMPTS } else { 1 };
+        for attempt in 1..=max_attempts {
             let result = self.runtime.block_on(async {
-                self.client
+                let mut builder = self
+                    .client
                     .post(&self.endpoint)
                     .bearer_auth(&self.api_key)
-                    .json(&payload)
-                    .send()
-                    .await
+                    .json(&payload);
+                if let Some(timeout_ms) = timeout_ms {
+                    builder = builder.timeout(Duration::from_millis(timeout_ms));
+                }
+                builder.send().await
             });
             let response = match result {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     match self.read_stream(response, started) {
-                        Ok((body, events, content, terminated, parse_errors)) => StreamResponse {
-                            response: ChatCompletionsResponse {
-                                status: Some(status),
-                                body: truncate_body(body),
-                                parsed: stream_summary(&content, &events),
-                                elapsed_ms: started.elapsed().as_millis(),
-                                error: None,
-                                attempts: attempt,
-                                retry_reasons: retry_reasons.clone(),
-                            },
-                            events,
-                            content,
-                            terminated,
-                            parse_errors,
-                        },
+                        Ok((body, events, content, terminated, parse_errors, usage)) => {
+                            StreamResponse {
+                                response: ChatCompletionsResponse {
+                                    status: Some(status),
+                                    body: truncate_body(body),
+                                    parsed: stream_summary(&content, &events, usage.as_ref()),
+                                    elapsed_ms: started.elapsed().as_millis(),
+                                    error: None,
+                                    attempts: attempt,
+                                    retry_reasons: retry_reasons.clone(),
+                                },
+                                events,
+                                content,
+                                terminated,
+                                parse_errors,
+                                usage,
+                            }
+                        }
                         Err(error) => StreamResponse {
                             response: ChatCompletionsResponse {
                                 status: Some(status),
@@ -282,6 +313,7 @@ impl ChatCompletionsTransport {
                             content: String::new(),
                             terminated: false,
                             parse_errors: Vec::new(),
+                            usage: None,
                         },
                     }
                 }
@@ -291,7 +323,7 @@ impl ChatCompletionsTransport {
                         body: String::new(),
                         parsed: None,
                         elapsed_ms: started.elapsed().as_millis(),
-                        error: Some(format!("发送 HTTP 请求失败：{error}")),
+                        error: Some(format_send_error(&error)),
                         attempts: attempt,
                         retry_reasons: retry_reasons.clone(),
                     },
@@ -299,6 +331,7 @@ impl ChatCompletionsTransport {
                     content: String::new(),
                     terminated: false,
                     parse_errors: Vec::new(),
+                    usage: None,
                 },
             };
             let retryable = response.response.error.is_some()
@@ -306,7 +339,7 @@ impl ChatCompletionsTransport {
                     .response
                     .status
                     .is_some_and(|status| status == 429 || status >= 500);
-            if !retryable || attempt == MAX_ATTEMPTS {
+            if !retryable || attempt == max_attempts {
                 return response;
             }
             retry_reasons.push(format!(
@@ -314,7 +347,7 @@ impl ChatCompletionsTransport {
                 response.response.status
             ));
         }
-        unreachable!("MAX_ATTEMPTS is positive")
+        unreachable!("max_attempts is positive")
     }
 
     fn read_stream(
@@ -328,10 +361,11 @@ impl ChatCompletionsTransport {
             let mut content = String::new();
             let mut terminated = false;
             let mut parse_errors = Vec::new();
+            let mut usage = None;
             let mut line_buffer = String::new();
             let mut stream = response.bytes_stream();
             while let Some(chunk) = stream.next().await {
-                let chunk = chunk.map_err(|error| format!("读取流式响应失败：{error}"))?;
+                let chunk = chunk.map_err(|error| format_stream_error(&error))?;
                 line_buffer.push_str(&String::from_utf8_lossy(&chunk));
                 body.extend_from_slice(&chunk);
                 while let Some(newline) = line_buffer.find('\n') {
@@ -344,6 +378,7 @@ impl ChatCompletionsTransport {
                         &mut content,
                         &mut terminated,
                         &mut parse_errors,
+                        &mut usage,
                     );
                 }
             }
@@ -355,6 +390,7 @@ impl ChatCompletionsTransport {
                     &mut content,
                     &mut terminated,
                     &mut parse_errors,
+                    &mut usage,
                 );
             }
             Ok((
@@ -363,6 +399,7 @@ impl ChatCompletionsTransport {
                 content,
                 terminated,
                 parse_errors,
+                usage,
             ))
         })
     }
@@ -400,7 +437,7 @@ impl ChatCompletionsTransport {
                             body: String::new(),
                             parsed: None,
                             elapsed_ms: started.elapsed().as_millis(),
-                            error: Some(format!("读取 HTTP 响应失败：{error}")),
+                            error: Some(format_read_error(&error)),
                             attempts: attempt,
                             retry_reasons: retry_reasons.clone(),
                         },
@@ -411,7 +448,7 @@ impl ChatCompletionsTransport {
                     body: String::new(),
                     parsed: None,
                     elapsed_ms: started.elapsed().as_millis(),
-                    error: Some(format!("发送 HTTP 请求失败：{error}")),
+                    error: Some(format_send_error(&error)),
                     attempts: attempt,
                     retry_reasons: retry_reasons.clone(),
                 },
@@ -472,7 +509,17 @@ impl ChatCompletionsTransport {
                 "endpoint": redact_endpoint(&self.endpoint),
                 "model": self.model,
                 "prompt": request.prompt,
-                "messages": request.messages,
+                "messages": request.messages.as_ref().map(|messages| json!({
+                    "count": messages.len(),
+                    "roles": messages.iter()
+                        .filter_map(|message| message.get("role").and_then(Value::as_str))
+                        .collect::<Vec<_>>(),
+                    "total_chars": messages.iter()
+                        .filter_map(|message| {
+                            message.get("content").and_then(Value::as_str).map(str::len)
+                        })
+                        .sum::<usize>(),
+                })),
                 "tools": request.tools,
                 "max_tokens": request.max_tokens,
                 "stream": request.stream,
@@ -532,13 +579,46 @@ fn stream_evidence(stream: &StreamResponse) -> Value {
     })
 }
 
-fn stream_summary(content: &str, events: &[StreamEvent]) -> Option<Value> {
+fn request_messages(request: &ChatCompletionsRequest) -> Value {
+    request
+        .messages
+        .clone()
+        .map(Value::Array)
+        .unwrap_or_else(|| json!([{"role": "user", "content": request.prompt}]))
+}
+
+fn format_send_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("请求超时：{error}")
+    } else {
+        format!("发送 HTTP 请求失败：{error}")
+    }
+}
+
+fn format_read_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("读取响应超时：{error}")
+    } else {
+        format!("读取 HTTP 响应失败：{error}")
+    }
+}
+
+fn format_stream_error(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        format!("读取流式响应超时：{error}")
+    } else {
+        format!("读取流式响应失败：{error}")
+    }
+}
+
+fn stream_summary(content: &str, events: &[StreamEvent], usage: Option<&Value>) -> Option<Value> {
     (!events.is_empty()).then(|| {
         json!({
             "choices": [{
                 "message": {"role": "assistant", "content": content},
                 "finish_reason": events.iter().rev().find_map(|event| event.finish_reason.clone()),
-            }]
+            }],
+            "usage": usage,
         })
     })
 }
@@ -550,6 +630,7 @@ fn parse_stream_line(
     content: &mut String,
     terminated: &mut bool,
     parse_errors: &mut Vec<String>,
+    usage: &mut Option<Value>,
 ) {
     let line = line.trim();
     if line.is_empty() || line.starts_with(':') || line.starts_with("event:") {
@@ -591,6 +672,9 @@ fn parse_stream_line(
             return;
         }
     };
+    if let Some(value) = parsed.get("usage").filter(|value| value.is_object()) {
+        *usage = Some(value.clone());
+    }
     let choice = parsed
         .get("choices")
         .and_then(Value::as_array)
@@ -727,8 +811,11 @@ mod tests {
             messages: None,
             tools: None,
             prompt: "hello".into(),
+
             max_tokens: 16,
             stream: false,
+            allow_retry: true,
+            timeout_ms: None,
         };
         let response = transport.send(request.clone());
         assert_eq!(response.status, Some(200));
@@ -772,8 +859,11 @@ mod tests {
             messages: None,
             tools: None,
             prompt: "stream".into(),
+
             max_tokens: 16,
             stream: true,
+            allow_retry: false,
+            timeout_ms: None,
         });
         assert_eq!(stream.response.status, Some(200));
         assert_eq!(stream.content, "hello world");
@@ -840,11 +930,44 @@ mod tests {
             prompt: "hello".into(),
             max_tokens: 16,
             stream: false,
+            allow_retry: true,
+            timeout_ms: None,
         });
         assert_eq!(response.status, Some(429));
         assert_eq!(response.attempts, 3);
         assert_eq!(response.retry_reasons.len(), 2);
         assert_eq!(response.parsed.unwrap()["error"]["message"], "slow down");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn allow_retry_false_sends_single_attempt() {
+        let (endpoint, server) = mock_server(
+            429,
+            r#"{"error":{"message":"slow down"}}"#,
+            1,
+            Duration::ZERO,
+        );
+        let transport = ChatCompletionsTransport::new(
+            endpoint,
+            "model-a",
+            "secret-value",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        let response = transport.send(ChatCompletionsRequest {
+            module_id: "performance".into(),
+            prompt: "hello".into(),
+            messages: None,
+            tools: None,
+            max_tokens: 16,
+            stream: false,
+            allow_retry: false,
+            timeout_ms: None,
+        });
+        assert_eq!(response.status, Some(429));
+        assert_eq!(response.attempts, 1);
+        assert!(response.retry_reasons.is_empty());
         server.join().unwrap();
     }
 
@@ -870,10 +993,13 @@ mod tests {
             prompt: "hello".into(),
             max_tokens: 16,
             stream: false,
+            allow_retry: true,
+            timeout_ms: None,
         });
         assert_eq!(response.status, None);
         assert!(response.error.is_some());
         assert_eq!(response.attempts, 3);
+        assert!(response.error.unwrap().contains("超时"));
         server.join().unwrap();
     }
 }

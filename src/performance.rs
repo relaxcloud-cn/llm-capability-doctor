@@ -171,6 +171,11 @@ pub struct PerformanceSample {
     pub token_count_source: TokenCountSource,
     pub evidence_refs: Vec<String>,
     pub limitation: Option<String>,
+    /// 本样本所属派发窗口（闭环负载才有）；用于按维度计算窗口吞吐。
+    #[serde(default)]
+    pub dispatch_window_start_ms: Option<u64>,
+    #[serde(default)]
+    pub dispatch_window_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -204,6 +209,20 @@ pub struct PerformanceMetrics {
     pub character_rate: Option<Rate>,
     pub window_throughput: Option<Rate>,
     pub completion_ratio: Option<Ratio>,
+    /// 按派发时间划分的 60 秒桶，用于观察连续运行中的漂移。
+    #[serde(default)]
+    pub buckets: Vec<PerformanceBucket>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PerformanceBucket {
+    /// 距本行测量窗口起点的偏移毫秒数。
+    pub start_ms: u64,
+    pub dispatched: u32,
+    pub completed: u32,
+    pub error_count: u32,
+    pub timeout_count: u32,
+    pub complete_p50_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,11 +241,24 @@ pub struct Ratio {
 pub struct PerformanceRow {
     pub category: PerformanceCategory,
     pub workload: WorkloadKind,
+    /// 本行的实测维度：不同模式、长度和并发档位不合并。
+    #[serde(default = "default_row_mode")]
+    pub mode: ResponseMode,
+    #[serde(default)]
+    pub input_tokens_target: u32,
+    #[serde(default)]
+    pub target_output_tokens: u32,
+    #[serde(default)]
+    pub target_concurrency: u32,
     pub conditions: PerformanceConditions,
     pub metrics: PerformanceMetrics,
     pub sample_ids: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub limitations: Vec<String>,
+}
+
+fn default_row_mode() -> ResponseMode {
+    ResponseMode::NonStreaming
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,9 +286,10 @@ pub struct ProtectionState {
 impl ProtectionState {
     pub fn observe(&mut self, sample: &PerformanceSample) -> ProtectionAction {
         self.terminal_count += u32::from(sample.terminal_at_ms.is_some());
-        let abnormal = !matches!(
+        // 截断与取消是协议层面的正常终态，不计入服务/网络类异常失败。
+        let abnormal = matches!(
             sample.terminal_state,
-            TerminalState::Completed | TerminalState::NaturalEnd
+            TerminalState::Error | TerminalState::Timeout
         );
         self.abnormal_count += u32::from(abnormal);
         if abnormal {
@@ -276,12 +309,14 @@ impl ProtectionState {
         if self.consecutive_failures >= 5
             || (self.terminal_count >= 20 && self.abnormal_count * 5 >= self.terminal_count)
         {
-            return ProtectionAction::StopCurrentWorkload;
+            return ProtectionAction::CloseCurrentConcurrencyTier;
         }
         ProtectionAction::Continue
     }
 }
 
+/// 默认矩阵按 10 分钟内的运行时长设计：样本量少但每个维度仍独立成行；
+/// 更慢的的服务由全局时间预算截尾，剩余维度标记为未测而非伪造数据。
 pub fn fixed_performance_plan() -> Vec<PerformancePlan> {
     vec![
         PerformancePlan {
@@ -291,24 +326,24 @@ pub fn fixed_performance_plan() -> Vec<PerformancePlan> {
             input_tokens: vec![512],
             target_output_tokens: vec![256],
             concurrency_targets: vec![1],
-            warmup_count: 3,
-            formal_request_limit: 40,
+            warmup_count: 1,
+            formal_request_limit: 5,
             dispatch_window_ms: None,
             drain_window_ms: None,
-            max_duration_ms: Some(80 * 60 * 1000),
+            max_duration_ms: None,
         },
         PerformancePlan {
             category: PerformanceCategory::GenerationFluency,
             workload: WorkloadKind::GenerationFluency,
             modes: vec![ResponseMode::Streaming],
             input_tokens: vec![512],
-            target_output_tokens: vec![1024],
+            target_output_tokens: vec![512],
             concurrency_targets: vec![1],
-            warmup_count: 3,
-            formal_request_limit: 40,
+            warmup_count: 1,
+            formal_request_limit: 5,
             dispatch_window_ms: None,
             drain_window_ms: None,
-            max_duration_ms: Some(80 * 60 * 1000),
+            max_duration_ms: None,
         },
         PerformancePlan {
             category: PerformanceCategory::Concurrency,
@@ -316,11 +351,11 @@ pub fn fixed_performance_plan() -> Vec<PerformancePlan> {
             modes: vec![ResponseMode::NonStreaming],
             input_tokens: vec![512],
             target_output_tokens: vec![256],
-            concurrency_targets: vec![1, 2, 4, 8],
+            concurrency_targets: vec![1, 4, 8],
             warmup_count: 1,
-            formal_request_limit: 300,
-            dispatch_window_ms: Some(120 * 1000),
-            drain_window_ms: Some(120 * 1000),
+            formal_request_limit: 60,
+            dispatch_window_ms: Some(20 * 1000),
+            drain_window_ms: Some(15 * 1000),
             max_duration_ms: None,
         },
         PerformancePlan {
@@ -330,10 +365,10 @@ pub fn fixed_performance_plan() -> Vec<PerformancePlan> {
             input_tokens: vec![512],
             target_output_tokens: vec![256],
             concurrency_targets: vec![2],
-            warmup_count: 2,
-            formal_request_limit: 1200,
-            dispatch_window_ms: Some(600 * 1000),
-            drain_window_ms: Some(120 * 1000),
+            warmup_count: 1,
+            formal_request_limit: 500,
+            dispatch_window_ms: Some(90 * 1000),
+            drain_window_ms: Some(15 * 1000),
             max_duration_ms: None,
         },
         PerformancePlan {
@@ -343,39 +378,52 @@ pub fn fixed_performance_plan() -> Vec<PerformancePlan> {
             input_tokens: vec![2048, 8192, 32768],
             target_output_tokens: vec![256],
             concurrency_targets: vec![1],
-            warmup_count: 3,
-            formal_request_limit: 15,
+            warmup_count: 1,
+            formal_request_limit: 1,
             dispatch_window_ms: None,
             drain_window_ms: None,
-            max_duration_ms: Some(30 * 60 * 1000),
+            max_duration_ms: None,
+        },
+        PerformancePlan {
+            category: PerformanceCategory::LengthVariation,
+            workload: WorkloadKind::HistoryGrowth,
+            modes: vec![ResponseMode::NonStreaming],
+            input_tokens: vec![1024, 4096],
+            target_output_tokens: vec![256],
+            concurrency_targets: vec![1],
+            warmup_count: 1,
+            formal_request_limit: 1,
+            dispatch_window_ms: None,
+            drain_window_ms: None,
+            max_duration_ms: None,
         },
         PerformancePlan {
             category: PerformanceCategory::LengthVariation,
             workload: WorkloadKind::LongOutput,
             modes: vec![ResponseMode::NonStreaming],
             input_tokens: vec![512],
-            target_output_tokens: vec![1024, 2048],
+            target_output_tokens: vec![1024],
             concurrency_targets: vec![1],
-            warmup_count: 3,
-            formal_request_limit: 15,
+            warmup_count: 1,
+            formal_request_limit: 2,
             dispatch_window_ms: None,
             drain_window_ms: None,
-            max_duration_ms: Some(30 * 60 * 1000),
-        },
-        PerformancePlan {
-            category: PerformanceCategory::LengthVariation,
-            workload: WorkloadKind::HistoryGrowth,
-            modes: vec![ResponseMode::NonStreaming],
-            input_tokens: vec![512, 2048, 4096],
-            target_output_tokens: vec![256],
-            concurrency_targets: vec![1],
-            warmup_count: 3,
-            formal_request_limit: 15,
-            dispatch_window_ms: None,
-            drain_window_ms: None,
-            max_duration_ms: Some(30 * 60 * 1000),
+            max_duration_ms: None,
         },
     ]
+}
+
+/// 一行结果对应一个实测维度：workload × 模式 × 输入档 × 输出档 × 并发档。
+type DimensionKey = (WorkloadKind, ResponseMode, u32, u32, u32);
+
+fn dimension_key(sample: &PerformanceSample) -> DimensionKey {
+    (
+        sample.workload,
+        sample.mode,
+        sample.input_tokens_target,
+        sample.target_output_tokens,
+        sample.target_concurrency,
+    )
 }
 
 pub fn build_report(
@@ -384,18 +432,22 @@ pub fn build_report(
     samples: Vec<PerformanceSample>,
 ) -> Result<PerformanceReport, String> {
     validate_samples(&samples)?;
-    let rows = WorkloadKind::ALL
-        .iter()
-        .filter_map(|workload| {
-            let workload_samples = samples
-                .iter()
-                .filter(|sample| sample.workload == *workload)
-                .collect::<Vec<_>>();
-            if workload_samples.is_empty() {
-                return None;
+    // 按维度分组并保持样本出现顺序，不同长度/并发/模式不合并为一条速度线。
+    let mut keys: Vec<DimensionKey> = Vec::new();
+    let mut groups: Vec<Vec<&PerformanceSample>> = Vec::new();
+    for sample in &samples {
+        let key = dimension_key(sample);
+        match keys.iter().position(|existing| *existing == key) {
+            Some(index) => groups[index].push(sample),
+            None => {
+                keys.push(key);
+                groups.push(vec![sample]);
             }
-            Some(build_row(*workload, conditions.clone(), workload_samples))
-        })
+        }
+    }
+    let rows = groups
+        .into_iter()
+        .map(|group| build_row(conditions.clone(), group))
         .collect();
     Ok(PerformanceReport {
         version: PERFORMANCE_VERSION.into(),
@@ -427,23 +479,41 @@ pub fn build_report_for_record(
     build_report(&record.id, conditions, samples)
 }
 
-impl WorkloadKind {
-    const ALL: [Self; 7] = [
-        Self::ResponseWaiting,
-        Self::GenerationFluency,
-        Self::Concurrency,
-        Self::Continuous,
-        Self::LongInput,
-        Self::LongOutput,
-        Self::HistoryGrowth,
-    ];
-}
+const BUCKET_MS: u64 = 60_000;
 
 fn build_row(
-    workload: WorkloadKind,
-    conditions: PerformanceConditions,
+    mut conditions: PerformanceConditions,
     samples: Vec<&PerformanceSample>,
 ) -> PerformanceRow {
+    let first = samples.first().expect("dimension group is non-empty");
+    let workload = first.workload;
+    // 行级窗口取本维度样本携带的派发窗口；无窗口维度退回正式样本的实测时间跨度。
+    let window_start = samples
+        .iter()
+        .filter_map(|sample| sample.dispatch_window_start_ms)
+        .min()
+        .or_else(|| {
+            samples
+                .iter()
+                .filter(|sample| sample.phase == RunPhase::Formal)
+                .map(|sample| sample.dispatched_at_ms)
+                .min()
+        })
+        .unwrap_or(conditions.window_start_ms);
+    let window_end = samples
+        .iter()
+        .filter_map(|sample| sample.dispatch_window_end_ms)
+        .max()
+        .or_else(|| {
+            samples
+                .iter()
+                .filter(|sample| sample.phase == RunPhase::Formal)
+                .filter_map(|sample| sample.terminal_at_ms)
+                .max()
+        })
+        .unwrap_or(conditions.window_end_ms);
+    conditions.window_start_ms = window_start;
+    conditions.window_end_ms = window_end;
     let formal = samples
         .iter()
         .filter(|sample| sample.phase == RunPhase::Formal)
@@ -458,7 +528,18 @@ fn build_row(
             )
         })
         .collect::<Vec<_>>();
-    let first_visible = normal
+    // 首响统计覆盖所有产生了可见内容的终态（含截断）：截断样本的首 token 延迟
+    // 仍是真实测量，推理模型撞输出上限时不应丢掉整档首响数据。
+    let measured = formal
+        .iter()
+        .filter(|sample| {
+            matches!(
+                sample.terminal_state,
+                TerminalState::Completed | TerminalState::NaturalEnd | TerminalState::Truncated
+            )
+        })
+        .collect::<Vec<_>>();
+    let first_visible = measured
         .iter()
         .filter_map(|sample| {
             sample
@@ -481,11 +562,15 @@ fn build_row(
         .flat_map(|sample| visible_intervals(&sample.timeline))
         .collect::<Vec<_>>();
     let max_pause_ms = block_intervals.iter().copied().max();
+    // 速率分母：流式取首正文到完成（解码段），非流式没有可观察首响，取发送到完成（端到端）。
     let normal_token_samples = normal
         .iter()
         .filter_map(|sample| {
             let tokens = sample.actual_output_tokens? as u64;
-            let start = sample.timeline.first_visible_ms?;
+            let start = sample
+                .timeline
+                .first_visible_ms
+                .unwrap_or(sample.timeline.send_ms);
             let end = sample.timeline.complete_ms?;
             (end > start && sample.token_count_source != TokenCountSource::Unavailable)
                 .then_some((tokens, end - start))
@@ -495,7 +580,10 @@ fn build_row(
         .iter()
         .filter_map(|sample| {
             let chars = sample.output_chars? as u64;
-            let start = sample.timeline.first_visible_ms?;
+            let start = sample
+                .timeline
+                .first_visible_ms
+                .unwrap_or(sample.timeline.send_ms);
             let end = sample.timeline.complete_ms?;
             (end > start).then_some((chars, end - start))
         })
@@ -524,9 +612,14 @@ fn build_row(
         .iter()
         .filter_map(|sample| sample.limitation.clone())
         .collect();
+    let buckets = build_buckets(&formal, window_start);
     PerformanceRow {
         category: workload.category(),
         workload,
+        mode: first.mode,
+        input_tokens_target: first.input_tokens_target,
+        target_output_tokens: first.target_output_tokens,
+        target_concurrency: first.target_concurrency,
         conditions,
         metrics: PerformanceMetrics {
             normal_sample_count: normal.len() as u32,
@@ -553,7 +646,7 @@ fn build_row(
                 .count() as u32,
             length_shortfall_count: formal
                 .iter()
-                .filter(|sample| !sample.length_target_met)
+                .filter(|sample| sample.actual_output_tokens.is_some() && !sample.length_target_met)
                 .count() as u32,
             first_visible_p50_ms: percentile(first_visible.clone(), 50),
             first_visible_p95_ms: percentile(first_visible, 95),
@@ -571,11 +664,58 @@ fn build_row(
                 numerator: normal.len() as u32,
                 denominator: formal.len() as u32,
             }),
+            buckets,
         },
         sample_ids: samples.iter().map(|sample| sample.id.clone()).collect(),
         evidence_refs,
         limitations,
     }
+}
+
+/// 按派发时间把正式样本切进 60 秒桶，供连续运行等负载观察漂移。
+fn build_buckets(formal: &[&PerformanceSample], window_start: u64) -> Vec<PerformanceBucket> {
+    let mut grouped: std::collections::BTreeMap<u64, Vec<&PerformanceSample>> =
+        std::collections::BTreeMap::new();
+    for sample in formal {
+        let offset = sample.dispatched_at_ms.saturating_sub(window_start);
+        grouped.entry(offset / BUCKET_MS).or_default().push(sample);
+    }
+    grouped
+        .into_iter()
+        .map(|(index, bucket_samples)| {
+            let latencies = bucket_samples
+                .iter()
+                .filter_map(|sample| {
+                    sample
+                        .timeline
+                        .complete_ms
+                        .map(|at| at.saturating_sub(sample.timeline.send_ms))
+                })
+                .collect::<Vec<_>>();
+            PerformanceBucket {
+                start_ms: index * BUCKET_MS,
+                dispatched: bucket_samples.len() as u32,
+                completed: bucket_samples
+                    .iter()
+                    .filter(|sample| {
+                        matches!(
+                            sample.terminal_state,
+                            TerminalState::Completed | TerminalState::NaturalEnd
+                        )
+                    })
+                    .count() as u32,
+                error_count: bucket_samples
+                    .iter()
+                    .filter(|sample| sample.terminal_state == TerminalState::Error)
+                    .count() as u32,
+                timeout_count: bucket_samples
+                    .iter()
+                    .filter(|sample| sample.terminal_state == TerminalState::Timeout)
+                    .count() as u32,
+                complete_p50_ms: percentile(latencies, 50),
+            }
+        })
+        .collect()
 }
 
 fn validate_samples(samples: &[PerformanceSample]) -> Result<(), String> {
@@ -682,6 +822,8 @@ mod tests {
             token_count_source: TokenCountSource::ServiceUsage,
             evidence_refs: vec![format!("evidence://{id}")],
             limitation: None,
+            dispatch_window_start_ms: None,
+            dispatch_window_end_ms: None,
         }
     }
 
@@ -704,15 +846,15 @@ mod tests {
             .iter()
             .find(|plan| plan.category == PerformanceCategory::Concurrency)
             .unwrap();
-        assert_eq!(concurrency.concurrency_targets, vec![1, 2, 4, 8]);
-        assert_eq!(concurrency.formal_request_limit, 300);
-        assert_eq!(concurrency.drain_window_ms, Some(120_000));
+        assert_eq!(concurrency.concurrency_targets, vec![1, 4, 8]);
+        assert_eq!(concurrency.formal_request_limit, 60);
+        assert_eq!(concurrency.drain_window_ms, Some(15_000));
         let continuous = plans
             .iter()
             .find(|plan| plan.category == PerformanceCategory::ContinuousStability)
             .unwrap();
-        assert_eq!(continuous.formal_request_limit, 1200);
-        assert_eq!(continuous.dispatch_window_ms, Some(600_000));
+        assert_eq!(continuous.formal_request_limit, 500);
+        assert_eq!(continuous.dispatch_window_ms, Some(90_000));
     }
 
     #[test]
@@ -831,8 +973,97 @@ mod tests {
         fifth.error_kind = Some(ErrorKind::Service);
         assert_eq!(
             repeated.observe(&fifth),
-            ProtectionAction::StopCurrentWorkload
+            ProtectionAction::CloseCurrentConcurrencyTier
         );
+    }
+
+    #[test]
+    fn separates_rows_by_mode_length_and_concurrency_dimensions() {
+        let mut other_tier = sample("s2", TerminalState::Completed);
+        other_tier.target_concurrency = 8;
+        other_tier.actual_concurrency = 8;
+        other_tier.timeline.first_visible_ms = Some(900);
+        other_tier.timeline.complete_ms = Some(2_000);
+        let report = build_report(
+            "run-a",
+            conditions(),
+            vec![sample("s1", TerminalState::Completed), other_tier],
+        )
+        .unwrap();
+        assert_eq!(report.rows.len(), 2);
+        assert_eq!(report.rows[0].target_concurrency, 1);
+        assert_eq!(report.rows[1].target_concurrency, 8);
+        assert_eq!(report.rows[0].metrics.complete_p50_ms, Some(500));
+        assert_eq!(report.rows[1].metrics.complete_p50_ms, Some(2_000));
+    }
+
+    #[test]
+    fn truncated_samples_stay_out_of_speed_distribution_but_keep_terminal_state() {
+        let mut truncated = sample("s2", TerminalState::Truncated);
+        truncated.timeline.complete_ms = None;
+        let report = build_report(
+            "run-a",
+            conditions(),
+            vec![sample("s1", TerminalState::Completed), truncated],
+        )
+        .unwrap();
+        let metrics = &report.rows[0].metrics;
+        assert_eq!(metrics.truncated_count, 1);
+        assert_eq!(metrics.normal_sample_count, 1);
+        assert_eq!(metrics.complete_p50_ms, Some(500));
+    }
+
+    #[test]
+    fn truncated_samples_still_contribute_first_visible_latency() {
+        let mut truncated = sample("s2", TerminalState::Truncated);
+        truncated.timeline.complete_ms = None;
+        truncated.timeline.first_visible_ms = Some(300);
+        let report = build_report(
+            "run-a",
+            conditions(),
+            vec![sample("s1", TerminalState::Completed), truncated],
+        )
+        .unwrap();
+        let metrics = &report.rows[0].metrics;
+        assert_eq!(metrics.first_visible_p50_ms, Some(300));
+        assert_eq!(metrics.complete_p50_ms, Some(500));
+    }
+
+    #[test]
+    fn non_streaming_samples_produce_end_to_end_token_rate() {
+        let mut non_stream = sample("s1", TerminalState::Completed);
+        non_stream.mode = ResponseMode::NonStreaming;
+        non_stream.timeline.first_visible_ms = None;
+        non_stream.timeline.visible_events_ms = Vec::new();
+        let report = build_report("run-a", conditions(), vec![non_stream]).unwrap();
+        let rate = report.rows[0]
+            .metrics
+            .token_rate
+            .clone()
+            .expect("token rate");
+        assert_eq!(rate.numerator, 100);
+        assert_eq!(rate.denominator_ms, 500);
+    }
+
+    #[test]
+    fn formal_samples_are_bucketed_by_minute_for_drift_observation() {
+        let mut later = sample("s2", TerminalState::Completed);
+        later.dispatched_at_ms = 61_000;
+        later.timeline.send_ms = 61_000;
+        later.timeline.first_visible_ms = Some(61_200);
+        later.timeline.complete_ms = Some(61_500);
+        later.terminal_at_ms = Some(61_500);
+        let report = build_report(
+            "run-a",
+            conditions(),
+            vec![sample("s1", TerminalState::Completed), later],
+        )
+        .unwrap();
+        let buckets = &report.rows[0].metrics.buckets;
+        assert_eq!(buckets.len(), 2);
+        assert_eq!(buckets[0].start_ms, 0);
+        assert_eq!(buckets[1].start_ms, 60_000);
+        assert_eq!(buckets[1].complete_p50_ms, Some(500));
     }
 
     #[test]

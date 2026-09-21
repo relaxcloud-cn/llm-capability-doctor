@@ -273,6 +273,7 @@ mod tests {
             content: content.into(),
             terminated,
             parse_errors: Vec::new(),
+            usage: None,
         }
     }
 

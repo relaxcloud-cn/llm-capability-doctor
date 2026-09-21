@@ -7,6 +7,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
@@ -28,8 +31,8 @@ use crate::context_probe;
 use crate::ingress::{ConnectionConfig, redact_endpoint};
 use crate::messages_probe;
 use crate::performance::{
-    ErrorKind, PerformanceConditions, PerformanceSample, ResponseMode as PerformanceResponseMode,
-    RunPhase, TerminalState, Timeline, TokenCountSource,
+    ErrorKind, PerformanceConditions, PerformanceSample, ProtectionAction, ProtectionState,
+    ResponseMode as PerformanceResponseMode, RunPhase, TerminalState, Timeline, TokenCountSource,
     build_report_for_record as build_performance_report_for_record, fixed_performance_plan,
 };
 use crate::records::{
@@ -131,6 +134,9 @@ impl ModuleExecutor for UnavailableExecutor {
     }
 }
 
+/// 单个性能请求的硬超时；挂死的请求记为超时样本而非拖垮整体检测。
+const PERF_REQUEST_TIMEOUT_MS: u64 = 120_000;
+
 pub struct LiveExecutor {
     transport: ChatCompletionsTransport,
     full: bool,
@@ -227,6 +233,8 @@ impl LiveExecutor {
             prompt: probe_prompt(module_id).into(),
             max_tokens: 64,
             stream: false,
+            allow_retry: true,
+            timeout_ms: None,
         };
         let response = self.transport.send(request.clone());
         let evidence_payload = self.transport.evidence_payload(&request, &response);
@@ -418,6 +426,8 @@ impl LiveExecutor {
                     ),
                     max_tokens: 256,
                     stream: plan.category.id() == "S07",
+                    allow_retry: true,
+                    timeout_ms: None,
                 };
                 let (response, stream) = if request.stream {
                     let stream = self.transport.send_stream(request.clone());
@@ -557,6 +567,8 @@ impl LiveExecutor {
             prompt: calibration_prompt,
             max_tokens: 64,
             stream: false,
+            allow_retry: true,
+            timeout_ms: None,
         };
         let calibration_response = self.transport.send(calibration_request.clone());
         evidence.push(json!({
@@ -590,6 +602,8 @@ impl LiveExecutor {
                 prompt,
                 max_tokens: 256,
                 stream: false,
+                allow_retry: true,
+                timeout_ms: None,
             };
             let response = self.transport.send(request.clone());
             let finish_reason = response_finish_reason(response.parsed.as_ref());
@@ -941,7 +955,9 @@ impl LiveExecutor {
                 ),
             });
             let payload = stream_probe::request_payload(sample, self.transport.model_name());
-            let stream = self.transport.send_stream_payload(payload.clone());
+            let stream = self
+                .transport
+                .send_stream_payload(payload.clone(), true, None);
             let outcome = stream_probe::classify(sample, &stream);
             evidence.push(json!({
                 "sample_id": sample_id,
@@ -1033,6 +1049,8 @@ impl LiveExecutor {
                 tools: sample.tools.clone(),
                 max_tokens: 1024,
                 stream: false,
+                allow_retry: true,
+                timeout_ms: None,
             };
             let response = self.transport.send(request.clone());
             let text = completion_text(response.parsed.as_ref());
@@ -1167,10 +1185,15 @@ impl LiveExecutor {
         let mut evidence = Vec::new();
         let mut consecutive_environment_failures = 0_u32;
         let mut circuit_breaker_reason: Option<String> = None;
+        let mut protection_notes: Vec<String> = Vec::new();
+        let stop_all = Arc::new(AtomicBool::new(false));
         'plans: for plan in plans {
             for (mode, input_tokens, target_output_tokens, target_concurrency) in
                 performance_dimensions(&plan)
             {
+                if stop_all.load(Ordering::Relaxed) {
+                    break 'plans;
+                }
                 progress(ProgressDetail {
                     index: completed_dimensions,
                     total: total_dimensions,
@@ -1182,124 +1205,228 @@ impl LiveExecutor {
                     ),
                 });
                 let dimension_started = std::time::Instant::now();
-                for warmup_index in 0..plan.warmup_count {
-                    let work = PerformanceWorkItem {
-                        sample_id: format!(
-                            "{}-{}-{}-{}-{}-warmup-{}-{}",
-                            plan.category.id(),
-                            format_workload(plan.workload),
-                            format_mode(mode),
-                            input_tokens,
-                            target_output_tokens,
-                            target_concurrency,
-                            warmup_index + 1
-                        ),
-                        request: performance_request(
-                            mode,
-                            plan.category.id(),
-                            plan.workload,
-                            warmup_index,
-                            input_tokens,
-                            target_output_tokens,
-                        ),
-                        workload: plan.workload,
-                        input_tokens,
-                        target_output_tokens,
-                        phase: RunPhase::Warmup,
-                        target_concurrency,
-                        actual_concurrency: 1,
-                        dispatched_at_ms: run_started.elapsed().as_millis() as u64,
-                    };
-                    let mut observations = self.run_performance_batch(vec![work]);
-                    let observation = observations.pop().expect("one warmup request");
-                    let error_kind = self.record_performance_observation(
-                        record,
-                        observation,
-                        &mut samples,
-                        &mut evidence,
-                    );
-                    if is_environment_error(error_kind) {
-                        consecutive_environment_failures += 1;
-                    } else {
-                        consecutive_environment_failures = 0;
-                    }
-                    if consecutive_environment_failures >= 3 {
-                        circuit_breaker_reason = Some(
-                            "连续 3 次请求出现网络、认证、限流或服务错误，已停止性能检测".into(),
-                        );
-                        break 'plans;
-                    }
-                }
+                let mut protection = ProtectionState::default();
+                let mut dimension_closed = false;
 
-                let mut remaining = plan.formal_request_limit;
-                let mut formal_index = 0_u32;
-                while remaining > 0 {
-                    if plan.max_duration_ms.is_some_and(|limit| {
-                        dimension_started.elapsed().as_millis() as u64 >= limit
-                    }) {
+                // 预热：每轮按目标并发齐发一批，预热失败保留但不计入正式分母。
+                for warmup_index in 0..plan.warmup_count {
+                    if dimension_closed || stop_all.load(Ordering::Relaxed) {
                         break;
                     }
-                    if plan.dispatch_window_ms.is_some_and(|limit| {
-                        formal_index > 0 && dimension_started.elapsed().as_millis() as u64 >= limit
-                    }) {
-                        break;
-                    }
-                    let batch_size = target_concurrency.min(remaining).max(1);
-                    let dispatched_at_ms = run_started.elapsed().as_millis() as u64;
-                    let work = (0..batch_size)
-                        .map(|batch_index| {
-                            let index = formal_index + batch_index;
+                    let work = (0..target_concurrency.max(1))
+                        .map(|offset| {
+                            let dispatched_at_ms = run_started.elapsed().as_millis() as u64;
                             PerformanceWorkItem {
                                 sample_id: format!(
-                                    "{}-{}-{}-{}-{}-{}-{:04}",
+                                    "{}-{}-{}-{}-{}-{}-warmup-{}-{}",
                                     plan.category.id(),
                                     format_workload(plan.workload),
                                     format_mode(mode),
                                     input_tokens,
                                     target_output_tokens,
                                     target_concurrency,
-                                    index + 1
+                                    warmup_index + 1,
+                                    offset + 1
                                 ),
                                 request: performance_request(
                                     mode,
                                     plan.category.id(),
                                     plan.workload,
-                                    index,
+                                    warmup_index,
                                     input_tokens,
                                     target_output_tokens,
                                 ),
                                 workload: plan.workload,
                                 input_tokens,
                                 target_output_tokens,
-                                phase: RunPhase::Formal,
+                                phase: RunPhase::Warmup,
                                 target_concurrency,
-                                actual_concurrency: batch_size,
+                                actual_concurrency: target_concurrency.max(1),
                                 dispatched_at_ms,
+                                dispatch_window_start_ms: None,
+                                dispatch_window_end_ms: None,
                             }
                         })
                         .collect();
                     for observation in self.run_performance_batch(work) {
-                        let error_kind = self.record_performance_observation(
+                        let (error_kind, action) = self.record_and_protect(
                             record,
                             observation,
                             &mut samples,
                             &mut evidence,
+                            &mut protection,
                         );
                         if is_environment_error(error_kind) {
                             consecutive_environment_failures += 1;
                         } else {
                             consecutive_environment_failures = 0;
                         }
-                        if consecutive_environment_failures >= 3 {
+                        match action {
+                            ProtectionAction::Continue => {}
+                            ProtectionAction::CloseCurrentConcurrencyTier => {
+                                dimension_closed = true;
+                                protection_notes.push(format!(
+                                    "{} 预热阶段触发保护，关闭当前维度",
+                                    plan.category.id()
+                                ));
+                            }
+                            ProtectionAction::StopCurrentWorkload => {
+                                stop_all.store(true, Ordering::Relaxed);
+                                circuit_breaker_reason =
+                                    Some("预热阶段出现认证或权限错误，已停止性能检测".into());
+                            }
+                        }
+                        if consecutive_environment_failures >= 5 {
+                            stop_all.store(true, Ordering::Relaxed);
                             circuit_breaker_reason = Some(
-                                "连续 3 次请求出现网络、认证、限流或服务错误，已停止性能检测"
+                                "连续 5 次请求出现网络、认证、限流或服务错误，已停止性能检测"
                                     .into(),
                             );
-                            break 'plans;
                         }
                     }
-                    formal_index += batch_size;
-                    remaining -= batch_size;
+                }
+
+                // 正式测量：闭环并发。在途请求恒定等于目标并发，走完一个补一个；
+                // 并发 1 时退化为逐条串行。派发窗口从正式阶段起点计算。
+                if !dimension_closed && !stop_all.load(Ordering::Relaxed) {
+                    let formal_started = std::time::Instant::now();
+                    let window_start_ms = run_started.elapsed().as_millis() as u64;
+                    let window_end_ms = plan
+                        .dispatch_window_ms
+                        .map(|window| window_start_ms + window);
+                    let next_index = Arc::new(AtomicUsize::new(0));
+                    let in_flight = Arc::new(AtomicU32::new(0));
+                    let stop_tier = Arc::new(AtomicBool::new(false));
+                    let (sender, receiver) = mpsc::channel::<PerformanceObservation>();
+                    let workers = (0..target_concurrency.max(1))
+                        .map(|_| {
+                            let transport = self.transport.clone();
+                            let next_index = Arc::clone(&next_index);
+                            let in_flight = Arc::clone(&in_flight);
+                            let stop_tier = Arc::clone(&stop_tier);
+                            let stop_all = Arc::clone(&stop_all);
+                            let sender = sender.clone();
+                            let category_id = plan.category.id();
+                            let workload = plan.workload;
+                            let formal_limit = plan.formal_request_limit;
+                            let dispatch_window = plan.dispatch_window_ms;
+                            let max_duration = plan.max_duration_ms;
+                            std::thread::spawn(move || {
+                                loop {
+                                    if stop_tier.load(Ordering::Relaxed)
+                                        || stop_all.load(Ordering::Relaxed)
+                                    {
+                                        break;
+                                    }
+                                    if dispatch_window.is_some_and(|window| {
+                                        formal_started.elapsed().as_millis() as u64 >= window
+                                    }) || max_duration.is_some_and(|limit| {
+                                        dimension_started.elapsed().as_millis() as u64 >= limit
+                                    }) {
+                                        break;
+                                    }
+                                    let index = next_index.fetch_add(1, Ordering::Relaxed) as u32;
+                                    if index >= formal_limit {
+                                        break;
+                                    }
+                                    let actual = in_flight.fetch_add(1, Ordering::Relaxed) + 1;
+                                    let item = PerformanceWorkItem {
+                                        sample_id: format!(
+                                            "{}-{}-{}-{}-{}-{}-{:04}",
+                                            category_id,
+                                            format_workload(workload),
+                                            format_mode(mode),
+                                            input_tokens,
+                                            target_output_tokens,
+                                            target_concurrency,
+                                            index + 1
+                                        ),
+                                        request: performance_request(
+                                            mode,
+                                            category_id,
+                                            workload,
+                                            index,
+                                            input_tokens,
+                                            target_output_tokens,
+                                        ),
+                                        workload,
+                                        input_tokens,
+                                        target_output_tokens,
+                                        phase: RunPhase::Formal,
+                                        target_concurrency,
+                                        actual_concurrency: actual,
+                                        dispatched_at_ms: run_started.elapsed().as_millis() as u64,
+                                        dispatch_window_start_ms: dispatch_window
+                                            .map(|_| window_start_ms),
+                                        dispatch_window_end_ms: window_end_ms,
+                                    };
+                                    let request = item.request.clone();
+                                    let response = if request.stream {
+                                        PerformanceResponse::Streaming(
+                                            transport.send_stream(request),
+                                        )
+                                    } else {
+                                        PerformanceResponse::Standard(transport.send(request))
+                                    };
+                                    in_flight.fetch_sub(1, Ordering::Relaxed);
+                                    if sender
+                                        .send(PerformanceObservation { item, response })
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
+                                }
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    drop(sender);
+                    let mut tier_note_sent = false;
+                    while let Ok(observation) = receiver.recv() {
+                        let (error_kind, action) = self.record_and_protect(
+                            record,
+                            observation,
+                            &mut samples,
+                            &mut evidence,
+                            &mut protection,
+                        );
+                        if is_environment_error(error_kind) {
+                            consecutive_environment_failures += 1;
+                        } else {
+                            consecutive_environment_failures = 0;
+                        }
+                        match action {
+                            ProtectionAction::Continue => {}
+                            ProtectionAction::CloseCurrentConcurrencyTier => {
+                                stop_tier.store(true, Ordering::Relaxed);
+                                if !tier_note_sent {
+                                    tier_note_sent = true;
+                                    protection_notes.push(format!(
+                                        "{} 目标并发 {target_concurrency} 触发限流或连续失败保护，已关闭该档",
+                                        plan.category.id()
+                                    ));
+                                }
+                            }
+                            ProtectionAction::StopCurrentWorkload => {
+                                stop_all.store(true, Ordering::Relaxed);
+                                stop_tier.store(true, Ordering::Relaxed);
+                                circuit_breaker_reason =
+                                    Some("出现认证或权限错误，已停止性能检测".into());
+                            }
+                        }
+                        if consecutive_environment_failures >= 5 {
+                            stop_all.store(true, Ordering::Relaxed);
+                            circuit_breaker_reason = Some(
+                                "连续 5 次请求出现网络、认证、限流或服务错误，已停止性能检测"
+                                    .into(),
+                            );
+                        }
+                    }
+                    for worker in workers {
+                        let _ = worker.join();
+                    }
+                }
+                if stop_all.load(Ordering::Relaxed) {
+                    break 'plans;
                 }
                 completed_dimensions += 1;
                 progress(ProgressDetail {
@@ -1324,7 +1451,7 @@ impl LiveExecutor {
                 model: self.transport_model(),
                 protocol: "chat-completions".into(),
                 client_version: "0.1.0".into(),
-                timeout_ms: 300_000,
+                timeout_ms: PERF_REQUEST_TIMEOUT_MS,
                 input_range_max_tokens: None,
                 window_start_ms: 0,
                 window_end_ms: end,
@@ -1358,11 +1485,16 @@ impl LiveExecutor {
                 ModuleResultState::Pass
             },
             reason: Some(format!(
-                "已执行 {} 个性能正式样本；{}{}",
+                "已执行 {} 个性能正式样本；{}{}{}",
                 formal_count,
                 circuit_breaker_reason
                     .as_deref()
                     .unwrap_or("未触发连续失败熔断"),
+                if protection_notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("；{}", protection_notes.join("；"))
+                },
                 if failed {
                     "；错误样本保留为不可测量"
                 } else {
@@ -1412,6 +1544,24 @@ impl LiveExecutor {
                     .to_owned()
             })
             .collect()
+    }
+
+    /// 记录样本并交给保护状态机判定下一步动作。
+    fn record_and_protect(
+        &self,
+        record: &mut DetectionRecord,
+        observation: PerformanceObservation,
+        samples: &mut Vec<PerformanceSample>,
+        evidence: &mut Vec<Value>,
+        protection: &mut ProtectionState,
+    ) -> (Option<crate::performance::ErrorKind>, ProtectionAction) {
+        let error_kind =
+            self.record_performance_observation(record, observation, samples, evidence);
+        let action = samples
+            .last()
+            .map(|sample| protection.observe(sample))
+            .unwrap_or(ProtectionAction::Continue);
+        (error_kind, action)
     }
 
     fn record_performance_observation(
@@ -1805,6 +1955,8 @@ impl LiveExecutor {
                         | BaselineScenario::StreamToolDelta
                         | BaselineScenario::StreamUsage
                 ),
+                allow_retry: true,
+                timeout_ms: None,
             };
             let response = self.transport.send(request.clone());
             let source = ActualSnapshot::from_raw(
@@ -1867,6 +2019,8 @@ struct PerformanceWorkItem {
     target_concurrency: u32,
     actual_concurrency: u32,
     dispatched_at_ms: u64,
+    dispatch_window_start_ms: Option<u64>,
+    dispatch_window_end_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1926,6 +2080,68 @@ fn format_workload(workload: crate::performance::WorkloadKind) -> &'static str {
     }
 }
 
+/// 填充行约 80 个 ASCII 字符；按 ~3.2 字符/token 估算并多写 20%，
+/// 实际输入长度以服务端 usage.prompt_tokens 为准记录在样本里。
+const PADDING_LINE: &str =
+    "lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor\n";
+const PADDING_CHARS_PER_TOKEN: f64 = 3.2;
+/// 历史增长负载：每条约 128 tokens，对应 512/2048/4096 档的 4/16/32 条消息。
+const HISTORY_MESSAGE_CHARS: usize = 128 * 4;
+
+/// 构造约 target_tokens 的真实长度输入材料。
+fn padded_material(target_tokens: u32) -> String {
+    let target_chars = (target_tokens as f64 * PADDING_CHARS_PER_TOKEN) as usize;
+    let mut material = String::with_capacity(target_chars + 256);
+    material.push_str("PERF_INPUT_BEGIN\n");
+    let mut index = 0usize;
+    while material.len() < target_chars {
+        index += 1;
+        material.push_str(&format!("SEGMENT {index:07} {PADDING_LINE}"));
+    }
+    material.push_str("PERF_INPUT_END\n");
+    material
+}
+
+/// 构造总输入约 total_tokens 的交替 user/assistant 历史消息，末条为真实提问。
+fn history_messages(total_tokens: u32) -> Vec<Value> {
+    let count = (total_tokens / 128).clamp(2, 64) as usize;
+    let filler =
+        "history record filler lorem ipsum dolor sit amet consectetur adipiscing\n".repeat(6);
+    let mut messages = (0..count.saturating_sub(1))
+        .map(|index| {
+            json!({
+                "role": if index % 2 == 0 { "user" } else { "assistant" },
+                "content": format!("历史消息 {:04}：{}", index + 1, &filler[..HISTORY_MESSAGE_CHARS.min(filler.len())]),
+            })
+        })
+        .collect::<Vec<_>>();
+    if messages.len() % 2 == 1 {
+        messages.push(json!({
+            "role": "assistant",
+            "content": format!("历史消息 {:04}：{}", messages.len() + 1, &filler[..HISTORY_MESSAGE_CHARS.min(filler.len())]),
+        }));
+    }
+    messages
+}
+
+/// 中文正文约 1.5 字/token：提示词按字要长度时换算成目标 token 对应的字数，
+/// 避免"约 256 字"实际只产出 ~150 tokens 导致系统性未达标。
+fn output_prompt_chars(target_output_tokens: u32) -> u32 {
+    target_output_tokens + target_output_tokens / 2
+}
+
+/// 输出上限 = 目标 + 余量，避免把"写到目标长度"误判成截断；撞上限仍记为截断。
+/// 非长输出档给 2 倍余量：推理模型的 reasoning tokens 与正文共享 max_tokens，
+/// 余量不足会把短输出档变成系统性截断，丢掉自然结束样本。
+fn output_cap(workload: crate::performance::WorkloadKind, target_output_tokens: u32) -> u32 {
+    match workload {
+        crate::performance::WorkloadKind::LongOutput => {
+            target_output_tokens + target_output_tokens / 2
+        }
+        _ => target_output_tokens * 2 + 64,
+    }
+}
+
 fn performance_request(
     mode: PerformanceResponseMode,
     category: &str,
@@ -1934,17 +2150,52 @@ fn performance_request(
     input_tokens: u32,
     target_output_tokens: u32,
 ) -> ChatCompletionsRequest {
+    let (prompt, messages) = match workload {
+        crate::performance::WorkloadKind::LongInput => (
+            format!(
+                "{}\n以上是填充材料（性能实测 {category} 第 {} 次）。请用约两百字概括这段材料的结构。",
+                padded_material(input_tokens),
+                index + 1
+            ),
+            None,
+        ),
+        crate::performance::WorkloadKind::LongOutput => (
+            format!(
+                "性能实测 {category} 长输出样本 {}。请围绕\"如何为一次软件系统做性能评测\"写一篇不少于 {} 字的长文，分多个小节充分展开，未达篇幅前不要收尾。",
+                index + 1,
+                output_prompt_chars(target_output_tokens)
+            ),
+            None,
+        ),
+        crate::performance::WorkloadKind::HistoryGrowth => {
+            let mut messages = history_messages(input_tokens);
+            messages.push(json!({
+                "role": "user",
+                "content": format!("性能实测 {category} 第 {} 次：请用约 {} 字概括我们以上的对话内容。", index + 1, output_prompt_chars(target_output_tokens)),
+            }));
+            (
+                format!("历史增长负载，约 {input_tokens} tokens 对话历史"),
+                Some(messages),
+            )
+        }
+        _ => (
+            format!(
+                "性能实测 {category} 第 {} 次。请写一段约 {} 字的连续中文说明文字，主题自选，写够篇幅后自然收尾。",
+                index + 1,
+                output_prompt_chars(target_output_tokens)
+            ),
+            None,
+        ),
+    };
     ChatCompletionsRequest {
         module_id: "performance".into(),
-        messages: None,
+        prompt,
+        messages,
         tools: None,
-        prompt: format!(
-            "性能计划 {category} {:?} 第 {} 次；输入目标 {input_tokens}；输出目标 {target_output_tokens}；返回短文本并保持正常结束。",
-            workload,
-            index + 1
-        ),
-        max_tokens: target_output_tokens,
+        max_tokens: output_cap(workload, target_output_tokens),
         stream: mode == PerformanceResponseMode::Streaming,
+        allow_retry: false,
+        timeout_ms: Some(PERF_REQUEST_TIMEOUT_MS),
     }
 }
 
@@ -1998,16 +2249,19 @@ fn performance_sample(
             .is_some_and(|status| (200..300).contains(&status))
         && is_chat_completion_shape(response.parsed.as_ref())
         && (!item.request.stream || terminated);
-    let terminal_state = if valid {
-        TerminalState::NaturalEnd
-    } else if response
-        .error
-        .as_deref()
-        .is_some_and(|error| error.to_ascii_lowercase().contains("timeout"))
-    {
+    let finish_reason = response_finish_reason(response.parsed.as_ref());
+    let timed_out = response.error.as_deref().is_some_and(|error| {
+        let lower = error.to_ascii_lowercase();
+        error.contains("超时") || lower.contains("timed out") || lower.contains("timeout")
+    });
+    let terminal_state = if timed_out {
         TerminalState::Timeout
-    } else {
+    } else if !valid {
         TerminalState::Error
+    } else if finish_reason.as_deref() == Some("length") {
+        TerminalState::Truncated
+    } else {
+        TerminalState::NaturalEnd
     };
     let absolute = |relative: u64| item.dispatched_at_ms.saturating_add(relative);
     let first_event = if item.request.stream {
@@ -2039,9 +2293,11 @@ fn performance_sample(
         Vec::new()
     };
     let first_visible = visible_events.first().copied();
-    let complete = valid.then(|| absolute(elapsed));
+    // 只有自然结束的请求计入正常完成耗时；撞上限截断保留终态但不混入速度分布。
+    let natural_end = valid && finish_reason.as_deref() != Some("length");
+    let complete = natural_end.then(|| absolute(elapsed));
     let length_target_met =
-        actual_output_tokens.is_some_and(|value| value >= item.request.max_tokens);
+        actual_output_tokens.is_some_and(|value| value >= item.target_output_tokens);
     let limitation = if !valid {
         Some("请求未形成可测量的正常结束".into())
     } else if actual_output_tokens.is_none() {
@@ -2092,6 +2348,8 @@ fn performance_sample(
         token_count_source,
         evidence_refs: Vec::new(),
         limitation,
+        dispatch_window_start_ms: item.dispatch_window_start_ms,
+        dispatch_window_end_ms: item.dispatch_window_end_ms,
     };
     (sample, payload)
 }
@@ -2996,8 +3254,8 @@ mod tests {
             .iter()
             .map(|plan| performance_dimensions(plan).len())
             .collect::<Vec<_>>();
-        assert_eq!(dimensions, vec![2, 1, 4, 1, 3, 2, 3]);
-        assert_eq!(dimensions.into_iter().sum::<usize>(), 16);
+        assert_eq!(dimensions, vec![2, 1, 3, 1, 3, 2, 1]);
+        assert_eq!(dimensions.into_iter().sum::<usize>(), 13);
     }
 
     fn executor_record() -> DetectionRecord {
