@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+use crate::cli::module_display_name;
 use crate::records::{
     DetectionRecord, EventKind, LifecycleState, ModuleResultState, ModuleSelectionState,
 };
@@ -177,7 +178,7 @@ fn build_scope(record: &DetectionRecord) -> Vec<ScopeItem> {
                 ),
                 description: result
                     .and_then(|result| result.reason.clone())
-                    .unwrap_or_else(|| "本次记录没有完成该项目的可核对结果".into()),
+                    .unwrap_or_else(|| "该项目未完成实测，无可核对结果".into()),
                 evidence_refs: result
                     .map(|result| result.evidence_refs.clone())
                     .unwrap_or_default(),
@@ -192,27 +193,26 @@ fn automatic_gaps(scope: &[ScopeItem]) -> Vec<String> {
     }
     scope
         .iter()
-        .filter_map(|item| match item.state {
-            ModuleResultState::Inconclusive => Some(format!(
-                "{} 只有 inconclusive 事实，不能推导整体可用性",
-                item.module_id
-            )),
-            ModuleResultState::InvalidExecution => Some(format!(
-                "{} 执行无效，不能把环境故障归因于模型",
-                item.module_id
-            )),
-            ModuleResultState::Unverified => Some(format!(
-                "{} 尚未完成验证，剩余范围不能包装成已测",
-                item.module_id
-            )),
-            ModuleResultState::Unsupported => Some(format!(
-                "{} 不支持，当前记录没有该范围的有效能力证据",
-                item.module_id
-            )),
-            ModuleResultState::Fail if item.evidence_refs.is_empty() => {
-                Some(format!("{} 有失败状态但没有可追溯证据", item.module_id))
+        .filter_map(|item| {
+            let name = module_display_name(&item.module_id);
+            match item.state {
+                ModuleResultState::Inconclusive => {
+                    Some(format!("「{name}」未取得足够检测证据，暂不能判断其可用性"))
+                }
+                ModuleResultState::InvalidExecution => Some(format!(
+                    "「{name}」检测执行受环境影响无效，结果不计入模型能力判断"
+                )),
+                ModuleResultState::Unverified => {
+                    Some(format!("「{name}」未完成检测，不计入已测范围"))
+                }
+                ModuleResultState::Unsupported => {
+                    Some(format!("「{name}」当前服务不支持，未取得有效能力证据"))
+                }
+                ModuleResultState::Fail if item.evidence_refs.is_empty() => {
+                    Some(format!("「{name}」判定未通过，但缺少可核对的检测证据"))
+                }
+                _ => None,
             }
-            _ => None,
         })
         .collect()
 }

@@ -4,7 +4,8 @@ use llm_capability_doctor::cli::{
     generated_timestamp, render_report, run_with_executor_reporting, write_report,
 };
 use llm_capability_doctor::evaluation::{
-    AnalyzerConfig, analyze_modules, build_module_reports, render_html, write_bundled_module_inputs,
+    AnalyzerConfig, analyze_modules, attach_report_items, build_module_reports, render_html,
+    write_bundled_module_inputs,
 };
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
@@ -284,6 +285,10 @@ fn main() {
                         api_key: api_key.clone(),
                     },
                 )
+                .and_then(|paths| {
+                    attach_report_items(&input_paths, &paths)?;
+                    Ok(paths)
+                })
             }
         }
         .unwrap_or_else(|error| {

@@ -144,10 +144,11 @@ impl ModuleExecutor for UnavailableExecutor {
         ModuleRunResult {
             state: ModuleResultState::Inconclusive,
             reason: Some(format!(
-                "{module_id} 执行器尚未接入当前 CLI；保留配置和范围，不伪造测量结果"
+                "{}本次未执行实测，结果标记为待确认",
+                module_display_name(module_id)
             )),
             evidence_kind: "cli_execution_boundary".into(),
-            evidence_summary: "当前版本仅完成 CLI 编排，真实模块执行由后续执行器接入".into(),
+            evidence_summary: "当前版本未对该检测项目执行实测".into(),
             evidence_payload: json!({"execution": "unavailable"}),
         }
     }
@@ -284,7 +285,7 @@ impl LiveExecutor {
             return ModuleRunResult {
                 state: ModuleResultState::Inconclusive,
                 reason: Some(format!(
-                    "服务返回 HTTP {status}；限流或服务异常保留为 inconclusive"
+                    "服务返回 HTTP {status}，疑似限流或服务异常，本次结果记为待确认"
                 )),
                 evidence_kind: "real_service_retryable_error".into(),
                 evidence_summary: summary,
@@ -295,7 +296,7 @@ impl LiveExecutor {
             return ModuleRunResult {
                 state: ModuleResultState::Inconclusive,
                 reason: Some(format!(
-                    "服务返回 HTTP {status}；未将未知错误包装为模块失败"
+                    "服务返回 HTTP {status}，属于服务侧异常，本次结果记为待确认"
                 )),
                 evidence_kind: "real_service_http_error".into(),
                 evidence_summary: summary,
@@ -305,9 +306,7 @@ impl LiveExecutor {
         if !is_chat_completion_shape(response.parsed.as_ref()) {
             return ModuleRunResult {
                 state: ModuleResultState::Fail,
-                reason: Some(
-                    "HTTP 成功但响应缺少可识别的 Chat Completions choices/message 结构".into(),
-                ),
+                reason: Some("服务响应成功，但内容不符合标准对话接口的消息结构".into()),
                 evidence_kind: "real_service_protocol_failure".into(),
                 evidence_summary: summary,
                 evidence_payload,
@@ -319,10 +318,9 @@ impl LiveExecutor {
             _ => ModuleResultState::Pass,
         };
         let reason = match state {
-            ModuleResultState::Inconclusive => Some(
-                "已完成真实服务 HTTP 冒烟，但当前入口尚未覆盖该模块的完整固定样本；不伪造完整通过"
-                    .into(),
-            ),
+            ModuleResultState::Inconclusive => {
+                Some("服务连通性验证通过，但该项目未完成全部检测样本，记为待确认".into())
+            }
             _ => Some("真实服务响应通过协议结构检查".into()),
         };
         ModuleRunResult {
@@ -3266,9 +3264,9 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
     let customer_conclusion = build_default_customer_report(&record)?;
     let execution_origin = executor.execution_origin();
     let execution_limitation = if execution_origin == "real_service" {
-        "当前真实执行器已完成 Chat Completions 冒烟请求；尚未覆盖所有模块的完整固定样本时，模块保持 inconclusive。"
+        "已对真实服务接口完成连通性验证；未覆盖完整检测样本的项目标记为「待确认」。"
     } else {
-        "未接入真实执行器的模块保持 inconclusive，不伪造测量结果。"
+        "未执行实测的项目标记为「待确认」，不做推测。"
     };
     Ok(CliRunReport {
         version: CLI_VERSION.into(),
@@ -3284,10 +3282,10 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         customer_conclusion,
         execution_origin: execution_origin.into(),
         limitations: vec![
-            "CLI 保存的是实际选择、状态和证据入口；模块状态只由执行器返回的事实决定。".into(),
+            "报告仅汇总实际执行得到的检测结果，不做推测。".into(),
             execution_limitation.into(),
-            "停止运行只保留停止前事实，剩余项目保持 unverified，不包装成完成全测。".into(),
-            "API 密钥只用于配置存在性标记，不写入记录或输出。".into(),
+            "检测中途停止时，仅保留已完成部分的结果，其余标记为「未验证」。".into(),
+            "API 密钥仅用于连接检测，不会写入报告或记录。".into(),
         ],
     })
 }
@@ -3830,7 +3828,7 @@ mod tests {
         let result = executor.execute("specification", &executor_record());
         server.join().unwrap();
         assert_eq!(result.state, ModuleResultState::Fail);
-        assert!(result.reason.unwrap().contains("响应缺少"));
+        assert!(result.reason.unwrap().contains("不符合标准对话接口"));
     }
 
     #[test]

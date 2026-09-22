@@ -43,7 +43,18 @@ pub struct ModuleReport {
     pub findings: Vec<Finding>,
     pub evidence_refs: Vec<String>,
     pub limitations: Vec<String>,
+    /// 逐项检测结果，供报告按检测项展示；dynamic 分析产物可能没有，由实测数据补填。
+    #[serde(default)]
+    pub items: Vec<ModuleReportItem>,
     pub analyzer: AnalyzerInfo,
+}
+
+/// 单个检测项的客户可见结果：name 为中文检测项名，status 为内部状态码，note 为中文说明。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleReportItem {
+    pub name: String,
+    pub status: String,
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -301,29 +312,33 @@ pub fn build_module_reports(
             .evidence
             .iter()
             .find_map(|item| item.get("payload"))
-            .and_then(|payload| module_item_stats(module, payload));
+            .and_then(|wrapped| {
+                // add_evidence 会再包一层 module/summary/origin，真身在 .payload。
+                let payload = wrapped.get("payload").unwrap_or(wrapped);
+                module_item_stats(module, payload)
+            });
         let mut findings = Vec::new();
         if let Some(stats) = stats {
             findings.push(Finding {
-                item_id: "检测小项统计".into(),
+                item_id: "检测项统计".into(),
                 verdict: if stats.failed == 0 { "pass" } else { "fail" }.into(),
                 rationale: if stats.failed == 0 {
-                    format!("{} 个检测小项全部通过", stats.total)
+                    format!("{} 个检测项全部通过", stats.total)
                 } else {
-                    format!("{}/{} 个检测小项未通过", stats.failed, stats.total)
+                    format!("{}/{} 个检测项未通过", stats.failed, stats.total)
                 },
                 evidence_refs: evidence_refs.clone(),
             });
         }
         findings.push(Finding {
-            item_id: format!("模块判定 {}", module_display_name(module)),
+            item_id: "判定说明".into(),
             verdict: verdict.into(),
             rationale: reason
-                .unwrap_or_else(|| format!("CLI 实测状态为 {}", module_state_label(&cli_state))),
+                .unwrap_or_else(|| format!("实测状态为 {}", module_state_label(&cli_state))),
             evidence_refs: evidence_refs.clone(),
         });
-        let mut limitations = input.limitations.clone();
-        limitations.push("custom 模式：报告由检测结论模板填充生成，未进行 AI 语义分析".into());
+        let items = module_report_items(module, &input);
+        let limitations = Vec::new();
         let module_report = ModuleReport {
             schema_version: "module-eval-report/v1".into(),
             evaluation_version: EVALUATION_VERSION.into(),
@@ -338,6 +353,7 @@ pub fn build_module_reports(
             findings,
             evidence_refs,
             limitations,
+            items,
             analyzer: AnalyzerInfo {
                 name: "agentcheck-template".into(),
                 status: "deterministic_fill".into(),
@@ -347,6 +363,258 @@ pub fn build_module_reports(
         paths.push(output_path);
     }
     Ok(paths)
+}
+
+/// 从模块输入数据中提取逐项检测结果（检测项中文名 + 结果 + 客户可见说明）。
+/// 检测项名取自输入规则清单（如 "S01 协议可接受上下文上限"），编号保留作引用。
+fn module_report_items(module: &str, input: &ModuleInput) -> Vec<ModuleReportItem> {
+    let Some(payload) = input
+        .evidence
+        .iter()
+        .find_map(|item| item.get("payload"))
+        .map(|wrapped| wrapped.get("payload").unwrap_or(wrapped))
+    else {
+        return Vec::new();
+    };
+    let labels = input
+        .rules
+        .get("items")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let text = item.as_str()?;
+                    text.split_once(' ')
+                        .map(|(code, _)| (code.to_string(), text.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let item = |code: &str, status: &str, note: String| ModuleReportItem {
+        name: labels
+            .iter()
+            .find(|(item_code, _)| item_code == code)
+            .map(|(_, text)| text.clone())
+            .unwrap_or_else(|| code.to_string()),
+        status: status.into(),
+        note,
+    };
+    let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
+    match module {
+        "specification" => payload["report"]["rows"]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .map(|row| {
+                        let code = row["category"].as_str().unwrap_or_default();
+                        let result = row["result"].as_str().unwrap_or_default();
+                        let status = match result {
+                            "failed" => "fail",
+                            "unsupported" | "not_applicable" => "limited",
+                            "inconclusive" => "inconclusive",
+                            _ => "pass",
+                        };
+                        let note = row["verified_scope"]
+                            .as_str()
+                            .map(str::to_owned)
+                            .or_else(|| {
+                                row["limitations"].as_array().and_then(|items| {
+                                    items.iter().find_map(Value::as_str).map(|text| {
+                                        if text == "No observation was executed" {
+                                            "未执行检测样本".to_string()
+                                        } else {
+                                            text.to_string()
+                                        }
+                                    })
+                                })
+                            })
+                            .unwrap_or_default();
+                        item(code, status, note)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "capability" => payload["scorecard"]["summaries"]
+            .as_array()
+            .map(|summaries| {
+                summaries
+                    .iter()
+                    .map(|summary| {
+                        let code = summary["category"].as_str().unwrap_or_default();
+                        let wrong = count(summary, "wrong") + count(summary, "missing");
+                        let scored = count(summary, "valid_scored");
+                        let planned = count(summary, "planned");
+                        let status = if wrong > 0 {
+                            "fail"
+                        } else if scored == 0 {
+                            "inconclusive"
+                        } else {
+                            "pass"
+                        };
+                        let note = if scored > 0 {
+                            format!("有效判分 {scored}/{planned} 题，未通过 {wrong} 题")
+                        } else {
+                            format!("计划 {planned} 题，未取得有效判分")
+                        };
+                        item(code, status, note)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "agent" => payload["report"]["check_summaries"]
+            .as_array()
+            .map(|checks| {
+                checks
+                    .iter()
+                    .map(|check| {
+                        let code = check["check"].as_str().unwrap_or_default();
+                        let pass = count(check, "pass");
+                        let fail = count(check, "fail");
+                        let unclear = count(check, "inconclusive");
+                        let skipped = count(check, "not_applicable");
+                        let missed = count(check, "not_measured");
+                        let total = pass + fail + unclear + skipped + missed;
+                        let status = if fail > 0 {
+                            "fail"
+                        } else if total == 0 || missed == total {
+                            "inconclusive"
+                        } else if skipped == total {
+                            "limited"
+                        } else if unclear > 0 {
+                            "inconclusive"
+                        } else {
+                            "pass"
+                        };
+                        let note = if fail > 0 {
+                            format!("{total} 个场景中 {fail} 个未通过")
+                        } else if unclear > 0 {
+                            format!("{total} 个场景中 {unclear} 个待确认")
+                        } else if total > 0 {
+                            format!("{total} 个场景全部通过")
+                        } else {
+                            "未取得实测场景".to_string()
+                        };
+                        item(code, status, note)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "baseline" => payload["report"]["comparisons"]
+            .as_array()
+            .map(|comparisons| {
+                comparisons
+                    .iter()
+                    .map(|comparison| {
+                        let code = comparison["scenario"].as_str().unwrap_or_default();
+                        let result = comparison["status"].as_str().unwrap_or_default();
+                        let diffs = comparison["differences"]
+                            .as_array()
+                            .map(|items| items.len())
+                            .unwrap_or(0);
+                        let (status, note) = match result {
+                            "different" => ("fail", format!("与参考服务存在 {diffs} 处结构差异")),
+                            "not_observed" | "inconclusive" => {
+                                ("inconclusive", "未取得可核对的实测响应".to_string())
+                            }
+                            "not_applicable" => ("limited", "该检测项不适用".to_string()),
+                            _ => ("pass", "与参考服务一致".to_string()),
+                        };
+                        item(code, status, note)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "performance" => payload["report"]["rows"]
+            .as_array()
+            .map(|rows| {
+                let mut order: Vec<String> = Vec::new();
+                let mut grouped: Vec<(String, u64, u64, Option<u64>, Option<u64>)> = Vec::new();
+                for row in rows {
+                    let code = row["category"].as_str().unwrap_or_default().to_string();
+                    if !order.iter().any(|item| item == &code) {
+                        order.push(code.clone());
+                        grouped.push((code.clone(), 0, 0, None, None));
+                    }
+                    if let Some((_, terminal, errors, first_p50, done_p50)) =
+                        grouped.iter_mut().find(|(key, ..)| key == &code)
+                    {
+                        let metrics = &row["metrics"];
+                        *terminal += count(metrics, "terminal_count");
+                        *errors += count(metrics, "error_count") + count(metrics, "timeout_count");
+                        if let Some(value) = metrics["first_visible_p50_ms"]
+                            .as_u64()
+                            .filter(|v| first_p50.is_none_or(|current| *v < current))
+                        {
+                            *first_p50 = Some(value);
+                        }
+                        if let Some(value) = metrics["complete_p50_ms"]
+                            .as_u64()
+                            .filter(|v| done_p50.is_none_or(|current| *v < current))
+                        {
+                            *done_p50 = Some(value);
+                        }
+                    }
+                }
+                grouped
+                    .iter()
+                    .map(|(code, terminal, errors, first_p50, done_p50)| {
+                        let status = if *terminal == 0 {
+                            "inconclusive"
+                        } else {
+                            "measured"
+                        };
+                        if *terminal == 0 {
+                            return item(code, status, "未取得有效测量数据".to_string());
+                        }
+                        let mut parts = vec![format!("实测 {terminal} 次")];
+                        if let Some(value) = first_p50 {
+                            parts.push(format!("首字响应中位 {value} 毫秒"));
+                        }
+                        if let Some(value) = done_p50 {
+                            parts.push(format!("完整响应中位 {value} 毫秒"));
+                        }
+                        if *errors > 0 {
+                            parts.push(format!("其中 {errors} 次出错或超时"));
+                        }
+                        item(code, status, parts.join("，"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// dynamic 模式下分析产物不含逐项明细，生成后从模块输入实测数据补填。
+pub fn attach_report_items(
+    input_paths: &[PathBuf],
+    report_paths: &[PathBuf],
+) -> Result<(), String> {
+    let inputs = input_paths
+        .iter()
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_suffix(".input.json"))
+                .map(|module| (module.to_string(), path))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    for report_path in report_paths {
+        let mut report: ModuleReport = serde_json::from_slice(
+            &fs::read(report_path).map_err(|e| format!("读取模块报告失败：{e}"))?,
+        )
+        .map_err(|e| format!("解析模块报告失败：{e}"))?;
+        if let Some(input_path) = inputs.get(&report.module) {
+            let input: ModuleInput = serde_json::from_slice(
+                &fs::read(input_path).map_err(|e| format!("读取模块输入失败：{e}"))?,
+            )
+            .map_err(|e| format!("解析模块输入失败：{e}"))?;
+            report.items = module_report_items(&report.module, &input);
+        }
+        write_json(report_path, &report)?;
+    }
+    Ok(())
 }
 
 /// 带超时执行子进程收集到的输出；status 为 None 表示超时被看门狗杀死。
@@ -683,6 +951,7 @@ fn normalize_legacy_report(value: Value, module: &str) -> Option<ModuleReport> {
                     .collect()
             })
             .unwrap_or_default(),
+        items: Vec::new(),
         analyzer: AnalyzerInfo {
             name: "ohmypi".into(),
             status: "completed_normalized".into(),
@@ -734,6 +1003,9 @@ fn omp_base_url(endpoint: &str) -> String {
         .to_owned()
 }
 
+/// 客户可见的单文件 HTML 报告模板；占位符为 {{name}} 形式。
+const REPORT_TEMPLATE: &str = include_str!("evaluation/report-template.html");
+
 pub fn render_html(
     run_report: &CliRunReport,
     module_report_paths: &[PathBuf],
@@ -745,42 +1017,224 @@ pub fn render_html(
                 .map_err(|e| format!("解析模块报告失败：{e}"))?;
         modules.push(value);
     }
-    let overall = if modules.iter().any(|module| module.verdict == "fail") {
-        "limited"
-    } else if modules.is_empty()
-        || modules
-            .iter()
-            .any(|module| module.verdict == "inconclusive")
-    {
-        "inconclusive"
-    } else {
-        "pass"
-    };
-    let generator = if modules
+    let dynamic = modules
         .iter()
-        .all(|module| module.analyzer.name == "ohmypi")
-    {
-        "本报告由 CLI 检测证据和 OhMyPi 模块分析生成。"
+        .all(|module| module.analyzer.name == "ohmypi");
+    let generator = if dynamic {
+        "检测结论 + 语义分析"
     } else {
-        "本报告由 CLI 检测结论直接填充模板生成，未经 AI 语义分析。"
+        "检测结论汇总"
     };
-    let module_rows = modules.iter().map(|module| {
-        let findings = module.findings.iter().map(|finding| format!(
-            "<li><strong>{}</strong>：{}；证据：{}</li>",
-            escape(&finding.item_id), escape(&finding.rationale), escape(&finding.evidence_refs.join(", "))
-        )).collect::<String>();
-        format!(
-            "<section><h2>{}</h2><p class=\"verdict\">结论：{} · 置信度：{}</p><p>{}</p><ul>{}</ul><p class=\"muted\">限制：{}</p></section>",
-            escape(&module.module), escape(&module.verdict), escape(&module.confidence), escape(&module.summary), findings, escape(&module.limitations.join("；"))
+    let conclusion = &run_report.customer_conclusion;
+    let verdict_tone = serde_json::to_value(&conclusion.kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .map(|kind| match kind.as_str() {
+            "normal_use" => "tone-good",
+            "limited_use" => "tone-warn",
+            "cannot_use" => "tone-bad",
+            _ => "tone-muted",
+        })
+        .unwrap_or("tone-muted");
+    let verified = conclusion.scope.iter().filter(|item| item.verified).count();
+    let scope_summary = format!(
+        "本次共检测 {} 个项目，{} 个完成实测；运行状态：{}。",
+        conclusion.scope.len(),
+        verified,
+        lifecycle_label(&run_report.record.lifecycle)
+    );
+    let scope_rows = conclusion
+        .scope
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let state = serde_json::to_value(&item.state)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            format!(
+                "<tr><td class=\"num\">{:02}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                index + 1,
+                escape(module_display_name(&item.module_id)),
+                chip(module_state_label(&state), &state),
+                escape(&item.description),
+            )
+        })
+        .collect::<String>();
+    let key_findings = if conclusion.findings.is_empty() {
+        "<p class=\"empty-note\">本次检测未产生需要特别关注的关键发现。</p>".to_string()
+    } else {
+        conclusion
+            .findings
+            .iter()
+            .map(|finding| {
+                let impact = serde_json::to_value(&finding.impact)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                let class = match impact.as_str() {
+                    "blocker" => "blocker",
+                    "limitation" => "limitation",
+                    _ => "",
+                };
+                format!(
+                    "<div class=\"finding {class}\"><h3>{}</h3><p>{}</p></div>",
+                    escape(&finding.title),
+                    escape(&format!("{} {}", finding.scope, finding.summary)),
+                )
+            })
+            .collect::<String>()
+    };
+    let module_sections = modules
+        .iter()
+        .map(|module| {
+            let findings = module
+                .findings
+                .iter()
+                .map(|finding| {
+                    format!(
+                        "<li><span class=\"f-id\">{}</span>：{}</li>",
+                        escape(&finding.item_id),
+                        escape(&finding.rationale),
+                    )
+                })
+                .collect::<String>();
+            let source = if module.analyzer.name == "ohmypi" {
+                "语义分析"
+            } else {
+                "实测结论"
+            };
+            let limits = if module.limitations.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<p class=\"limits\">限制：{}</p>",
+                    escape(&module.limitations.join("；"))
+                )
+            };
+            let items_table = if module.items.is_empty() {
+                String::new()
+            } else {
+                let rows = module
+                    .items
+                    .iter()
+                    .map(|entry| {
+                        format!(
+                            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            escape(&entry.name),
+                            chip(item_status_label(&entry.status), &entry.status),
+                            escape(&entry.note),
+                        )
+                    })
+                    .collect::<String>();
+                format!(
+                    "<table class=\"items\"><thead><tr><th>检测项</th><th>结果</th><th>说明</th></tr></thead><tbody>{rows}</tbody></table>"
+                )
+            };
+            format!(
+                "<div class=\"module\"><div class=\"module-head\"><h3>{}</h3>{}<span class=\"src\">{}</span><span class=\"conf\">置信度：{}</span></div><p>{}</p><ul>{}</ul>{}{}</div>",
+                escape(module_display_name(&module.module)),
+                chip(verdict_label(&module.verdict), &module.verdict),
+                source,
+                escape(confidence_label(&module.confidence)),
+                escape(&module.summary),
+                findings,
+                items_table,
+                limits,
+            )
+        })
+        .collect::<String>();
+    let evidence_gaps = if conclusion.evidence_gaps.is_empty() {
+        "<p class=\"empty-note\">无证据缺口。</p>".to_string()
+    } else {
+        conclusion
+            .evidence_gaps
+            .iter()
+            .map(|gap| format!("<p class=\"empty-note\">· {}</p>", escape(gap)))
+            .collect::<String>()
+    };
+    let limitations = run_report
+        .limitations
+        .iter()
+        .map(|item| format!("<li>{}</li>", escape(item)))
+        .collect::<String>();
+    let generator_note = if dynamic {
+        "本报告由检测结果与模型语义分析共同生成。"
+    } else {
+        "本报告由检测结果直接汇总生成，不含语义分析内容。"
+    };
+    Ok(REPORT_TEMPLATE
+        .replace("{{model}}", &escape(&run_report.configuration.model))
+        .replace(
+            "{{endpoint}}",
+            &escape(&run_report.configuration.redacted_endpoint),
         )
-    }).collect::<String>();
-    Ok(format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>AgentCheck 检测报告</title><style>body{{margin:0;background:#f4f6f8;color:#17212b;font:15px/1.65 -apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",sans-serif}}main{{max-width:1000px;margin:0 auto;padding:36px 20px}}section,header{{background:#fff;border:1px solid #d9e0e7;border-radius:8px;padding:20px;margin:16px 0}}h1{{margin:0 0 6px}}h2{{margin:0 0 8px}}.muted{{color:#5b6875}}.verdict{{font-weight:700;color:#1769aa}}</style></head><body><main><header><h1>AgentCheck 模型兼容性检测报告</h1><p>模型：{}</p><p>整体结论：{}</p><p class=\"muted\">{}</p></header>{}</main></body></html>",
-        escape(&run_report.configuration.model),
-        overall,
-        generator,
-        module_rows
-    ))
+        .replace("{{run_id}}", &escape(&run_report.record.id))
+        .replace("{{finished_at}}", &escape(&run_report.record.updated_at))
+        .replace(
+            "{{lifecycle}}",
+            lifecycle_label(&run_report.record.lifecycle),
+        )
+        .replace("{{generator}}", generator)
+        .replace("{{verdict_text}}", &escape(&conclusion.text))
+        .replace("{{verdict_tone}}", verdict_tone)
+        .replace("{{scope_summary}}", &escape(&scope_summary))
+        .replace("{{scope_rows}}", &scope_rows)
+        .replace("{{key_findings}}", &key_findings)
+        .replace("{{module_sections}}", &module_sections)
+        .replace("{{evidence_gaps}}", &evidence_gaps)
+        .replace("{{limitations}}", &limitations)
+        .replace("{{generator_note}}", generator_note))
+}
+
+fn chip(label: &str, state: &str) -> String {
+    let class = match state {
+        "pass" => "pass",
+        "fail" => "fail",
+        "limited" | "unsupported" | "not_applicable" => "limited",
+        _ => "muted",
+    };
+    format!("<span class=\"chip {class}\">{}</span>", escape(label))
+}
+
+/// 逐项检测结果的 chips 文案；`measured` 用于信息型测量（性能项不设通过/未通过）。
+fn item_status_label(status: &str) -> &'static str {
+    match status {
+        "pass" => "通过",
+        "fail" => "未通过",
+        "limited" => "受限",
+        "measured" => "已测",
+        _ => "待确认",
+    }
+}
+
+/// 模块报告 verdict 的客户可见中文标签。
+fn verdict_label(verdict: &str) -> &'static str {
+    match verdict {
+        "pass" => "通过",
+        "fail" => "未通过",
+        "limited" => "受限",
+        _ => "待确认",
+    }
+}
+
+fn confidence_label(confidence: &str) -> &'static str {
+    match confidence {
+        "high" => "高",
+        "medium" => "中",
+        "low" => "低",
+        _ => "无",
+    }
+}
+
+fn lifecycle_label(state: &crate::records::LifecycleState) -> &'static str {
+    match state {
+        crate::records::LifecycleState::Completed => "已完成",
+        crate::records::LifecycleState::Stopped => "已停止",
+        crate::records::LifecycleState::Stopping => "停止中",
+        crate::records::LifecycleState::Running => "运行中",
+        crate::records::LifecycleState::Planned => "待执行",
+    }
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
@@ -822,6 +1276,7 @@ fn inconclusive_report(module: &str, reason: &str) -> ModuleReport {
         findings: Vec::new(),
         evidence_refs: Vec::new(),
         limitations: vec![reason.into()],
+        items: Vec::new(),
         analyzer: AnalyzerInfo {
             name: "ohmypi".into(),
             status: "unavailable_or_invalid_output".into(),
@@ -981,6 +1436,7 @@ mod tests {
             findings: Vec::new(),
             evidence_refs: Vec::new(),
             limitations: Vec::new(),
+            items: Vec::new(),
             analyzer: AnalyzerInfo {
                 name: "ohmypi".into(),
                 status: "completed".into(),
@@ -1041,7 +1497,7 @@ mod tests {
             api_key: None,
             selected_modules: Some(vec!["capability".into()]),
             stop_after: None,
-            run_id: "run-custom-mode".into(),
+            run_id: "run-20260921-001".into(),
             started_at: "2026-09-21T00:00:00Z".into(),
         };
         crate::cli::run_with_executor(request, &mut crate::cli::UnavailableExecutor).unwrap()
@@ -1069,14 +1525,20 @@ mod tests {
         assert_eq!(module_report.verdict, "inconclusive");
         assert_eq!(module_report.confidence, "none");
         assert_eq!(module_report.analyzer.name, "agentcheck-template");
-        assert!(
-            module_report
-                .limitations
-                .iter()
-                .any(|item| item.contains("未进行 AI 语义分析"))
-        );
+        assert_eq!(module_report.analyzer.status, "deterministic_fill");
         let html = render_html(&report, &paths).unwrap();
-        assert!(html.contains("未经 AI 语义分析"));
+        assert!(html.contains("不含语义分析"));
+        for jargon in [
+            "inconclusive",
+            "unverified",
+            "OhMyPi",
+            "payload",
+            "cli-",
+            "custom",
+            "dynamic",
+        ] {
+            assert!(!html.contains(jargon), "报告不应出现黑话 {jargon}");
+        }
         let _ = fs::remove_dir_all(&root);
     }
 }

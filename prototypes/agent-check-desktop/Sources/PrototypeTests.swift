@@ -17,6 +17,12 @@ func runModelTests() async throws {
   try expect(launch?.htmlPath == "/tmp/reports/report.html", "保留 CLI HTML 输出位置")
   try expect(launch?.cliPath == "/tmp/agentcheck", "桌面端继续使用原始单文件 CLI")
   try expect(launch?.reportMode == "dynamic", "桌面端透传报告生成模式")
+  let bareLaunch = LaunchConfiguration.from(arguments: [
+    "AgentCheck", "--agentcheck-endpoint", "https://example.test/v1/chat/completions",
+    "--agentcheck-model", "fixture", "--agentcheck-cli-path", "/tmp/agentcheck",
+  ])
+  try expect(bareLaunch?.reportDirectory == nil, "未指定报告目录时走应用数据目录默认位置")
+  try expect(Workbench.reportDirectoryName().count == 15, "报告目录名按时间生成")
   let progressData = Data(#"{"phase":"module_progress","module_id":"capability","index":2,"total":6,"state":null,"message":"已完成能力样本 37 / 240","detail_index":37,"detail_total":240,"detail_id":"C02-3-05"}"#.utf8)
   let progressEvent = try JSONDecoder().decode(ProgressEvent.self, from: progressData)
   try expect(

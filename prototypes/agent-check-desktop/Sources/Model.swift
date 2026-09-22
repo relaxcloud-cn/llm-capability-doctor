@@ -219,6 +219,13 @@ final class Workbench: ObservableObject {
     }
   }
 
+  /// 报告目录名按启动时间生成，多次检测互不覆盖。
+  static func reportDirectoryName(_ date: Date = Date()) -> String {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "yyyyMMdd-HHmmss"
+    return formatter.string(from: date)
+  }
+
   static func backendModule(_ module: CheckModule) -> String? {
     switch module {
     case .info: return nil
@@ -564,9 +571,16 @@ final class Workbench: ObservableObject {
       "--timeout-seconds", String(launchConfiguration.timeoutSeconds),
     ]
     let backendModules = ["ingress"] + modules.compactMap(Self.backendModule)
-    if let reportDirectory = launchConfiguration.reportDirectory {
-      arguments += ["--report-dir", reportDirectory]
-    }
+    // 未显式指定时把报告写到应用数据目录（不能放上面的临时目录，跑完会被清理）。
+    let fallbackRoot = storageURL?.deletingLastPathComponent()
+      ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("AgentCheckPrototype")
+    let reportDirectory = launchConfiguration.reportDirectory
+      ?? fallbackRoot
+        .appendingPathComponent("reports")
+        .appendingPathComponent(Self.reportDirectoryName())
+        .path
+    arguments += ["--report-dir", reportDirectory]
     if let htmlPath = launchConfiguration.htmlPath {
       arguments += ["--html", htmlPath]
     }

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; font-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>AgentCheck 检测报告 · {{model}}</title>
+<style>
+:root {
+  color-scheme: light;
+  --paper: #faf9f6;
+  --card: #ffffff;
+  --ink: #20242a;
+  --ink-2: #4a5160;
+  --faint: #8a919e;
+  --line: #e3e0d8;
+  --line-strong: #c9c4b8;
+  --seal: #9e2b25;
+  --pass: #1d7a4f;
+  --fail: #b3322a;
+  --limited: #9a6a00;
+  --muted: #5c6672;
+  --wash-pass: #eef6f1;
+  --wash-fail: #faeceb;
+  --wash-limited: #faf3e3;
+  --wash-muted: #f1f2f4;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 14.5px;
+  line-height: 1.7;
+  font-weight: 400;
+}
+main { max-width: 880px; margin: 0 auto; padding: 48px 28px 72px; }
+
+/* ---------- 页眉 ---------- */
+.report-head { padding-bottom: 28px; border-bottom: 2px solid var(--ink); }
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand-mark { font-size: 13px; font-weight: 700; letter-spacing: 0.14em; color: var(--seal); text-transform: uppercase; }
+.brand-sub { font-size: 12px; color: var(--faint); letter-spacing: 0.06em; }
+.report-head h1 {
+  margin: 18px 0 4px;
+  font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
+  font-size: 30px; font-weight: 700; letter-spacing: 0.02em;
+}
+.meta { margin-top: 14px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 6px 24px; }
+.meta div { font-size: 12.5px; color: var(--ink-2); }
+.meta b { color: var(--faint); font-weight: 500; margin-right: 6px; }
+
+/* ---------- 结论印章 ---------- */
+.verdict-band {
+  margin: 30px 0 8px;
+  display: grid; grid-template-columns: auto 1fr; gap: 26px; align-items: center;
+}
+.seal {
+  display: inline-block; padding: 14px 22px;
+  border: 2.5px solid var(--seal); border-radius: 4px;
+  box-shadow: inset 0 0 0 1px var(--card), inset 0 0 0 2.5px var(--seal);
+  color: var(--seal);
+  font-family: "Songti SC", "Noto Serif SC", "STSong", serif;
+  font-size: 20px; font-weight: 700; letter-spacing: 0.12em;
+  white-space: nowrap;
+}
+.seal.tone-good { color: var(--pass); border-color: var(--pass); box-shadow: inset 0 0 0 1px var(--card), inset 0 0 0 2.5px var(--pass); }
+.seal.tone-warn { color: var(--limited); border-color: var(--limited); box-shadow: inset 0 0 0 1px var(--card), inset 0 0 0 2.5px var(--limited); }
+.seal.tone-bad  { color: var(--fail);  border-color: var(--fail);  box-shadow: inset 0 0 0 1px var(--card), inset 0 0 0 2.5px var(--fail); }
+.seal.tone-muted{ color: var(--muted); border-color: var(--muted); box-shadow: inset 0 0 0 1px var(--card), inset 0 0 0 2.5px var(--muted); }
+.verdict-note p { margin: 0 0 4px; }
+.verdict-note .scope-line { color: var(--ink-2); font-size: 13px; }
+
+/* ---------- 分区 ---------- */
+section { margin-top: 34px; }
+.sec-title {
+  margin: 0 0 14px; font-size: 15px; font-weight: 700; letter-spacing: 0.08em;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line-strong);
+  display: flex; align-items: baseline; gap: 10px;
+}
+.sec-title .en { font-size: 11px; font-weight: 500; letter-spacing: 0.12em; color: var(--faint); text-transform: uppercase; }
+
+/* ---------- 状态徽标 ---------- */
+.chip {
+  display: inline-block; padding: 1px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.04em; white-space: nowrap;
+}
+.chip.pass { color: var(--pass); background: var(--wash-pass); }
+.chip.fail { color: var(--fail); background: var(--wash-fail); }
+.chip.limited { color: var(--limited); background: var(--wash-limited); }
+.chip.muted, .chip.other { color: var(--muted); background: var(--wash-muted); }
+
+/* ---------- 检测范围表 ---------- */
+table.scope { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--line); }
+.scope th, .scope td { padding: 9px 14px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13.5px; vertical-align: top; }
+.scope th { font-size: 12px; color: var(--faint); font-weight: 500; letter-spacing: 0.06em; background: #f6f5f1; }
+.scope tr:last-child td { border-bottom: 0; }
+.scope .num { color: var(--faint); font-variant-numeric: tabular-nums; width: 34px; }
+
+/* ---------- 关键发现 ---------- */
+.finding { background: var(--card); border: 1px solid var(--line); border-left: 3px solid var(--line-strong); padding: 12px 16px; margin: 0 0 10px; }
+.finding.blocker { border-left-color: var(--fail); }
+.finding.limitation { border-left-color: var(--limited); }
+.finding h3 { margin: 0 0 4px; font-size: 14px; font-weight: 600; }
+.finding p { margin: 0; color: var(--ink-2); font-size: 13.5px; }
+.empty-note { color: var(--faint); font-size: 13.5px; margin: 0; }
+
+/* ---------- 模块明细 ---------- */
+.module { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px 20px; margin: 0 0 14px; page-break-inside: avoid; }
+.module-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.module-head h3 { margin: 0; font-size: 16px; font-weight: 700; }
+.module-head .src { font-size: 11px; color: var(--faint); letter-spacing: 0.05em; }
+.module-head .conf { margin-left: auto; font-size: 12px; color: var(--faint); }
+.module > p { margin: 8px 0 0; color: var(--ink-2); }
+.module ul { margin: 10px 0 0; padding: 0; list-style: none; }
+.module li { padding: 7px 0; border-top: 1px dashed var(--line); font-size: 13.5px; }
+.module li .f-id { font-weight: 600; }
+.module .limits { margin: 10px 0 0; font-size: 12.5px; color: var(--faint); }
+table.items { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 13px; }
+.items th, .items td { padding: 7px 10px; text-align: left; border-top: 1px solid var(--line); vertical-align: top; }
+.items th { color: var(--faint); font-weight: 500; font-size: 12px; border-top: none; padding-top: 2px; }
+.items td:first-child { width: 34%; }
+.items td:nth-child(2) { width: 76px; white-space: nowrap; }
+.items td:last-child { color: var(--ink-2); }
+
+/* ---------- 尾部 ---------- */
+.foot { margin-top: 44px; padding-top: 16px; border-top: 1px solid var(--line-strong); font-size: 12px; color: var(--faint); }
+.foot p { margin: 2px 0; }
+.limits-list { margin: 0; padding-left: 18px; color: var(--ink-2); font-size: 13.5px; }
+.limits-list li { margin: 3px 0; }
+
+@media (max-width: 640px) {
+  .verdict-band { grid-template-columns: 1fr; gap: 12px; }
+  .seal { justify-self: start; font-size: 17px; }
+}
+@media print {
+  body { background: #fff; }
+  main { max-width: none; padding: 0 8px; }
+  section { page-break-inside: avoid; }
+  .module, .finding { box-shadow: none; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="report-head">
+    <div class="brand"><span class="brand-mark">AgentCheck</span><span class="brand-sub">模型服务能力检测</span></div>
+    <h1>模型服务能力检测报告</h1>
+    <div class="meta">
+      <div><b>模型</b>{{model}}</div>
+      <div><b>服务地址</b>{{endpoint}}</div>
+      <div><b>检测编号</b>{{run_id}}</div>
+      <div><b>完成时间</b>{{finished_at}}</div>
+      <div><b>运行状态</b>{{lifecycle}}</div>
+      <div><b>生成方式</b>{{generator}}</div>
+    </div>
+  </header>
+
+  <div class="verdict-band">
+    <span class="seal {{verdict_tone}}">{{verdict_text}}</span>
+    <div class="verdict-note">
+      <p class="scope-line">{{scope_summary}}</p>
+      <p class="scope-line">结论仅覆盖已实测项目；未通过项见下方「关键发现」与各模块明细。</p>
+    </div>
+  </div>
+
+  <section>
+    <h2 class="sec-title">检测范围 <span class="en">Scope</span></h2>
+    <table class="scope">
+      <thead><tr><th class="num"></th><th>检测项目</th><th>状态</th><th>说明</th></tr></thead>
+      <tbody>{{scope_rows}}</tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2 class="sec-title">关键发现 <span class="en">Findings</span></h2>
+    {{key_findings}}
+  </section>
+
+  <section>
+    <h2 class="sec-title">模块明细 <span class="en">Details</span></h2>
+    {{module_sections}}
+  </section>
+
+  <section>
+    <h2 class="sec-title">未覆盖范围与限制说明 <span class="en">Limitations</span></h2>
+    {{evidence_gaps}}
+    <ul class="limits-list">{{limitations}}</ul>
+  </section>
+
+  <footer class="foot">
+    <p>{{generator_note}}</p>
+    <p>各检测项目的原始记录随报告目录一并交付，可逐项核对。</p>
+  </footer>
+</main>
+</body>
+</html>
