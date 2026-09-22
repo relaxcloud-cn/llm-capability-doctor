@@ -2184,20 +2184,21 @@ impl LiveExecutor {
                 ModuleResultState::Inconclusive
             },
             reason: Some(format!(
-                "已执行 {} 个基线场景；结构事实不直接推导整体可用性",
+                "已执行 {} 个基线场景（{} 组请求）；结构事实不直接推导整体可用性",
+                total_scenarios,
                 evidence.len()
             )),
             evidence_kind: "real_baseline_report".into(),
             evidence_summary: format!(
                 "基线场景 {} 个，报告 {}",
-                evidence.len(),
+                total_scenarios,
                 if report.is_some() {
                     "已生成"
                 } else {
                     "生成失败"
                 }
             ),
-            evidence_payload: json!({"version": crate::baseline::BASELINE_VERSION, "planned_scenarios": evidence.len(), "executed_scenarios": evidence.len(), "report": report, "evidence": evidence}),
+            evidence_payload: json!({"version": crate::baseline::BASELINE_VERSION, "planned_scenarios": total_scenarios, "executed_scenarios": total_scenarios, "report": report, "evidence": evidence}),
         }
     }
 
