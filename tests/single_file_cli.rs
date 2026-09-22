@@ -334,3 +334,209 @@ fn baseline_probes_reach_real_scenarios() {
     assert!(body_dump.contains("\"include_usage\":true"));
     assert!(body_dump.contains("\"messages\":\"not-an-array\""));
 }
+
+/// 起一个按请求体分支出应答的 mock；respond 返回 (状态码, Content-Type, 响应体)。
+fn spawn_mock(
+    respond: impl Fn(&serde_json::Value) -> (u16, &'static str, String) + Send + 'static,
+) -> (String, std::thread::JoinHandle<()>, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_server = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !stop_server.load(Ordering::Relaxed) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut data = Vec::new();
+            let mut buffer = [0; 8192];
+            while let Ok(length) = stream.read(&mut buffer) {
+                if length == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buffer[..length]);
+                if let Some(header_end) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
+                    let body_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= header_end + 4 + body_length {
+                        break;
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&data);
+            let body_start = text
+                .find("\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap_or(text.len());
+            let request: serde_json::Value =
+                serde_json::from_str(&text[body_start..]).unwrap_or_default();
+            let (status, content_type, body) = respond(&request);
+            let reason = match status {
+                200 => "OK",
+                400 => "Bad Request",
+                _ => "Error",
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    (address, server, stop)
+}
+
+/// 红路径：故意偏离规范的服务必须在报告里被准确标出差异，
+/// 且不受影响的其他场景仍应判为 same_structure。
+#[test]
+fn baseline_flags_deviating_service() {
+    let tool_calls_message = r#"{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\":\"北京\"}"}}]}"#;
+    let (address, server, stop) = spawn_mock(move |request| {
+        let streaming = request["stream"].as_bool() == Some(true);
+        let with_tools = request["tools"].is_array();
+        if request["messages"].is_string() {
+            // 错误对象缺 error.type
+            return (
+                400,
+                "application/json",
+                r#"{"error":{"message":"messages must be an array","param":"messages"}}"#.into(),
+            );
+        }
+        if streaming {
+            let delta = if with_tools {
+                r#"{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{}"}}]}"#
+            } else {
+                r#"{"content":"你好"}"#
+            };
+            // 故意不发 usage 分块
+            let body = format!(
+                "data: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{delta},\"finish_reason\":null}}]}}\n\ndata: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+            );
+            return (200, "text/event-stream", body);
+        }
+        if with_tools {
+            return (
+                200,
+                "application/json",
+                format!(
+                    r#"{{"id":"t1","object":"chat.completion","created":1,"model":"fixture","choices":[{{"index":0,"message":{tool_calls_message},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}}}"#
+                ),
+            );
+        }
+        // 缺 id；usage.total_tokens 是字符串而非数字
+        (
+            200,
+            "application/json",
+            r#"{"object":"chat.completion","created":1,"model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":"11"}}"#
+                .into(),
+        )
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(binary())
+        .args([
+            "--url",
+            &format!("http://{address}/v1/chat/completions"),
+            "--model",
+            "fixture",
+            "--no-gui",
+            "--modules",
+            "baseline",
+            "--timeout-seconds",
+            "5",
+        ])
+        .env("MODEL_API_KEY", "fixture-secret-not-for-logs")
+        .env("OMP_BIN", directory.path().join("missing-omp"))
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.path().join("agentcheck-report/run.json")).unwrap(),
+    )
+    .unwrap();
+    let baseline = run["record"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["payload"]["module"] == "baseline")
+        .expect("baseline evidence");
+    let comparisons = baseline["payload"]["payload"]["report"]["comparisons"]
+        .as_array()
+        .unwrap();
+    let status_of = |id: &str| {
+        comparisons
+            .iter()
+            .find(|c| c["scenario"] == id)
+            .unwrap_or_else(|| panic!("缺少 {id} 对比结果"))["status"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let kinds_of = |id: &str| {
+        comparisons.iter().find(|c| c["scenario"] == id).unwrap()["differences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| {
+                format!(
+                    "{}:{}",
+                    d["kind"].as_str().unwrap(),
+                    d["path"].as_str().unwrap()
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // 偏离项被准确标出
+    assert_eq!(status_of("BC01"), "different");
+    assert!(
+        kinds_of("BC01")
+            .iter()
+            .any(|k| k == "missing_required_field:id"),
+        "BC01 应报缺 id：{:?}",
+        kinds_of("BC01")
+    );
+    assert_eq!(status_of("BC04"), "different");
+    assert!(
+        kinds_of("BC04")
+            .iter()
+            .any(|k| k == "type_mismatch:usage.total_tokens"),
+        "BC04 应报 total_tokens 类型不符：{:?}",
+        kinds_of("BC04")
+    );
+    assert_eq!(status_of("BC05"), "different");
+    assert_eq!(status_of("BC14"), "different");
+    assert!(
+        kinds_of("BC14")
+            .iter()
+            .any(|k| k == "missing_required_field:error.type"),
+        "BC14 应报缺 error.type：{:?}",
+        kinds_of("BC14")
+    );
+    // 没有 usage 分块应诚实判 inconclusive 而非凭空判差异
+    assert_eq!(status_of("BC13"), "inconclusive");
+
+    // 不受缺陷影响的场景保持绿
+    for id in [
+        "BC02", "BC03", "BC06", "BC07", "BC08", "BC09", "BC10", "BC11", "BC12",
+    ] {
+        assert_eq!(status_of(id), "same_structure", "{id} 不应误报差异");
+    }
+}
