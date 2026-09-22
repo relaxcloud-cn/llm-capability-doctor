@@ -11,10 +11,12 @@ func runModelTests() async throws {
     "AgentCheck", "--agentcheck-endpoint", "https://example.test/v1/chat/completions",
     "--agentcheck-model", "fixture", "--agentcheck-cli-path", "/tmp/agentcheck",
     "--agentcheck-report-dir", "/tmp/reports", "--agentcheck-html", "/tmp/reports/report.html",
+    "--agentcheck-mode", "dynamic",
   ])
   try expect(launch?.reportDirectory == "/tmp/reports", "保留 CLI 报告目录")
   try expect(launch?.htmlPath == "/tmp/reports/report.html", "保留 CLI HTML 输出位置")
   try expect(launch?.cliPath == "/tmp/agentcheck", "桌面端继续使用原始单文件 CLI")
+  try expect(launch?.reportMode == "dynamic", "桌面端透传报告生成模式")
   let progressData = Data(#"{"phase":"module_progress","module_id":"capability","index":2,"total":6,"state":null,"message":"已完成能力样本 37 / 240","detail_index":37,"detail_total":240,"detail_id":"C02-3-05"}"#.utf8)
   let progressEvent = try JSONDecoder().decode(ProgressEvent.self, from: progressData)
   try expect(

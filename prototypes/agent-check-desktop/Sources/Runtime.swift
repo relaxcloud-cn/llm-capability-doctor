@@ -9,6 +9,7 @@ struct LaunchConfiguration {
   var outputPath: String?
   var reportDirectory: String?
   var htmlPath: String?
+  var reportMode: String?
   var cliPath: String
 
   static func from(arguments: [String]) -> LaunchConfiguration? {
@@ -31,6 +32,7 @@ struct LaunchConfiguration {
       outputPath: value("--agentcheck-output"),
       reportDirectory: value("--agentcheck-report-dir"),
       htmlPath: value("--agentcheck-html"),
+      reportMode: value("--agentcheck-mode"),
       cliPath: cliPath
     )
   }

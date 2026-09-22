@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cli::CliRunReport;
+use crate::cli::{CliRunReport, ReportMode};
 
 pub const GUI_VERSION: &str = "gui/v1";
 
@@ -53,6 +53,8 @@ pub struct NativeGuiRequest {
     pub api_key: String,
     pub cli_path: PathBuf,
     pub preflight_token: String,
+    /// 报告生成模式，透传给桌面端，再由桌面端以 --mode 传给 CLI。
+    pub mode: ReportMode,
 }
 
 pub trait NativeGuiLauncher {
@@ -106,6 +108,7 @@ impl NativeGuiLauncher for SystemNativeGuiLauncher {
         if let Some(stop_after) = &request.stop_after {
             command.args(["--agentcheck-stop-after", stop_after]);
         }
+        command.args(["--agentcheck-mode", request.mode.as_str()]);
         let mut child = command
             .spawn()
             .map_err(|error| format!("启动 AgentCheck 桌面端失败：{error}"))?;

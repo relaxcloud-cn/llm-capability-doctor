@@ -70,6 +70,16 @@ pub enum ReportMode {
     Dynamic,
 }
 
+impl ReportMode {
+    /// CLI/GUI 参数透传用的字符串值，与 ValueEnum 的取值一致。
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Custom => "custom",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CliConfiguration {
     pub redacted_endpoint: String,

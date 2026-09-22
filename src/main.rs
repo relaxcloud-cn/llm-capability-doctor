@@ -1,10 +1,10 @@
 use clap::Parser;
 use llm_capability_doctor::cli::{
-    CliRunRequest, JsonlProgressSink, LiveExecutor, OutputFormat, generated_run_id,
+    CliRunRequest, JsonlProgressSink, LiveExecutor, OutputFormat, ReportMode, generated_run_id,
     generated_timestamp, render_report, run_with_executor_reporting, write_report,
 };
 use llm_capability_doctor::evaluation::{
-    AnalyzerConfig, analyze_modules, render_html, write_bundled_module_inputs,
+    AnalyzerConfig, analyze_modules, build_module_reports, render_html, write_bundled_module_inputs,
 };
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
@@ -77,13 +77,18 @@ struct Cli {
     #[arg(long, hide = true, value_name = "PATH")]
     progress_file: Option<String>,
 
-    /// 保存模块检测证据、OhMyPi 模块报告和最终 HTML 的目录。
+    /// 保存模块检测证据、模块报告和最终 HTML 的目录。
     #[arg(long, value_name = "DIR")]
     report_dir: Option<String>,
 
-    /// 最终 HTML 报告路径；提供后自动执行 OhMyPi 模块分析。
+    /// 最终 HTML 报告路径。
     #[arg(long, value_name = "PATH")]
     html: Option<String>,
+
+    /// 报告生成模式：custom 只把检测结论填入模板（默认，不调用 AI/OhMyPi）；
+    /// dynamic 追加 OhMyPi+模型语义分析后填入同一模板。
+    #[arg(long, value_enum, default_value_t = ReportMode::Custom)]
+    mode: ReportMode,
 }
 
 fn main() {
@@ -162,6 +167,7 @@ fn main() {
                 api_key: api_key.clone(),
                 cli_path,
                 preflight_token: preflight_token(&endpoint, &model, &api_key),
+                mode: cli.mode,
             };
             match launcher.launch(&request) {
                 Ok(_path) => {
@@ -262,17 +268,26 @@ fn main() {
                 eprintln!("写入模块检测证据失败：{error}");
                 std::process::exit(1);
             });
-        let module_report_paths = analyze_modules(
-            &input_paths,
-            &analysis_dir,
-            &AnalyzerConfig {
-                endpoint: endpoint.clone(),
-                model: model.clone(),
-                api_key: api_key.clone(),
-            },
-        )
+        let module_report_paths = match cli.mode {
+            ReportMode::Custom => {
+                eprintln!("[报告] 模式：custom（模板填充检测结论，不调用 AI/OhMyPi）");
+                build_module_reports(&report, &input_paths, &analysis_dir)
+            }
+            ReportMode::Dynamic => {
+                eprintln!("[报告] 模式：dynamic（OhMyPi+模型语义分析）");
+                analyze_modules(
+                    &input_paths,
+                    &analysis_dir,
+                    &AnalyzerConfig {
+                        endpoint: endpoint.clone(),
+                        model: model.clone(),
+                        api_key: api_key.clone(),
+                    },
+                )
+            }
+        }
         .unwrap_or_else(|error| {
-            eprintln!("OhMyPi 模块分析失败：{error}");
+            eprintln!("生成模块报告失败：{error}");
             std::process::exit(1);
         });
         let html = render_html(&report, &module_report_paths).unwrap_or_else(|error| {

@@ -576,6 +576,9 @@ final class Workbench: ObservableObject {
     if let stopAfter = launchConfiguration.stopAfter {
       if backendModules.contains(stopAfter) { arguments += ["--stop-after", stopAfter] }
     }
+    if let reportMode = launchConfiguration.reportMode {
+      arguments += ["--mode", reportMode]
+    }
     process.arguments = arguments
     var environment = ProcessInfo.processInfo.environment
     if let sessionKey { environment["MODEL_API_KEY"] = sessionKey }

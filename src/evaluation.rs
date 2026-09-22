@@ -1,13 +1,16 @@
-use crate::cli::CliRunReport;
+use crate::cli::{CliRunReport, module_display_name, module_item_stats, module_state_label};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const EVALUATION_VERSION: &str = "evaluation-pipeline/v1";
+
+/// OhMyPi 单次模块分析的看门狗超时；子进程超过该时长直接杀死并按 inconclusive 处理。
+const OMP_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Clone)]
 pub struct AnalyzerConfig {
@@ -170,7 +173,9 @@ pub fn analyze_modules(
             "你是 AgentCheck 评估器。附件是 {path} 对应的完整模块输入 JSON，包含判定规则和完整检测证据。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。严格依据规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、analyzer；verdict 只能是 pass、fail、limited、inconclusive；任何证据不足必须是 inconclusive；每个 finding 必须引用 evidence_id。不要输出 Markdown，不要输出 JSON 之外的内容。",
             path = input_path.display(),
         );
-        let result = Command::new(omp.as_ref().unwrap())
+        eprintln!("[报告] OhMyPi 分析模块 {module}…");
+        let mut command = Command::new(omp.as_ref().unwrap());
+        command
             .args([
                 "-p",
                 "--mode",
@@ -181,15 +186,27 @@ pub fn analyze_modules(
             ])
             .args(["--model", model_selector.as_str()])
             .args(["--no-extensions", "--no-skills", "--no-rules", "--no-lsp"])
+            .arg("--max-time")
+            .arg(
+                OMP_ANALYSIS_TIMEOUT
+                    .as_secs()
+                    .saturating_sub(30)
+                    .to_string(),
+            )
             .arg(format!("@{}", input_path.display()))
             .arg(prompt)
             .env("PI_CODING_AGENT_DIR", &omp_config.agent_dir)
-            .env("AGENTCHECK_MODEL_API_KEY", &analyzer_config.api_key)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+            .env("AGENTCHECK_MODEL_API_KEY", &analyzer_config.api_key);
+        let result = run_command_with_timeout(&mut command, OMP_ANALYSIS_TIMEOUT);
         let report = match result {
-            Ok(result) if result.status.success() => {
+            Ok(result) if result.status.is_none() => inconclusive_report(
+                module,
+                &format!(
+                    "OhMyPi 分析超时（{} 秒），已终止该进程",
+                    OMP_ANALYSIS_TIMEOUT.as_secs()
+                ),
+            ),
+            Ok(result) if result.status.is_some_and(|status| status.success()) => {
                 let raw_output_path = report_dir.join(format!("{module}.omp.jsonl"));
                 fs::write(&raw_output_path, &result.stdout)
                     .map_err(|e| format!("保存 OhMyPi 原始输出失败：{e}"))?;
@@ -231,6 +248,166 @@ fn merge_cli_and_analyzer_result(mut report: ModuleReport, cli_state: &str) -> M
             .push("CLI 执行证据不足，语义分析结果不作为模型能力结论".into());
     }
     report
+}
+
+/// custom 报告模式：不调用 OhMyPi/AI，只把 CLI 实测结论填入模块报告模板。
+/// verdict/confidence 完全由模块实测状态映射；findings 仅复述
+/// 小项统计与模块判定，并引用已有证据编号，不生成任何新语义结论。
+pub fn build_module_reports(
+    report: &CliRunReport,
+    input_paths: &[PathBuf],
+    report_dir: impl AsRef<Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let report_dir = report_dir.as_ref();
+    fs::create_dir_all(report_dir).map_err(|e| format!("创建模块报告目录失败：{e}"))?;
+    let mut paths = Vec::new();
+    for input_path in input_paths {
+        let module = input_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".input.json"))
+            .ok_or_else(|| format!("无法从输入文件识别模块：{}", input_path.display()))?;
+        let output_path = report_dir.join(format!("{module}.report.json"));
+        let input: ModuleInput = serde_json::from_slice(
+            &fs::read(input_path).map_err(|e| format!("读取模块输入失败：{e}"))?,
+        )
+        .map_err(|e| format!("解析模块输入失败：{e}"))?;
+        let module_result = report
+            .record
+            .module_results
+            .iter()
+            .find(|item| item.module_id == module);
+        let cli_state = module_result
+            .and_then(|item| serde_json::to_value(&item.state).ok())
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unverified".into());
+        let reason = module_result.and_then(|item| item.reason.clone());
+        let (verdict, confidence) = match cli_state.as_str() {
+            "pass" => ("pass", "high"),
+            "fail" => ("fail", "high"),
+            "unsupported" | "not_applicable" => ("limited", "high"),
+            _ => ("inconclusive", "none"),
+        };
+        let evidence_refs: Vec<String> = input
+            .evidence
+            .iter()
+            .filter_map(|item| {
+                item.get("evidence_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .collect();
+        let stats = input
+            .evidence
+            .iter()
+            .find_map(|item| item.get("payload"))
+            .and_then(|payload| module_item_stats(module, payload));
+        let mut findings = Vec::new();
+        if let Some(stats) = stats {
+            findings.push(Finding {
+                item_id: "检测小项统计".into(),
+                verdict: if stats.failed == 0 { "pass" } else { "fail" }.into(),
+                rationale: if stats.failed == 0 {
+                    format!("{} 个检测小项全部通过", stats.total)
+                } else {
+                    format!("{}/{} 个检测小项未通过", stats.failed, stats.total)
+                },
+                evidence_refs: evidence_refs.clone(),
+            });
+        }
+        findings.push(Finding {
+            item_id: format!("模块判定 {}", module_display_name(module)),
+            verdict: verdict.into(),
+            rationale: reason
+                .unwrap_or_else(|| format!("CLI 实测状态为 {}", module_state_label(&cli_state))),
+            evidence_refs: evidence_refs.clone(),
+        });
+        let mut limitations = input.limitations.clone();
+        limitations.push("custom 模式：报告由检测结论模板填充生成，未进行 AI 语义分析".into());
+        let module_report = ModuleReport {
+            schema_version: "module-eval-report/v1".into(),
+            evaluation_version: EVALUATION_VERSION.into(),
+            module: module.into(),
+            verdict: verdict.into(),
+            confidence: confidence.into(),
+            summary: format!(
+                "{}：{}",
+                module_display_name(module),
+                module_state_label(&cli_state)
+            ),
+            findings,
+            evidence_refs,
+            limitations,
+            analyzer: AnalyzerInfo {
+                name: "agentcheck-template".into(),
+                status: "deterministic_fill".into(),
+            },
+        };
+        write_json(&output_path, &module_report)?;
+        paths.push(output_path);
+    }
+    Ok(paths)
+}
+
+/// 带超时执行子进程收集到的输出；status 为 None 表示超时被看门狗杀死。
+pub(crate) struct TimedOutput {
+    pub(crate) status: Option<ExitStatus>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+}
+
+/// 以看门狗方式运行子进程：stdin 置空，避免子进程继承终端输入而永久等待；
+/// stdout/stderr 由独立线程排空，主线程轮询 try_wait，超时后 kill 并回收，
+/// 保证任何子进程卡死都不会让 CLI 无限挂住。
+pub(crate) fn run_command_with_timeout(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<TimedOutput, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动子进程失败：{error}"))?;
+    let mut stdout_pipe = child.stdout.take().expect("stdout 已配置为管道");
+    let mut stderr_pipe = child.stderr.take().expect("stderr 已配置为管道");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buffer);
+        buffer
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                break None;
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("等待子进程退出失败：{error}"));
+            }
+        }
+    };
+    let _ = child.wait();
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    Ok(TimedOutput {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 pub(crate) struct OmpConfig {
@@ -579,6 +756,14 @@ pub fn render_html(
     } else {
         "pass"
     };
+    let generator = if modules
+        .iter()
+        .all(|module| module.analyzer.name == "ohmypi")
+    {
+        "本报告由 CLI 检测证据和 OhMyPi 模块分析生成。"
+    } else {
+        "本报告由 CLI 检测结论直接填充模板生成，未经 AI 语义分析。"
+    };
     let module_rows = modules.iter().map(|module| {
         let findings = module.findings.iter().map(|finding| format!(
             "<li><strong>{}</strong>：{}；证据：{}</li>",
@@ -590,9 +775,10 @@ pub fn render_html(
         )
     }).collect::<String>();
     Ok(format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>AgentCheck 检测报告</title><style>body{{margin:0;background:#f4f6f8;color:#17212b;font:15px/1.65 -apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",sans-serif}}main{{max-width:1000px;margin:0 auto;padding:36px 20px}}section,header{{background:#fff;border:1px solid #d9e0e7;border-radius:8px;padding:20px;margin:16px 0}}h1{{margin:0 0 6px}}h2{{margin:0 0 8px}}.muted{{color:#5b6875}}.verdict{{font-weight:700;color:#1769aa}}</style></head><body><main><header><h1>AgentCheck 模型兼容性检测报告</h1><p>模型：{}</p><p>整体结论：{}</p><p class=\"muted\">本报告由 CLI 检测证据和 OhMyPi 模块分析生成。</p></header>{}</main></body></html>",
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>AgentCheck 检测报告</title><style>body{{margin:0;background:#f4f6f8;color:#17212b;font:15px/1.65 -apple-system,BlinkMacSystemFont,\"Segoe UI\",\"PingFang SC\",sans-serif}}main{{max-width:1000px;margin:0 auto;padding:36px 20px}}section,header{{background:#fff;border:1px solid #d9e0e7;border-radius:8px;padding:20px;margin:16px 0}}h1{{margin:0 0 6px}}h2{{margin:0 0 8px}}.muted{{color:#5b6875}}.verdict{{font-weight:700;color:#1769aa}}</style></head><body><main><header><h1>AgentCheck 模型兼容性检测报告</h1><p>模型：{}</p><p>整体结论：{}</p><p class=\"muted\">{}</p></header>{}</main></body></html>",
         escape(&run_report.configuration.model),
         overall,
+        generator,
         module_rows
     ))
 }
@@ -804,5 +990,93 @@ mod tests {
         assert_eq!(merged.verdict, "inconclusive");
         assert_eq!(merged.confidence, "none");
         assert!(merged.findings.is_empty());
+    }
+
+    /// 跨平台的"长时间运行"子进程：Unix 用 sleep，Windows 用 ping 延时。
+    fn long_running_command() -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "ping", "-n", "10", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "sleep 10"]);
+            command
+        }
+    }
+
+    fn echo_command() -> Command {
+        if cfg!(windows) {
+            let mut command = Command::new("cmd");
+            command.args(["/c", "echo", "hello"]);
+            command
+        } else {
+            let mut command = Command::new("sh");
+            command.args(["-c", "echo hello"]);
+            command
+        }
+    }
+
+    #[test]
+    fn watchdog_kills_child_that_never_exits() {
+        let mut command = long_running_command();
+        let started = Instant::now();
+        let output = run_command_with_timeout(&mut command, Duration::from_millis(500)).unwrap();
+        assert!(output.status.is_none());
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn watchdog_collects_output_from_finished_child() {
+        let mut command = echo_command();
+        let output = run_command_with_timeout(&mut command, Duration::from_secs(10)).unwrap();
+        assert!(output.status.is_some_and(|status| status.success()));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
+    }
+
+    fn unavailable_report() -> CliRunReport {
+        let request = crate::cli::CliRunRequest {
+            endpoint: "https://api.example.test/v1/chat".into(),
+            model: "model-a".into(),
+            api_key: None,
+            selected_modules: Some(vec!["capability".into()]),
+            stop_after: None,
+            run_id: "run-custom-mode".into(),
+            started_at: "2026-09-21T00:00:00Z".into(),
+        };
+        crate::cli::run_with_executor(request, &mut crate::cli::UnavailableExecutor).unwrap()
+    }
+
+    #[test]
+    fn custom_mode_fills_template_without_analyzer() {
+        let root = std::env::temp_dir().join(format!(
+            "agentcheck-custom-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let report = unavailable_report();
+        let input_paths = write_bundled_module_inputs(&report, root.join("module-input"))
+            .expect("应能写出模块输入");
+        let paths = build_module_reports(&report, &input_paths, root.join("module-report"))
+            .expect("custom 模式不应失败");
+        assert_eq!(paths.len(), 1);
+        let module_report: ModuleReport =
+            serde_json::from_slice(&fs::read(&paths[0]).unwrap()).unwrap();
+        assert_eq!(module_report.module, "capability");
+        assert_eq!(module_report.verdict, "inconclusive");
+        assert_eq!(module_report.confidence, "none");
+        assert_eq!(module_report.analyzer.name, "agentcheck-template");
+        assert!(
+            module_report
+                .limitations
+                .iter()
+                .any(|item| item.contains("未进行 AI 语义分析"))
+        );
+        let html = render_html(&report, &paths).unwrap();
+        assert!(html.contains("未经 AI 语义分析"));
+        let _ = fs::remove_dir_all(&root);
     }
 }
