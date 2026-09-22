@@ -1,0 +1,892 @@
+{
+  "version": "chat-completions-baseline/v1",
+  "source_url": "https://developers.openai.com/api/reference/chat",
+  "retrieved_at": "2026-09-11",
+  "design_version": "design/issue-20-chat-completions-baseline/v1",
+  "scope": "Chat Completions 首批 BC01-BC14；不包含 Responses、SDK、业务正确性或整体可用性",
+  "variants": [
+    {
+      "scenario": "BC01",
+      "title": "响应外层",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "非流式普通文本或工具响应",
+      "reference": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "text",
+              "refusal": null,
+              "role": "assistant"
+            }
+          }
+        ],
+        "created": 0,
+        "id": "id",
+        "model": "model",
+        "object": "chat.completion",
+        "usage": {
+          "completion_tokens": 0,
+          "prompt_tokens": 0,
+          "total_tokens": 0
+        }
+      },
+      "fields": [
+        {
+          "path": "object",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "id",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "created",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "model",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].index",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "choices[].message",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.content",
+          "state": "nullable",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.refusal",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.role",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].finish_reason",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].logprobs",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens",
+          "state": "optional",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens",
+          "state": "optional",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.total_tokens",
+          "state": "optional",
+          "value_type": "number"
+        }
+      ]
+    },
+    {
+      "scenario": "BC02",
+      "title": "候选结果容器",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "BC01 的 choices[] 容器",
+      "reference": {
+        "choices": [
+          {
+            "finish_reason": "stop",
+            "index": 0,
+            "logprobs": null,
+            "message": {
+              "content": "text",
+              "role": "assistant"
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].index",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "choices[].message",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].finish_reason",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].logprobs",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.role",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.content",
+          "state": "nullable",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC03",
+      "title": "回复消息",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "普通文本或工具消息分支",
+      "reference": {
+        "choices": [
+          {
+            "message": {
+              "content": "text",
+              "function_call": null,
+              "refusal": null,
+              "role": "assistant",
+              "tool_calls": []
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.role",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.content",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.refusal",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.tool_calls",
+          "state": "optional",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[].message.function_call",
+          "state": "optional",
+          "value_type": "object"
+        }
+      ]
+    },
+    {
+      "scenario": "BC04",
+      "title": "用量汇总",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "响应带 usage 的非流式请求",
+      "reference": {
+        "usage": {
+          "completion_tokens": 0,
+          "prompt_tokens": 0,
+          "total_tokens": 0
+        }
+      },
+      "fields": [
+        {
+          "path": "usage",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.total_tokens",
+          "state": "required",
+          "value_type": "number"
+        }
+      ]
+    },
+    {
+      "scenario": "BC05",
+      "title": "用量明细",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "usage 带明细的响应",
+      "reference": {
+        "usage": {
+          "completion_tokens": 0,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 0,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 0
+        }
+      },
+      "fields": [
+        {
+          "path": "usage",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.total_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.prompt_tokens_details",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens_details.cached_tokens",
+          "state": "optional",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens_details",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.completion_tokens_details.reasoning_tokens",
+          "state": "optional",
+          "value_type": "number"
+        }
+      ]
+    },
+    {
+      "scenario": "BC06",
+      "title": "服务附加信息",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "服务返回附加字段的响应",
+      "reference": {
+        "metadata": {},
+        "request_id": "request",
+        "service_tier": "default",
+        "system_fingerprint": "fp"
+      },
+      "fields": [
+        {
+          "path": "system_fingerprint",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "service_tier",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "request_id",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "metadata",
+          "state": "optional",
+          "value_type": "object"
+        }
+      ]
+    },
+    {
+      "scenario": "BC07",
+      "title": "函数调用容器",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "非流式响应包含工具调用",
+      "reference": {
+        "choices": [
+          {
+            "message": {
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{}",
+                    "name": "lookup"
+                  },
+                  "id": "call",
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[].message.tool_calls[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls[].id",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.tool_calls[].type",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function.name",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function.arguments",
+          "state": "required",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC08",
+      "title": "函数名称与参数承载",
+      "mode": "non_streaming",
+      "phase": null,
+      "applicability": "工具 function 对象",
+      "reference": {
+        "choices": [
+          {
+            "message": {
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"query\":\"business\"}",
+                    "name": "lookup"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[].message.tool_calls[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function.name",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].message.tool_calls[].function.arguments",
+          "state": "required",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC09",
+      "title": "分块外层",
+      "mode": "streaming",
+      "phase": "initial",
+      "applicability": "stream=true 的每个 chunk",
+      "reference": {
+        "choices": [
+          {
+            "delta": {},
+            "finish_reason": null,
+            "index": 0
+          }
+        ],
+        "created": 0,
+        "id": "id",
+        "model": "model",
+        "object": "chat.completion.chunk",
+        "usage": null
+      },
+      "fields": [
+        {
+          "path": "object",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "id",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "created",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "model",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].index",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "choices[].delta",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].finish_reason",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "usage",
+          "state": "optional",
+          "value_type": "object"
+        }
+      ]
+    },
+    {
+      "scenario": "BC10",
+      "title": "分块候选容器",
+      "mode": "streaming",
+      "phase": "content",
+      "applicability": "chunk 的候选数组",
+      "reference": {
+        "choices": [
+          {
+            "delta": {
+              "content": "text"
+            },
+            "finish_reason": null,
+            "index": 0,
+            "logprobs": null
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].index",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "choices[].delta",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].finish_reason",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].logprobs",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta.content",
+          "state": "optional",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC11",
+      "title": "消息增量",
+      "mode": "streaming",
+      "phase": "content",
+      "applicability": "文本、角色或拒答增量",
+      "reference": {
+        "choices": [
+          {
+            "delta": {
+              "content": "text",
+              "refusal": null,
+              "role": "assistant"
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta.role",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].delta.content",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].delta.refusal",
+          "state": "optional",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC12",
+      "title": "函数调用增量",
+      "mode": "streaming",
+      "phase": "tool",
+      "applicability": "工具调用增量事件",
+      "reference": {
+        "choices": [
+          {
+            "delta": {
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{}",
+                    "name": "lookup"
+                  },
+                  "id": "call",
+                  "index": 0,
+                  "type": "function"
+                }
+              ]
+            }
+          }
+        ]
+      },
+      "fields": [
+        {
+          "path": "choices",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta.tool_calls",
+          "state": "required",
+          "value_type": "array"
+        },
+        {
+          "path": "choices[].delta.tool_calls[]",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].index",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].id",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].type",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].function",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].function.name",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "choices[].delta.tool_calls[].function.arguments",
+          "state": "optional",
+          "value_type": "string"
+        }
+      ]
+    },
+    {
+      "scenario": "BC13",
+      "title": "流式用量返回",
+      "mode": "streaming",
+      "phase": "terminal",
+      "applicability": "终止或约定 usage chunk",
+      "reference": {
+        "usage": {
+          "completion_tokens": 0,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          },
+          "prompt_tokens": 0,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "total_tokens": 0
+        }
+      },
+      "fields": [
+        {
+          "path": "usage",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.total_tokens",
+          "state": "required",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.prompt_tokens_details",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.prompt_tokens_details.cached_tokens",
+          "state": "optional",
+          "value_type": "number"
+        },
+        {
+          "path": "usage.completion_tokens_details",
+          "state": "optional",
+          "value_type": "object"
+        },
+        {
+          "path": "usage.completion_tokens_details.reasoning_tokens",
+          "state": "optional",
+          "value_type": "number"
+        }
+      ]
+    },
+    {
+      "scenario": "BC14",
+      "title": "JSON 错误对象",
+      "mode": "error",
+      "phase": null,
+      "applicability": "HTTP 错误且 body 可解析为 JSON",
+      "reference": {
+        "error": {
+          "code": null,
+          "message": "message",
+          "param": null,
+          "type": "invalid_request_error"
+        }
+      },
+      "fields": [
+        {
+          "path": "error",
+          "state": "required",
+          "value_type": "object"
+        },
+        {
+          "path": "error.message",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "error.type",
+          "state": "required",
+          "value_type": "string"
+        },
+        {
+          "path": "error.param",
+          "state": "optional",
+          "value_type": "string"
+        },
+        {
+          "path": "error.code",
+          "state": "optional",
+          "value_type": "string"
+        }
+      ]
+    }
+  ],
+  "catalog_fingerprint": "63ba2a75e6be3efc070e533dd67c463ac21aff21952680e8980fdacb05a307e1"
+}

@@ -1962,54 +1962,220 @@ impl LiveExecutor {
         let total_scenarios = BaselineScenario::ALL.len();
         let mut observations = Vec::new();
         let mut evidence = Vec::new();
-        for scenario in BaselineScenario::ALL {
-            progress(ProgressDetail {
-                index: evidence.len(),
-                total: total_scenarios,
-                id: scenario.id().into(),
-                message: format!(
-                    "正在检测基线场景 {} / {}",
-                    evidence.len() + 1,
-                    total_scenarios
-                ),
-            });
-            let request = ChatCompletionsRequest {
-                module_id: "baseline".into(),
-                messages: None,
-                tools: None,
-                prompt: format!("基线场景 {}：{}", scenario.id(), scenario.title()),
-                max_tokens: 256,
-                stream: matches!(
+        let model = self.transport.model_name().to_string();
+        let tool_defs = json!([{
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "description": "查询指定城市的天气信息",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"city": {"type": "string", "description": "城市名称"}},
+                    "required": ["city"]
+                }
+            }
+        }]);
+
+        macro_rules! observe {
+            ($scenario:expr, $raw:expr, $phase:expr) => {{
+                let scenario = $scenario;
+                progress(ProgressDetail {
+                    index: observations.len(),
+                    total: total_scenarios,
+                    id: scenario.id().into(),
+                    message: format!(
+                        "正在检测基线场景 {} / {}",
+                        observations.len() + 1,
+                        total_scenarios
+                    ),
+                });
+                observations.push(crate::baseline::BaselineObservation {
                     scenario,
-                    BaselineScenario::StreamEnvelope
-                        | BaselineScenario::StreamChoiceContainer
-                        | BaselineScenario::StreamDelta
-                        | BaselineScenario::StreamToolDelta
-                        | BaselineScenario::StreamUsage
-                ),
-                allow_retry: true,
-                timeout_ms: None,
-            };
-            let response = self.transport.send(request.clone());
-            let source = ActualSnapshot::from_raw(
-                response.body.clone(),
-                ActualSource::RealService,
-                None,
-                false,
-                Vec::new(),
-            );
-            observations.push(crate::baseline::BaselineObservation {
-                scenario,
-                actual: source,
-            });
-            evidence.push(json!({"scenario": scenario.id(), "payload": self.transport.evidence_payload(&request, &response)}));
-            progress(ProgressDetail {
-                index: evidence.len(),
-                total: total_scenarios,
-                id: scenario.id().into(),
-                message: format!("已完成基线场景 {} / {}", evidence.len(), total_scenarios),
-            });
+                    actual: ActualSnapshot::from_raw(
+                        $raw,
+                        ActualSource::RealService,
+                        $phase,
+                        false,
+                        Vec::new(),
+                    ),
+                });
+                progress(ProgressDetail {
+                    index: observations.len(),
+                    total: total_scenarios,
+                    id: scenario.id().into(),
+                    message: format!(
+                        "已完成基线场景 {} / {}",
+                        observations.len(),
+                        total_scenarios
+                    ),
+                });
+            }};
         }
+
+        // 非流式普通响应：一次请求覆盖 BC01–BC06。
+        let normal_request = ChatCompletionsRequest {
+            module_id: "baseline".into(),
+            messages: None,
+            tools: None,
+            prompt: "请用中文一句话介绍你自己。".into(),
+            max_tokens: 256,
+            stream: false,
+            allow_retry: true,
+            timeout_ms: None,
+        };
+        let normal = self.transport.send(normal_request.clone());
+        for scenario in [
+            BaselineScenario::ResponseEnvelope,
+            BaselineScenario::ChoiceContainer,
+            BaselineScenario::ResponseMessage,
+            BaselineScenario::UsageSummary,
+            BaselineScenario::UsageDetails,
+            BaselineScenario::ServiceMetadata,
+        ] {
+            observe!(scenario, normal.body.clone(), None);
+        }
+        evidence.push(json!({
+            "scenarios": ["BC01", "BC02", "BC03", "BC04", "BC05", "BC06"],
+            "payload": self.transport.evidence_payload(&normal_request, &normal),
+        }));
+
+        // 非流式工具调用：tool_choice=required 强制返回 tool_calls，覆盖 BC07–BC08。
+        let tools_payload = json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "请调用 lookup_weather 查询北京今天的天气。"}],
+            "tools": tool_defs,
+            "tool_choice": "required",
+            "temperature": 0,
+            "max_tokens": 256,
+            "stream": false,
+        });
+        let tools_response = self
+            .transport
+            .send_payload(tools_payload.clone(), "baseline");
+        for scenario in [
+            BaselineScenario::ToolCallContainer,
+            BaselineScenario::FunctionArguments,
+        ] {
+            observe!(scenario, tools_response.body.clone(), None);
+        }
+        evidence.push(json!({
+            "scenarios": ["BC07", "BC08"],
+            "payload": self.transport.raw_evidence_payload(&tools_payload, "baseline", &tools_response),
+        }));
+
+        // 流式普通响应：send_stream 自动携带 stream_options.include_usage，覆盖 BC09–BC11、BC13。
+        let stream_request = ChatCompletionsRequest {
+            prompt: "请用中文一句话介绍你自己。".into(),
+            stream: true,
+            ..normal_request.clone()
+        };
+        let stream = self.transport.send_stream(stream_request.clone());
+        let stream_chunk = |pick: &dyn Fn(&crate::transport::StreamEvent) -> bool| {
+            stream
+                .events
+                .iter()
+                .find(|event| pick(event))
+                .map(|event| event.raw.clone())
+                .unwrap_or_default()
+        };
+        let has_content = |event: &crate::transport::StreamEvent| {
+            event.content_delta.is_some() || event.reasoning_delta.is_some()
+        };
+        observe!(
+            BaselineScenario::StreamEnvelope,
+            stream
+                .events
+                .first()
+                .map(|event| event.raw.clone())
+                .unwrap_or_default(),
+            Some(crate::baseline::StreamPhase::Initial)
+        );
+        observe!(
+            BaselineScenario::StreamChoiceContainer,
+            stream_chunk(&has_content),
+            Some(crate::baseline::StreamPhase::Content)
+        );
+        observe!(
+            BaselineScenario::StreamDelta,
+            stream_chunk(&has_content),
+            Some(crate::baseline::StreamPhase::Content)
+        );
+
+        // 流式工具调用：覆盖 BC12。
+        let stream_tools_payload = json!({
+            "model": model,
+            "messages": [{"role": "user", "content": "请调用 lookup_weather 查询北京今天的天气。"}],
+            "tools": tool_defs,
+            "tool_choice": "required",
+            "temperature": 0,
+            "max_tokens": 256,
+            "stream": true,
+            "stream_options": {"include_usage": true},
+        });
+        let stream_tools =
+            self.transport
+                .send_stream_payload(stream_tools_payload.clone(), true, None);
+        observe!(
+            BaselineScenario::StreamToolDelta,
+            stream_tools
+                .events
+                .iter()
+                .find(|event| event.tool_calls_delta.is_some())
+                .map(|event| event.raw.clone())
+                .unwrap_or_default(),
+            Some(crate::baseline::StreamPhase::Tool)
+        );
+        evidence.push(json!({
+            "scenarios": ["BC12"],
+            "payload": self.transport.raw_stream_evidence_payload(&stream_tools_payload, "baseline", &stream_tools),
+        }));
+
+        // 流式用量：优先取真实 usage chunk 原文；缺失时退回流汇总里的 usage 对象。
+        let usage_raw = stream
+            .events
+            .iter()
+            .find(|event| {
+                serde_json::from_str::<Value>(&event.raw)
+                    .ok()
+                    .and_then(|value| value.get("usage").cloned())
+                    .is_some_and(|usage| !usage.is_null())
+            })
+            .map(|event| event.raw.clone())
+            .or_else(|| {
+                stream.usage.as_ref().map(|usage| {
+                    serde_json::to_string(&json!({"usage": usage})).unwrap_or_default()
+                })
+            })
+            .unwrap_or_default();
+        observe!(
+            BaselineScenario::StreamUsage,
+            usage_raw,
+            Some(crate::baseline::StreamPhase::Terminal)
+        );
+        evidence.push(json!({
+            "scenarios": ["BC09", "BC10", "BC11", "BC13"],
+            "payload": self.transport.stream_evidence_payload(&stream_request, &stream),
+        }));
+
+        // 错误响应：messages 传字符串触发服务端校验错误，覆盖 BC14。
+        let error_payload = json!({
+            "model": model,
+            "messages": "not-an-array",
+            "temperature": 0,
+            "stream": false,
+        });
+        let error_response = self
+            .transport
+            .send_payload(error_payload.clone(), "baseline");
+        observe!(
+            BaselineScenario::ErrorEnvelope,
+            error_response.body.clone(),
+            None
+        );
+        evidence.push(json!({
+            "scenarios": ["BC14"],
+            "payload": self.transport.raw_evidence_payload(&error_payload, "baseline", &error_response),
+        }));
         let report = build_baseline_report(record, catalog, observations).ok();
         ModuleRunResult {
             state: if report.is_some() {

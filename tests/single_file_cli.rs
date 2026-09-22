@@ -192,6 +192,145 @@ fn missing_analyzer_keeps_evidence_and_html_without_external_rules() {
     )
     .unwrap();
     let value: serde_json::Value = serde_json::from_str(&report).unwrap();
-    assert_eq!(value["verdict"], "inconclusive");
+    // custom 报告模式下 verdict 由模块实测状态映射，mock 响应合法故为 pass。
+    assert_eq!(value["verdict"], "pass");
     assert!(!report.contains("fixture-secret-not-for-logs"));
+}
+
+/// 按请求体分支的 mock：工具请求回 tool_calls、流式回 SSE 分块（含 usage）、
+/// 畸形 messages 回 400 错误对象，普通请求回标准 chat.completion。
+#[test]
+fn baseline_probes_reach_real_scenarios() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_server = stop.clone();
+    let server = std::thread::spawn(move || {
+        while !stop_server.load(Ordering::Relaxed) {
+            let Ok((mut stream, _)) = listener.accept() else {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut data = Vec::new();
+            let mut buffer = [0; 8192];
+            while let Ok(length) = stream.read(&mut buffer) {
+                if length == 0 {
+                    break;
+                }
+                data.extend_from_slice(&buffer[..length]);
+                if let Some(header_end) = data.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&data[..header_end]).to_lowercase();
+                    let body_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap_or(0);
+                    if data.len() >= header_end + 4 + body_length {
+                        break;
+                    }
+                }
+            }
+            let request_text = String::from_utf8_lossy(&data);
+            let body_start = request_text
+                .find("\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap_or(request_text.len());
+            let request: serde_json::Value =
+                serde_json::from_str(&request_text[body_start..]).unwrap_or_default();
+            let streaming = request["stream"].as_bool() == Some(true);
+            let with_tools = request["tools"].is_array();
+            if request["messages"].is_string() {
+                let body = r#"{"error":{"message":"messages must be an array","type":"invalid_request_error","param":"messages","code":null}}"#;
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
+            if streaming {
+                let tool_chunk = if with_tools {
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup_weather\",\"arguments\":\"{\\\"city\\\":\\\"北京\\\"}\"}}]},\"finish_reason\":null}]}\n\n"
+                } else {
+                    "data: {\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"你好\"},\"finish_reason\":null}]}\n\n"
+                };
+                let body = format!(
+                    "data: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{{\"role\":\"assistant\"}},\"finish_reason\":null}}]}}\n\n{tool_chunk}data: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[{{\"index\":0,\"delta\":{{}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"id\":\"c1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"fixture\",\"choices\":[],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}}}\n\ndata: [DONE]\n\n"
+                );
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                continue;
+            }
+            let body = if with_tools {
+                r#"{"id":"local-test","object":"chat.completion","created":1,"model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup_weather","arguments":"{\"city\":\"北京\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#.to_string()
+            } else {
+                r#"{"id":"local-test","object":"chat.completion","created":1,"model":"fixture","choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#.to_string()
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let output = Command::new(binary())
+        .args([
+            "--url",
+            &format!("http://{address}/v1/chat/completions"),
+            "--model",
+            "fixture",
+            "--no-gui",
+            "--modules",
+            "baseline",
+            "--timeout-seconds",
+            "5",
+        ])
+        .env("MODEL_API_KEY", "fixture-secret-not-for-logs")
+        .env("OMP_BIN", directory.path().join("missing-omp"))
+        .current_dir(directory.path())
+        .output()
+        .unwrap();
+    stop.store(true, Ordering::Relaxed);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let run: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.path().join("agentcheck-report/run.json")).unwrap(),
+    )
+    .unwrap();
+    let baseline = run["record"]["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["payload"]["module"] == "baseline")
+        .expect("baseline evidence");
+    let comparisons = baseline["payload"]["payload"]["report"]["comparisons"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(comparisons.len(), 14);
+    for comparison in &comparisons {
+        assert_eq!(
+            comparison["status"], "same_structure",
+            "{} 应对齐官方结构，实际：{}",
+            comparison["scenario"], comparison
+        );
+    }
+    let body_dump = serde_json::to_string(&baseline).unwrap();
+    assert!(body_dump.contains("\"tool_choice\":\"required\""));
+    assert!(body_dump.contains("\"include_usage\":true"));
+    assert!(body_dump.contains("\"messages\":\"not-an-array\""));
 }

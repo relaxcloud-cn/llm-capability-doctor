@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -309,22 +309,18 @@ pub struct SelectionContext {
     pub phase: Option<StreamPhase>,
 }
 
+/// 内嵌的官方结构基线目录，随二进制分发；官方规范演进时替换文件并升版本号。
+const EMBEDDED_CATALOG_JSON: &str = include_str!("../assets/openai-baseline.json");
+
 pub fn fixed_baseline_catalog() -> BaselineCatalog {
-    let variants = BaselineScenario::ALL
-        .into_iter()
-        .map(build_variant)
-        .collect::<Vec<_>>();
-    let fingerprint = digest_json(&variants);
-    BaselineCatalog {
-        version: BASELINE_VERSION.into(),
-        source_url: BASELINE_SOURCE_URL.into(),
-        retrieved_at: "2026-09-11".into(),
-        design_version: BASELINE_DESIGN_VERSION.into(),
-        scope: "Chat Completions 首批 BC01-BC14；不包含 Responses、SDK、业务正确性或整体可用性"
-            .into(),
-        variants,
-        catalog_fingerprint: fingerprint,
-    }
+    let catalog: BaselineCatalog =
+        serde_json::from_str(EMBEDDED_CATALOG_JSON).expect("内嵌基线目录必须是合法 JSON");
+    assert_eq!(
+        digest_json(&catalog.variants),
+        catalog.catalog_fingerprint,
+        "内嵌基线目录指纹与变体内容不一致，请重新生成 assets/openai-baseline.json"
+    );
+    catalog
 }
 
 pub fn select_variants(
@@ -598,313 +594,6 @@ fn compare_value(reference: &Value, actual: &Value, path: &str, context: &mut Co
     }
 }
 
-fn build_variant(scenario: BaselineScenario) -> BaselineVariant {
-    match scenario {
-        BaselineScenario::ResponseEnvelope => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "非流式普通文本或工具响应",
-            json!({"object":"chat.completion","id":"id","created":0,"model":"model","choices":[{"index":0,"message":{"role":"assistant","content":"text","refusal":null},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}),
-            vec![
-                required("object", ValueType::String),
-                required("id", ValueType::String),
-                required("created", ValueType::Number),
-                required("model", ValueType::String),
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].index", ValueType::Number),
-                required("choices[].message", ValueType::Object),
-                required_nullable("choices[].message.content", ValueType::String),
-                optional_nullable("choices[].message.refusal", ValueType::String),
-                required("choices[].message.role", ValueType::String),
-                required("choices[].finish_reason", ValueType::String),
-                optional("choices[].logprobs", ValueType::Object),
-                optional("usage", ValueType::Object),
-                optional("usage.prompt_tokens", ValueType::Number),
-                optional("usage.completion_tokens", ValueType::Number),
-                optional("usage.total_tokens", ValueType::Number),
-            ],
-        ),
-        BaselineScenario::ChoiceContainer => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "BC01 的 choices[] 容器",
-            json!({"choices":[{"index":0,"message":{"role":"assistant","content":"text"},"finish_reason":"stop","logprobs":null}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].index", ValueType::Number),
-                required("choices[].message", ValueType::Object),
-                required("choices[].finish_reason", ValueType::String),
-                optional("choices[].logprobs", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::ResponseMessage => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "普通文本或工具消息分支",
-            json!({"choices":[{"message":{"role":"assistant","content":"text","refusal":null,"tool_calls":[],"function_call":null}}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].message", ValueType::Object),
-                required("choices[].message.role", ValueType::String),
-                optional_nullable("choices[].message.content", ValueType::String),
-                optional_nullable("choices[].message.refusal", ValueType::String),
-                optional("choices[].message.tool_calls", ValueType::Array),
-                optional("choices[].message.function_call", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::UsageSummary => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "响应带 usage 的非流式请求",
-            json!({"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}),
-            vec![
-                required("usage", ValueType::Object),
-                required("usage.prompt_tokens", ValueType::Number),
-                required("usage.completion_tokens", ValueType::Number),
-                required("usage.total_tokens", ValueType::Number),
-            ],
-        ),
-        BaselineScenario::UsageDetails => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "usage 带明细的响应",
-            json!({"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}),
-            vec![
-                required("usage", ValueType::Object),
-                required("usage.prompt_tokens", ValueType::Number),
-                required("usage.completion_tokens", ValueType::Number),
-                required("usage.total_tokens", ValueType::Number),
-                optional("usage.prompt_tokens_details", ValueType::Object),
-                optional(
-                    "usage.prompt_tokens_details.cached_tokens",
-                    ValueType::Number,
-                ),
-                optional("usage.completion_tokens_details", ValueType::Object),
-                optional(
-                    "usage.completion_tokens_details.reasoning_tokens",
-                    ValueType::Number,
-                ),
-            ],
-        ),
-        BaselineScenario::ServiceMetadata => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "服务返回附加字段的响应",
-            json!({"system_fingerprint":"fp","service_tier":"default","request_id":"request","metadata":{}}),
-            vec![
-                optional("system_fingerprint", ValueType::String),
-                optional("service_tier", ValueType::String),
-                optional("request_id", ValueType::String),
-                optional("metadata", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::ToolCallContainer => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "非流式响应包含工具调用",
-            json!({"choices":[{"message":{"tool_calls":[{"id":"call","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].message", ValueType::Object),
-                required("choices[].message.tool_calls", ValueType::Array),
-                required("choices[].message.tool_calls[]", ValueType::Object),
-                required("choices[].message.tool_calls[].id", ValueType::String),
-                required("choices[].message.tool_calls[].type", ValueType::String),
-                required("choices[].message.tool_calls[].function", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::FunctionArguments => variant(
-            scenario,
-            ResponseMode::NonStreaming,
-            None,
-            "工具 function 对象",
-            json!({"choices":[{"message":{"tool_calls":[{"function":{"name":"lookup","arguments":"{\"query\":\"business\"}"}}]}}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].message", ValueType::Object),
-                required("choices[].message.tool_calls", ValueType::Array),
-                required("choices[].message.tool_calls[]", ValueType::Object),
-                required("choices[].message.tool_calls[].function", ValueType::Object),
-                required(
-                    "choices[].message.tool_calls[].function.name",
-                    ValueType::String,
-                ),
-                required(
-                    "choices[].message.tool_calls[].function.arguments",
-                    ValueType::String,
-                ),
-            ],
-        ),
-        BaselineScenario::StreamEnvelope => variant(
-            scenario,
-            ResponseMode::Streaming,
-            Some(StreamPhase::Initial),
-            "stream=true 的每个 chunk",
-            json!({"object":"chat.completion.chunk","id":"id","created":0,"model":"model","choices":[{"index":0,"delta":{},"finish_reason":null}],"usage":null}),
-            vec![
-                required("object", ValueType::String),
-                required("id", ValueType::String),
-                required("created", ValueType::Number),
-                required("model", ValueType::String),
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].index", ValueType::Number),
-                required("choices[].delta", ValueType::Object),
-                optional_nullable("choices[].finish_reason", ValueType::String),
-                optional_nullable("usage", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::StreamChoiceContainer => variant(
-            scenario,
-            ResponseMode::Streaming,
-            Some(StreamPhase::Content),
-            "chunk 的候选数组",
-            json!({"choices":[{"index":0,"delta":{"content":"text"},"finish_reason":null,"logprobs":null}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].index", ValueType::Number),
-                required("choices[].delta", ValueType::Object),
-                optional_nullable("choices[].finish_reason", ValueType::String),
-                optional("choices[].logprobs", ValueType::Object),
-            ],
-        ),
-        BaselineScenario::StreamDelta => variant(
-            scenario,
-            ResponseMode::Streaming,
-            Some(StreamPhase::Content),
-            "文本、角色或拒答增量",
-            json!({"choices":[{"delta":{"role":"assistant","content":"text","refusal":null}}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].delta", ValueType::Object),
-                optional("choices[].delta.role", ValueType::String),
-                optional_nullable("choices[].delta.content", ValueType::String),
-                optional_nullable("choices[].delta.refusal", ValueType::String),
-            ],
-        ),
-        BaselineScenario::StreamToolDelta => variant(
-            scenario,
-            ResponseMode::Streaming,
-            Some(StreamPhase::Tool),
-            "工具调用增量事件",
-            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}]}),
-            vec![
-                required("choices", ValueType::Array),
-                required("choices[]", ValueType::Object),
-                required("choices[].delta", ValueType::Object),
-                required("choices[].delta.tool_calls", ValueType::Array),
-                required("choices[].delta.tool_calls[]", ValueType::Object),
-                required("choices[].delta.tool_calls[].index", ValueType::Number),
-                optional("choices[].delta.tool_calls[].id", ValueType::String),
-                optional("choices[].delta.tool_calls[].type", ValueType::String),
-                required("choices[].delta.tool_calls[].function", ValueType::Object),
-                optional(
-                    "choices[].delta.tool_calls[].function.name",
-                    ValueType::String,
-                ),
-                optional(
-                    "choices[].delta.tool_calls[].function.arguments",
-                    ValueType::String,
-                ),
-            ],
-        ),
-        BaselineScenario::StreamUsage => variant(
-            scenario,
-            ResponseMode::Streaming,
-            Some(StreamPhase::Terminal),
-            "终止或约定 usage chunk",
-            json!({"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0},"completion_tokens_details":{"reasoning_tokens":0}}}),
-            vec![
-                required("usage", ValueType::Object),
-                required("usage.prompt_tokens", ValueType::Number),
-                required("usage.completion_tokens", ValueType::Number),
-                required("usage.total_tokens", ValueType::Number),
-                optional("usage.prompt_tokens_details", ValueType::Object),
-                optional(
-                    "usage.prompt_tokens_details.cached_tokens",
-                    ValueType::Number,
-                ),
-                optional("usage.completion_tokens_details", ValueType::Object),
-                optional(
-                    "usage.completion_tokens_details.reasoning_tokens",
-                    ValueType::Number,
-                ),
-            ],
-        ),
-        BaselineScenario::ErrorEnvelope => variant(
-            scenario,
-            ResponseMode::Error,
-            None,
-            "HTTP 错误且 body 可解析为 JSON",
-            json!({"error":{"message":"message","type":"invalid_request_error","param":null,"code":null}}),
-            vec![
-                required("error", ValueType::Object),
-                required("error.message", ValueType::String),
-                required("error.type", ValueType::String),
-                optional_nullable("error.param", ValueType::String),
-                optional_nullable("error.code", ValueType::String),
-            ],
-        ),
-    }
-}
-
-fn variant(
-    scenario: BaselineScenario,
-    mode: ResponseMode,
-    phase: Option<StreamPhase>,
-    applicability: &str,
-    reference: Value,
-    fields: Vec<BaselineFieldRule>,
-) -> BaselineVariant {
-    BaselineVariant {
-        scenario,
-        title: scenario.title().into(),
-        mode,
-        phase,
-        applicability: applicability.into(),
-        reference,
-        fields,
-    }
-}
-
-fn required(path: &str, value_type: ValueType) -> BaselineFieldRule {
-    rule(path, FieldState::Required, value_type)
-}
-
-fn required_nullable(path: &str, value_type: ValueType) -> BaselineFieldRule {
-    rule(path, FieldState::Nullable, value_type)
-}
-
-fn optional(path: &str, value_type: ValueType) -> BaselineFieldRule {
-    rule(path, FieldState::Optional, value_type)
-}
-
-fn optional_nullable(path: &str, value_type: ValueType) -> BaselineFieldRule {
-    rule(path, FieldState::Optional, value_type)
-}
-
-fn rule(path: &str, state: FieldState, value_type: ValueType) -> BaselineFieldRule {
-    BaselineFieldRule {
-        path: path.into(),
-        state,
-        value_type,
-    }
-}
-
 fn rule_for<'a>(rules: &'a [BaselineFieldRule], path: &str) -> Option<&'a BaselineFieldRule> {
     rules.iter().find(|rule| rule.path == path)
 }
@@ -944,6 +633,7 @@ fn digest_json<T: Serialize>(value: &T) -> String {
 mod tests {
     use super::*;
     use crate::records::{CreateRunInput, ServiceSnapshotInput, add_evidence, create_run};
+    use serde_json::json;
     use std::collections::BTreeMap;
 
     fn record() -> crate::records::DetectionRecord {
@@ -1114,7 +804,11 @@ mod tests {
             phase: None,
             applicability: "测试边界".into(),
             reference: json!({"items": []}),
-            fields: vec![required("items", ValueType::Array)],
+            fields: vec![BaselineFieldRule {
+                path: "items".into(),
+                state: FieldState::Required,
+                value_type: ValueType::Array,
+            }],
         };
         let actual = ActualSnapshot::from_value(
             json!({"items": []}),
