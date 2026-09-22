@@ -1,6 +1,7 @@
 use crate::cli::{CliRunReport, module_display_name, module_item_stats, module_state_label};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -55,6 +56,24 @@ pub struct ModuleReportItem {
     pub name: String,
     pub status: String,
     pub note: String,
+    /// 字段级差异（目前仅基线对比产生）：逐条列出参考与实际的不同。
+    #[serde(default)]
+    pub diffs: Vec<ModuleReportDiff>,
+    /// 参考结构完整 JSON（基线对比：官方目录样例），用于左右对照展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<Value>,
+    /// 实测响应完整 JSON，用于左右对照展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual: Option<Value>,
+}
+
+/// 一条字段差异：sign 取 "-"/"+"/"~"，对应缺少字段、多出字段、内容不符。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleReportDiff {
+    pub sign: String,
+    pub path: String,
+    pub expected: String,
+    pub actual: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +418,9 @@ fn module_report_items(module: &str, input: &ModuleInput) -> Vec<ModuleReportIte
             .unwrap_or_else(|| code.to_string()),
         status: status.into(),
         note,
+        diffs: Vec::new(),
+        reference: None,
+        actual: None,
     };
     let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
     match module {
@@ -503,24 +525,69 @@ fn module_report_items(module: &str, input: &ModuleInput) -> Vec<ModuleReportIte
         "baseline" => payload["report"]["comparisons"]
             .as_array()
             .map(|comparisons| {
+                let variants = payload["report"]["catalog"]["variants"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default();
+                let evidences = payload["evidence"].as_array().cloned().unwrap_or_default();
                 comparisons
                     .iter()
                     .map(|comparison| {
                         let code = comparison["scenario"].as_str().unwrap_or_default();
                         let result = comparison["status"].as_str().unwrap_or_default();
-                        let diffs = comparison["differences"]
+                        let difference_list = comparison["differences"]
                             .as_array()
-                            .map(|items| items.len())
-                            .unwrap_or(0);
-                        let (status, note) = match result {
-                            "different" => ("fail", format!("与参考服务存在 {diffs} 处结构差异")),
-                            "not_observed" | "inconclusive" => {
-                                ("inconclusive", "未取得可核对的实测响应".to_string())
-                            }
-                            "not_applicable" => ("limited", "该检测项不适用".to_string()),
-                            _ => ("pass", "与参考服务一致".to_string()),
+                            .cloned()
+                            .unwrap_or_default();
+                        let diffs = difference_list.len();
+                        let first_note = || {
+                            comparison["notes"]
+                                .as_array()
+                                .and_then(|notes| notes.iter().find_map(Value::as_str))
+                                .map(str::to_owned)
                         };
-                        item(code, status, note)
+                        let mut entry = match result {
+                            "different" => {
+                                item(code, "fail", format!("与参考服务存在 {diffs} 处结构差异"))
+                            }
+                            "not_observed" | "inconclusive" => item(
+                                code,
+                                "inconclusive",
+                                first_note()
+                                    .unwrap_or_else(|| "未取得可核对的实测响应".to_string()),
+                            ),
+                            "not_applicable" => item(
+                                code,
+                                "limited",
+                                first_note().unwrap_or_else(|| "该检测项不适用".to_string()),
+                            ),
+                            _ => item(
+                                code,
+                                "pass",
+                                first_note().unwrap_or_else(|| "与参考服务一致".to_string()),
+                            ),
+                        };
+                        if !difference_list.is_empty() {
+                            let reference = variants
+                                .iter()
+                                .find(|variant| variant["scenario"].as_str() == Some(code))
+                                .map(|variant| &variant["reference"]);
+                            let actual = evidences
+                                .iter()
+                                .find(|evidence| {
+                                    evidence["scenarios"].as_array().is_some_and(|scenarios| {
+                                        scenarios.iter().any(|item| item.as_str() == Some(code))
+                                    })
+                                })
+                                .map(|evidence| &evidence["payload"]["response"]["body"]);
+                            entry.reference = reference.cloned();
+                            entry.actual = actual.cloned();
+                            entry.diffs = difference_list
+                                .iter()
+                                .map(|diff| baseline_diff_line(diff, reference, actual))
+                                .collect();
+                        }
+                        entry
                     })
                     .collect()
             })
@@ -583,6 +650,178 @@ fn module_report_items(module: &str, input: &ModuleInput) -> Vec<ModuleReportIte
             })
             .unwrap_or_default(),
         _ => Vec::new(),
+    }
+}
+
+/// 按 `a.b[].c` 形式的路径在 JSON 里取值；`[]` 段表示数组元素，取首个元素用于展示。
+fn resolve_json_path<'v>(mut value: &'v Value, path: &str) -> Option<&'v Value> {
+    for segment in path.split('.') {
+        let (key, is_element) = match segment.strip_suffix("[]") {
+            Some(key) => (key, true),
+            None => (segment, false),
+        };
+        if !key.is_empty() {
+            value = value.get(key)?;
+        }
+        if is_element {
+            value = value.as_array()?.first()?;
+        }
+    }
+    Some(value)
+}
+
+/// JSON 值的单行展示形式，过长时截断。
+fn short_json(value: &Value) -> String {
+    let text = serde_json::to_string(value).unwrap_or_default();
+    if text.chars().count() > 100 {
+        format!("{}…", text.chars().take(100).collect::<String>())
+    } else {
+        text
+    }
+}
+
+/// 把一条基线结构差异渲染成 diff 行：参考值取自场景参考样例，实际值取自实测响应。
+fn baseline_diff_line(
+    diff: &Value,
+    reference: Option<&Value>,
+    actual: Option<&Value>,
+) -> ModuleReportDiff {
+    let path = diff["path"].as_str().unwrap_or_default().to_string();
+    let detail = diff["detail"].as_str().unwrap_or_default();
+    let kind = diff["kind"].as_str().unwrap_or_default();
+    let ref_path = diff["reference_path"].as_str().unwrap_or(path.as_str());
+    let act_path = diff["actual_path"].as_str().unwrap_or(path.as_str());
+    let expected = reference
+        .and_then(|value| resolve_json_path(value, ref_path))
+        .map(short_json);
+    let observed = actual
+        .and_then(|value| resolve_json_path(value, act_path))
+        .map(short_json);
+    let (sign, expected, actual) = match kind {
+        "missing_required_field" => (
+            "-",
+            expected.unwrap_or_else(|| detail.to_string()),
+            observed.unwrap_or_else(|| "（实际响应未返回该字段）".to_string()),
+        ),
+        "forbidden_field" => (
+            "+",
+            "（参考结构不包含该字段）".to_string(),
+            observed.unwrap_or_else(|| detail.to_string()),
+        ),
+        _ => (
+            "~",
+            expected.unwrap_or_else(|| detail.to_string()),
+            observed.unwrap_or_else(|| "（未取到实际值）".to_string()),
+        ),
+    };
+    ModuleReportDiff {
+        sign: sign.into(),
+        path,
+        expected,
+        actual,
+    }
+}
+
+/// 把 JSON 值渲成逐行 HTML；diff_paths 命中的行加 `hit` 类做高亮。
+/// 路径约定与比对器一致：对象字段点分拼接，数组元素统一记作 `key[]`。
+fn json_diff_lines(value: &Value, diff_paths: &BTreeSet<String>) -> String {
+    let mut out = String::new();
+    write_json_lines(value, "", 0, diff_paths, &mut out);
+    out
+}
+
+fn push_json_line(
+    out: &mut String,
+    indent: usize,
+    text: &str,
+    path: &str,
+    hits: &BTreeSet<String>,
+) {
+    let class = if hits.contains(path) { "jl hit" } else { "jl" };
+    let _ = write_json_line(out, class, indent, text);
+}
+
+fn write_json_line(out: &mut String, class: &str, indent: usize, text: &str) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    write!(
+        out,
+        "<div class=\"{class}\">{}{}</div>",
+        "  ".repeat(indent),
+        escape(text)
+    )
+}
+
+fn write_json_lines(
+    value: &Value,
+    path: &str,
+    indent: usize,
+    hits: &BTreeSet<String>,
+    out: &mut String,
+) {
+    match value {
+        Value::Object(map) => {
+            let total = map.len();
+            for (index, (key, child)) in map.iter().enumerate() {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let comma = if index + 1 < total { "," } else { "" };
+                match child {
+                    Value::Object(_) | Value::Array(_) => {
+                        let (open, close) = if child.is_object() {
+                            ("{", "}")
+                        } else {
+                            ("[", "]")
+                        };
+                        push_json_line(
+                            out,
+                            indent,
+                            &format!("\"{key}\": {open}"),
+                            &child_path,
+                            hits,
+                        );
+                        write_json_lines(child, &child_path, indent + 1, hits, out);
+                        push_json_line(out, indent, &format!("{close}{comma}"), path, hits);
+                    }
+                    _ => push_json_line(
+                        out,
+                        indent,
+                        &format!("\"{key}\": {}{comma}", short_json(child)),
+                        &child_path,
+                        hits,
+                    ),
+                }
+            }
+        }
+        Value::Array(items) => {
+            let total = items.len();
+            let child_path = format!("{path}[]");
+            for (index, child) in items.iter().enumerate() {
+                let comma = if index + 1 < total { "," } else { "" };
+                match child {
+                    Value::Object(_) | Value::Array(_) => {
+                        let (open, close) = if child.is_object() {
+                            ("{", "}")
+                        } else {
+                            ("[", "]")
+                        };
+                        push_json_line(out, indent, open, &child_path, hits);
+                        write_json_lines(child, &child_path, indent + 1, hits, out);
+                        push_json_line(out, indent, &format!("{close}{comma}"), path, hits);
+                    }
+                    _ => push_json_line(
+                        out,
+                        indent,
+                        &format!("{}{comma}", short_json(child)),
+                        &child_path,
+                        hits,
+                    ),
+                }
+            }
+        }
+        _ => push_json_line(out, indent, &short_json(value), path, hits),
     }
 }
 
@@ -1119,8 +1358,60 @@ pub fn render_html(
                     .items
                     .iter()
                     .map(|entry| {
+                        let diff_row = if entry.diffs.is_empty() {
+                            String::new()
+                        } else {
+                            let diff_paths = entry
+                                .diffs
+                                .iter()
+                                .map(|diff| diff.path.clone())
+                                .collect::<BTreeSet<_>>();
+                            let body = if entry.reference.is_some() || entry.actual.is_some() {
+                                let reference = entry
+                                    .reference
+                                    .as_ref()
+                                    .map(|value| json_diff_lines(value, &diff_paths))
+                                    .unwrap_or_else(|| {
+                                        "<div class=\"jl miss\">（无参考样例）</div>".into()
+                                    });
+                                let actual = entry
+                                    .actual
+                                    .as_ref()
+                                    .map(|value| json_diff_lines(value, &diff_paths))
+                                    .unwrap_or_else(|| {
+                                        "<div class=\"jl miss\">（未取得实际响应）</div>".into()
+                                    });
+                                format!(
+                                    "<div class=\"side-diff\"><div class=\"col\"><div class=\"col-h\">参考结构</div><div class=\"code\">{reference}</div></div><div class=\"col\"><div class=\"col-h\">实际响应</div><div class=\"code\">{actual}</div></div></div>"
+                                )
+                            } else {
+                                let lines = entry
+                                    .diffs
+                                    .iter()
+                                    .map(|diff| {
+                                        let class = match diff.sign.as_str() {
+                                            "-" => "del",
+                                            "+" => "add",
+                                            _ => "chg",
+                                        };
+                                        format!(
+                                            "<div class=\"dl {class}\"><span class=\"ds\">{}</span><code class=\"dp\">{}</code><span class=\"dv\">应有：{}<br>实际：{}</span></div>",
+                                            escape(&diff.sign),
+                                            escape(&diff.path),
+                                            escape(&diff.expected),
+                                            escape(&diff.actual),
+                                        )
+                                    })
+                                    .collect::<String>();
+                                format!("<div class=\"dlines\">{lines}</div>")
+                            };
+                            format!(
+                                "<tr class=\"diff-row\"><td colspan=\"3\"><details class=\"diff\"><summary>对比参考结构（{} 处差异）</summary>{body}</details></td></tr>",
+                                entry.diffs.len(),
+                            )
+                        };
                         format!(
-                            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                            "<tr><td>{}</td><td>{}</td><td>{}</td></tr>{diff_row}",
                             escape(&entry.name),
                             chip(item_status_label(&entry.status), &entry.status),
                             escape(&entry.note),
