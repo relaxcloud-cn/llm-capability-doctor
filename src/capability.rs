@@ -391,6 +391,27 @@ fn any(aliases: &[&str], forbidden: &[&str]) -> AcceptanceRule {
     }
 }
 
+/// "材料未提供该信息"的等价说法类：开放自然语言里最高频的同义收敛点，
+/// 逐题枚举永远列不全，统一从这里取。
+const UNKNOWN_FACT: &[&str] = &[
+    "未提供",
+    "未说明",
+    "未知",
+    "无法得知",
+    "无法确定",
+    "未能得知",
+    "未提及",
+    "没有提供",
+    "无此信息",
+    "不得而知",
+];
+
+fn any_with_unknown(specific: &[&str], forbidden: &[&str]) -> AcceptanceRule {
+    let mut aliases: Vec<&str> = UNKNOWN_FACT.to_vec();
+    aliases.extend_from_slice(specific);
+    any(&aliases, forbidden)
+}
+
 fn groups(required: &[&[&str]], forbidden: &[&str]) -> AcceptanceRule {
     AcceptanceRule::MatchGroups {
         required_groups: required
@@ -861,7 +882,7 @@ fn c01_bank() -> Vec<CapabilitySample> {
             "insufficient-information",
             format!("材料：产品A本月销量增长20%。任务：产品B本月销量增长多少？{UNIFIED}"),
             "未提供",
-            any(&["未提供", "未说明", "未知", "无产品B", "没有产品B"], &[]),
+            any_with_unknown(&["无产品B", "没有产品B"], &[]),
         ),
         (
             5,
@@ -991,30 +1012,93 @@ fn strip_prompt_echo(text: &str, prompt: &str) -> String {
 
 /// 禁含值命中检查：命中项处在排除性语境（"除…外""不在""未超过"等）
 /// 时不算违规，只统计以断言/列举形式出现的禁含值。
-fn forbidden_hit(normalized: &str, forbidden: &[String]) -> bool {
+/// 禁含值是否构成真实违规。每次命中依次过三道豁免，任一命中都不豁免才算违规：
+/// 1) 否定词窗口（保留原逻辑）；
+/// 2) 命中所在句子含任一必需别名，且顿号不紧邻（说明禁含值是推理/对照叙述，
+///    如"动力车间隶属于生产部"，而不是被当答案枚举）；
+/// 3) 顿号紧邻（枚举形态）时，若完整答案已在另一句成立，仍豁免
+///    （如解释行"项目乙、丁为已完成"而答案句已列全甲丙）。
+fn forbidden_hit(normalized: &str, forbidden: &[String], required_groups: &[Vec<String>]) -> bool {
     const EXCLUSION: [&str; 11] = [
         "除", "不", "未", "非", "排除", "以外", "之外", "不符", "其他", "原", "之前",
     ];
+    if forbidden.is_empty() {
+        return false;
+    }
+    let sentences = split_sentences(normalized);
+    let sentence_complete = |(start, end): (usize, usize)| {
+        required_groups.iter().all(|group| {
+            group
+                .iter()
+                .any(|alias| !alias.is_empty() && normalized[start..end].contains(alias.as_str()))
+        })
+    };
     forbidden.iter().any(|raw| {
         let needle = normalize(raw);
-        !needle.is_empty()
-            && normalized.match_indices(&needle).any(|(position, _)| {
-                let head: String = normalized[..position]
-                    .chars()
-                    .rev()
-                    .take(12)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                let tail: String = normalized[position + needle.len()..]
-                    .chars()
-                    .take(12)
-                    .collect();
-                let window = format!("{head}{tail}");
-                !EXCLUSION.iter().any(|marker| window.contains(marker))
-            })
+        if needle.is_empty() {
+            return false;
+        }
+        normalized.match_indices(&needle).any(|(position, _)| {
+            let head: String = normalized[..position]
+                .chars()
+                .rev()
+                .take(12)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let tail: String = normalized[position + needle.len()..]
+                .chars()
+                .take(12)
+                .collect();
+            let window = format!("{head}{tail}");
+            if EXCLUSION.iter().any(|marker| window.contains(marker)) {
+                return false;
+            }
+            let Some((sentence_start, sentence_end)) = sentences
+                .iter()
+                .copied()
+                .find(|(start, end)| position >= *start && position + needle.len() <= *end)
+            else {
+                return true;
+            };
+            let hit_sentence = &normalized[sentence_start..sentence_end];
+            let sentence_has_required = required_groups
+                .iter()
+                .flatten()
+                .any(|alias| !alias.is_empty() && hit_sentence.contains(alias.as_str()));
+            if !sentence_has_required {
+                return true;
+            }
+            let enum_adjacent = normalized[..position].ends_with('、')
+                || normalized[position + needle.len()..].starts_with('、');
+            if !enum_adjacent {
+                return false;
+            }
+            let answer_complete_elsewhere = sentences
+                .iter()
+                .copied()
+                .any(|span| span != (sentence_start, sentence_end) && sentence_complete(span));
+            !answer_complete_elsewhere
+        })
     })
+}
+
+/// 按中英文句末标点与换行切句，返回字节区间（均落在字符边界上）。
+fn split_sentences(text: &str) -> Vec<(usize, usize)> {
+    const DELIMITERS: [char; 8] = ['。', '！', '？', '!', '?', '；', ';', '\n'];
+    let mut spans = Vec::new();
+    let mut start = 0usize;
+    for (index, character) in text.char_indices() {
+        if DELIMITERS.contains(&character) {
+            spans.push((start, index + character.len_utf8()));
+            start = index + character.len_utf8();
+        }
+    }
+    if start < text.len() {
+        spans.push((start, text.len()));
+    }
+    spans
 }
 
 /// 提取"最终答案"区域：优先最后一个"最终答案"标记到解释边界；
@@ -1124,7 +1208,7 @@ fn evaluate_acceptance(
                 (ScoreLabel::Correct, None)
             } else {
                 (
-                    ScoreLabel::Incomplete,
+                    ScoreLabel::Wrong,
                     Some(format!("内容正确但约束未满足：{}", failed.join("；"))),
                 )
             }
@@ -1225,11 +1309,29 @@ fn evaluate_acceptance(
     }
 }
 
+/// 别名匹配：子串命中，或"纯数字+短单位"别名与文本首个数字相等
+/// （单位可选，如期望"3个"、回答"3"；日期类长别名不参与数字等价，防止误放行）。
+fn alias_matches(normalized: &str, value: &str) -> bool {
+    let needle = normalize(value);
+    if normalized.contains(&needle) {
+        return true;
+    }
+    let Some(expected) = first_number(&needle) else {
+        return false;
+    };
+    let digits_len = needle.chars().take_while(|c| c.is_ascii_digit()).count();
+    let unit_len = needle.chars().count() - digits_len;
+    if digits_len == 0 || unit_len > 2 {
+        return false;
+    }
+    first_number(normalized).is_some_and(|actual| (actual - expected).abs() < f64::EPSILON)
+}
+
 /// 内容型规则（ContainsAll/ContainsAny/MatchGroups）在一段文本上的判定：
 /// Some(true)=通过，Some(false)=违规（命中禁含值），None=无结论（既无别名也无禁含）。
 fn content_verdict(rule: &AcceptanceRule, region: &str) -> Option<bool> {
     let normalized = normalize(region);
-    let (aliases_ok, forbidden) = match rule {
+    let (aliases_ok, required_groups, forbidden) = match rule {
         AcceptanceRule::ContainsAll {
             required,
             forbidden,
@@ -1237,12 +1339,20 @@ fn content_verdict(rule: &AcceptanceRule, region: &str) -> Option<bool> {
             required
                 .iter()
                 .all(|value| normalized.contains(&normalize(value))),
+            vec![required
+                .iter()
+                .map(|value| normalize(value))
+                .collect::<Vec<String>>()],
             forbidden,
         ),
         AcceptanceRule::ContainsAny { any_of, forbidden } => (
             any_of
                 .iter()
-                .any(|value| normalized.contains(&normalize(value))),
+                .any(|value| alias_matches(&normalized, value)),
+            vec![any_of
+                .iter()
+                .map(|value| normalize(value))
+                .collect::<Vec<String>>()],
             forbidden,
         ),
         AcceptanceRule::MatchGroups {
@@ -1254,17 +1364,40 @@ fn content_verdict(rule: &AcceptanceRule, region: &str) -> Option<bool> {
                     .iter()
                     .any(|alias| normalized.contains(&normalize(alias)))
             }),
+            required_groups
+                .iter()
+                .map(|group| {
+                    group
+                        .iter()
+                        .map(|value| normalize(value))
+                        .collect::<Vec<String>>()
+                })
+                .collect::<Vec<Vec<String>>>(),
             forbidden,
         ),
         _ => return Some(false),
     };
-    if forbidden_hit(&normalized, forbidden) {
+    if forbidden_hit(&normalized, forbidden, &required_groups) {
         return Some(false);
     }
     if aliases_ok { Some(true) } else { None }
 }
 
 /// IFEval 式单条可验证约束的程序化校验。
+/// 剥掉 markdown 代码围栏（```json … ```），让"用 JSON 输出"的题不因围栏误判。
+fn strip_code_fence(text: &str) -> &str {
+    let trimmed = text.trim();
+    let Some(rest) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let body = match rest.split_once('\n') {
+        Some((_, body)) => body,
+        None => rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric()),
+    };
+    let body = body.trim();
+    body.strip_suffix("```").map(str::trim_end).unwrap_or(body)
+}
+
 fn check_constraint(constraint: &OutputConstraint, text: &str) -> bool {
     let normalized = normalize(text);
     match constraint {
@@ -1274,21 +1407,23 @@ fn check_constraint(constraint: &OutputConstraint, text: &str) -> bool {
         OutputConstraint::KeywordMinCount(value, n) => {
             normalized.matches(&normalize(value)).count() >= *n as usize
         }
-        OutputConstraint::JsonObject => serde_json::from_str::<Value>(text.trim())
+        OutputConstraint::JsonObject => serde_json::from_str::<Value>(strip_code_fence(text))
             .map(|value| value.is_object())
             .unwrap_or(false),
-        OutputConstraint::JsonFieldCount(n) => serde_json::from_str::<Value>(text.trim())
+        OutputConstraint::JsonFieldCount(n) => serde_json::from_str::<Value>(strip_code_fence(text))
             .ok()
             .and_then(|value| value.as_object().map(|object| object.len() == *n as usize))
             .unwrap_or(false),
-        OutputConstraint::JsonRequiredFields(fields) => serde_json::from_str::<Value>(text.trim())
-            .ok()
-            .and_then(|value| {
-                value
-                    .as_object()
-                    .map(|object| fields.iter().all(|field| object.contains_key(field)))
-            })
-            .unwrap_or(false),
+        OutputConstraint::JsonRequiredFields(fields) => {
+            serde_json::from_str::<Value>(strip_code_fence(text))
+                .ok()
+                .and_then(|value| {
+                    value
+                        .as_object()
+                        .map(|object| fields.iter().all(|field| object.contains_key(field)))
+                })
+                .unwrap_or(false)
+        }
         OutputConstraint::LineCount(n) => {
             text.lines().filter(|line| !line.trim().is_empty()).count() == *n as usize
         }
@@ -1718,8 +1853,8 @@ fn c02_bank() -> Vec<CapabilitySample> {
             "missing-values",
             format!("{TICKETS}任务：工单W-3000的负责人是谁？{UNIFIED}"),
             "未提供",
-            any(
-                &["不存在", "未提供", "未知", "没有", "无此工单", "材料中没有"],
+            any_with_unknown(
+                &["不存在", "没有", "无此工单", "材料中没有"],
                 &["陈晨", "赵敏"],
             ),
         ),
@@ -2063,7 +2198,9 @@ fn c03_bank() -> Vec<CapabilitySample> {
             4,
             2,
             "multiple-tools",
-            "先查华东仓零件A的库存，然后给小周发个通知告诉他结果。".into(),
+            // 通知内容不依赖查询结果：能力模块为单轮调用，模型拿不到工具返回，
+            // 时序依赖型任务无法合理完成（真实误判回归：doubao/cybersec 均在此被误判）。
+            "先查华东仓零件A的库存，同时给小周发个通知，提醒他明天上午参加库存复盘会。".into(),
             "query_inventory+send_notification",
             calls(vec![
                 call(
@@ -2971,7 +3108,7 @@ fn c06_bank() -> Vec<CapabilitySample> {
                 "条件：同时满足「预算低于50万」且「状态为进行中」的项目才可启动。项目乙预算50万、状态已完成。任务：项目乙是否可启动？{UNIFIED}"
             ),
             "不可启动",
-            any(&["不可启动", "不可以", "否"], &[]),
+            any(&["不可启动", "不可以", "否", "不能启动", "无法启动", "启动不了", "不能"], &[]),
         ),
         // ---- 子域 2：时序排序（4 题）----
         (
@@ -3140,8 +3277,28 @@ fn c06_bank() -> Vec<CapabilitySample> {
 }
 /// 归一化：去空白、去 markdown 强调符（*、_）、小写。
 /// 模型常用 "**3** 个项目" 这类加粗写法，装饰符会把 "3个" 隔开导致别名漏判。
-fn normalize(value: &str) -> String {
+/// 判分前的字符折叠：把易被模型替换的 Unicode 变体映射回 ASCII 基准形。
+/// 连字符类（U+2010–U+2014、U+2212）、弯引号、全角 ASCII 区（U+FF01–U+FF5E）。
+fn fold_unicode_variants(value: &str) -> String {
     value
+        .chars()
+        .map(|character| {
+            let code = character as u32;
+            match character {
+                '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' | '\u{2014}' | '\u{2212}' => '-',
+                '\u{2018}' | '\u{2019}' => '\'',
+                '\u{201C}' | '\u{201D}' => '"',
+                _ if (0xFF01..=0xFF5E).contains(&code) => {
+                    char::from_u32(code - 0xFEE0).unwrap_or(character)
+                }
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+fn normalize(value: &str) -> String {
+    fold_unicode_variants(value)
         .split_whitespace()
         .collect::<String>()
         .replace(['*', '_'], "")
@@ -3569,6 +3726,97 @@ mod tests {
     }
 
     #[test]
+    fn fold_unicode_variants_maps_dashes_quotes_and_fullwidth() {
+        // 真实误判回归：cybersec C05-3-04 用 U+2011 连字符回答正确日期被判错
+        assert_eq!(fold_unicode_variants("2024‑03‑18"), "2024-03-18");
+        assert_eq!(fold_unicode_variants("“生产部”"), "\"生产部\"");
+        assert_eq!(fold_unicode_variants("预算：３０万"), "预算:30万");
+    }
+
+    #[test]
+    fn contains_any_accepts_unicode_variant_answers() {
+        let rule = any(&["2024-03-18", "3月18日"], &[]);
+        assert_eq!(
+            judged(rule.clone(), Some("零件D的验收日期为 **2024‑03‑18**。")).label,
+            ScoreLabel::Correct
+        );
+        assert_eq!(
+            judged(any(&["30万"], &[]), Some("预算：３０万")).label,
+            ScoreLabel::Correct
+        );
+    }
+
+    #[test]
+    fn contains_any_numeric_alias_accepts_bare_number() {
+        // 真实误判回归：cybersec C01-1-05 答"3"，期望"3个"
+        let rule = any(&["3个", "三个"], &[]);
+        assert_eq!(judged(rule.clone(), Some("3")).label, ScoreLabel::Correct);
+        assert_eq!(
+            judged(rule.clone(), Some("共 3 个项目")).label,
+            ScoreLabel::Correct
+        );
+        // 数字不等仍判错
+        assert_eq!(judged(rule, Some("13")).label, ScoreLabel::Wrong);
+        // 日期类长别名不参与数字等价，错误日期仍判错
+        let date_rule = any(&["2024-03-18"], &[]);
+        assert_eq!(
+            judged(date_rule, Some("2024-13-45")).label,
+            ScoreLabel::Wrong
+        );
+    }
+
+    #[test]
+    fn unknown_fact_aliases_accept_paraphrased_missing_info() {
+        // 真实误判回归：doubao C01-5-06 答"无法得知"被判错
+        let rule = any_with_unknown(&["无产品B", "没有产品B"], &[]);
+        assert_eq!(
+            judged(rule, Some("无法得知产品B本月销量增长的具体情况。")).label,
+            ScoreLabel::Correct
+        );
+    }
+
+    #[test]
+    fn json_constraint_accepts_markdown_code_fence() {
+        // 真实误判回归：cybersec C02-4-03 用 ```json 围栏输出正确 JSON 被判"约束未满足"
+        let rule = AcceptanceRule::ConstraintSet {
+            content: Box::new(any(&["ZC-3301"], &[])),
+            constraints: vec![OutputConstraint::JsonObject],
+        };
+        let fenced = "```json\n{\n  \"资产编号\": \"ZC-3301\",\n  \"报废日期\": null\n}\n```";
+        assert_eq!(judged(rule, Some(fenced)).label, ScoreLabel::Correct);
+    }
+
+    #[test]
+    fn forbidden_in_explanation_sentence_with_required_alias_is_forgiven() {
+        // 真实误判回归：doubao/cybersec C02-2-04 答对"生产部"，
+        // 推理句"动力车间隶属于生产部"触发禁含值被误判
+        let rule = any(&["生产部"], &["动力车间"]);
+        let output = "根据材料，空压机所属部门为动力车间，依据材料补充信息，动力车间隶属于生产部，因此空压机所属的上一级部门是生产部。";
+        assert_eq!(judged(rule.clone(), Some(output)).label, ScoreLabel::Correct);
+        // 答案真是禁含值时仍判错
+        assert_eq!(
+            judged(rule, Some("空压机所属的上一级部门是动力车间。")).label,
+            ScoreLabel::Wrong
+        );
+    }
+
+    #[test]
+    fn forbidden_in_separate_explanation_line_is_forgiven() {
+        // 真实误判回归：doubao C01-2-06，解释行复述"项目乙、丁为已完成"触发禁含值
+        let rule = groups(&[&["2", "两"], &["甲"], &["丙"]], &["乙", "丁", "已完成"]);
+        let output = "最终答案：未完成的项目共有2个，分别为项目甲、项目丙。\n依据给定材料：项目状态分为“进行中”和“已完成”，材料中项目甲、丙状态为进行中，项目乙、丁为已完成。";
+        assert_eq!(judged(rule, Some(output)).label, ScoreLabel::Correct);
+    }
+
+    #[test]
+    fn forbidden_alone_in_answer_sentence_still_fails() {
+        // 答案句本身是禁含值，必需别名只出现在别的句子 → 仍判错
+        let rule = groups(&[&["甲"], &["乙"]], &["丙"]);
+        let output = "最终答案：项目丙。\n材料还提到项目甲、项目乙。";
+        assert_eq!(judged(rule, Some(output)).label, ScoreLabel::Wrong);
+    }
+
+    #[test]
     fn match_groups_requires_every_group_and_blocks_forbidden() {
         let rule = AcceptanceRule::MatchGroups {
             required_groups: vec![vec!["项目乙".into(), "乙".into()], vec!["项目丁".into()]],
@@ -3589,7 +3837,7 @@ mod tests {
     }
 
     #[test]
-    fn constraint_set_marks_content_right_constraint_missing_as_incomplete() {
+    fn constraint_set_counts_content_right_constraint_missing_as_wrong() {
         let rule = AcceptanceRule::ConstraintSet {
             content: Box::new(AcceptanceRule::ContainsAny {
                 any_of: vec!["进行中".into()],
@@ -3599,10 +3847,10 @@ mod tests {
         };
         let pass = judged(rule.clone(), Some("进行中"));
         assert_eq!(pass.label, ScoreLabel::Correct);
-        let incomplete = judged(rule.clone(), Some("项目甲目前状态为进行中"));
-        assert_eq!(incomplete.label, ScoreLabel::Incomplete);
+        let wrong = judged(rule.clone(), Some("项目甲目前状态为进行中"));
+        assert_eq!(wrong.label, ScoreLabel::Wrong);
         assert!(
-            incomplete
+            wrong
                 .reason
                 .as_deref()
                 .is_some_and(|reason| reason.contains("不超过10字"))
@@ -3842,6 +4090,86 @@ mod tests {
                 .map(|(k, v)| (k.to_string(), v.to_string()))
                 .collect(),
         }
+    }
+
+    #[test]
+    fn real_run_outputs_from_2026_09_22_audit_regrade_as_expected() {
+        // 以下题目与模型输出均转录自 2026-09-22 两份真实报告
+        // （doubao-seed-2-0-mini / cybersec-1.0）的逐题审计，锁定重判预期。
+        // C06-1-04：语义等价的否定回答不得因词表漏收而误判。
+        let c06 = any(
+            &[
+                "不可启动",
+                "不可以",
+                "否",
+                "不能启动",
+                "无法启动",
+                "启动不了",
+                "不能",
+            ],
+            &[],
+        );
+        assert_eq!(
+            judged(
+                c06,
+                Some("不满足。项目乙的预算未低于 50 万且状态不是“进行中”，因此不能启动。")
+            )
+            .label,
+            ScoreLabel::Correct
+        );
+        // C01-2-06（doubao 原文）：解释行提及"乙、丁为已完成"不构成违规。
+        let c01_2_06 = groups(&[&["2", "两"], &["甲"], &["丙"]], &["乙", "丁", "已完成"]);
+        assert_eq!(
+            judged(
+                c01_2_06,
+                Some(
+                    "最终答案：未完成的项目共有2个，分别为项目甲、项目丙。\n依据给定材料：项目状态分为“进行中”和“已完成”，状态为进行中的项目属于未完成项目，材料中项目甲、丙状态为进行中，项目乙、丁为已完成，因此未完成项目为甲和丙。"
+                )
+            )
+            .label,
+            ScoreLabel::Correct
+        );
+        // C03-2-03：工具参数与规范名不符仍判错（严格口径保留）。
+        let c03 = AcceptanceRule::ToolCallsMatch {
+            expected_calls: vec![call(
+                "query_project",
+                &[("field", "负责人"), ("project", "项目甲")],
+            )],
+        };
+        assert_eq!(
+            judged_calls(
+                c03,
+                vec![call("query_project", &[("field", "负责人"), ("project", "甲")])]
+            )
+            .label,
+            ScoreLabel::Wrong
+        );
+    }
+
+    #[test]
+    fn c03_4_02_multi_tool_task_is_parallel_satisfiable() {
+        // 真实误判回归：原题"先查库存，然后发通知告诉他结果"依赖工具返回，
+        // 而能力模块是单轮调用，模型拿不到查询结果，永远无法合理完成。
+        // 改题后通知内容与查询结果无关，两个调用可在一轮内并行发出。
+        let sample = fixed_capability_catalog()
+            .into_iter()
+            .find(|sample| sample.id == "C03-4-02")
+            .expect("C03-4-02 存在于题库");
+        assert!(
+            sample.prompt.contains("同时"),
+            "题目应允许两个调用并行发出，不应存在时序依赖"
+        );
+        let observation = judged_calls(
+            sample.acceptance.clone(),
+            vec![
+                call(
+                    "query_inventory",
+                    &[("warehouse", "华东仓"), ("item", "零件A")],
+                ),
+                call("send_notification", &[("target", "小周")]),
+            ],
+        );
+        assert_eq!(observation.label, ScoreLabel::Correct);
     }
 
     #[test]
