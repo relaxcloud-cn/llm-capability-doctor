@@ -4,7 +4,7 @@ use llm_capability_doctor::cli::{
     generated_timestamp, render_report, run_with_executor_reporting, write_report,
 };
 use llm_capability_doctor::evaluation::{
-    AnalyzerConfig, analyze_modules, attach_report_items, build_module_reports, render_html,
+    AnalyzerConfig, analyze_modules, attach_report_items, build_module_reports,
     write_bundled_module_inputs,
 };
 use llm_capability_doctor::gui::{
@@ -295,10 +295,14 @@ fn main() {
             eprintln!("生成模块报告失败：{error}");
             std::process::exit(1);
         });
-        let html = render_html(&report, &module_report_paths).unwrap_or_else(|error| {
-            eprintln!("生成 HTML 报告失败：{error}");
+        // 富 HTML 报告：与 GUI 导出同源同构（report_rich 模块），读同一份 run.json。
+        // module_report_paths 仍会生成（分析产物落盘），只是不再用于 HTML 模板。
+        let _ = &module_report_paths;
+        let run_value = serde_json::to_value(&report).unwrap_or_else(|error| {
+            eprintln!("序列化运行报告失败：{error}");
             std::process::exit(1);
         });
+        let html = llm_capability_doctor::report_rich::render_rich_html(&run_value);
         let html_path = cli
             .html
             .map(std::path::PathBuf::from)

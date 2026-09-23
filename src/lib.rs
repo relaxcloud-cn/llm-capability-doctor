@@ -13,6 +13,7 @@ pub mod messages_probe;
 pub mod performance;
 pub mod preflight;
 pub mod records;
+pub mod report_rich;
 pub mod runtime;
 pub mod specification;
 pub mod stream_probe;
