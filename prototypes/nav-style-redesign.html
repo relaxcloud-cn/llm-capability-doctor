@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>侧栏导航 · 三版样式</title>
+<style>
+:root{
+  --ink:#141a24;--muted:#5c6675;--faint:#8f99a8;--line:#e4e7eb;--canvas:#f4f5f7;--soft:#fafbfc;
+  --accent:#2563eb;--accent-soft:#eaf0fe;
+  --graphite:#47505c;--graphite-soft:#eceef2;
+  --pass:#056c4e;--pass-bg:#e6f4ee;
+  --warn:#a16207;--warn-bg:#fdf3e0;
+}
+*{box-sizing:border-box;margin:0}
+body{background:#e9edf1;color:var(--ink);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:1240px;margin:0 auto;padding:44px 28px 72px}
+h1{font-size:22px;font-weight:700;letter-spacing:.2px}
+.lede{color:var(--muted);font-size:13px;margin:8px 0 36px;max-width:780px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:34px;align-items:start}
+.variant h3{font-size:15px;font-weight:700;margin:18px 0 4px}
+.variant .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);margin-bottom:8px}
+.variant p{font-size:12.5px;color:var(--muted);margin-bottom:8px}
+.variant ul{list-style:none;padding:0;font-size:12px;color:var(--muted)}
+.variant li{padding:2px 0 2px 18px;position:relative}
+.variant li::before{content:"·";position:absolute;left:6px;color:var(--faint)}
+.variant li.bad::before{content:"×";color:#b91c1c}
+.frame{background:#fff;border:1px solid #d6dce3;border-radius:14px;padding:18px;box-shadow:0 14px 34px rgba(20,26,36,.10);display:flex;justify-content:center}
+
+/* 侧栏公共骨架 */
+.side{width:224px;background:var(--canvas);border-radius:10px;display:flex;flex-direction:column;min-height:620px}
+.brand{display:flex;gap:10px;align-items:center;padding:0 18px;height:64px}
+.brand .logo{width:34px;height:34px;border-radius:8.5px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px}
+.brand b{font-size:15px;display:block;line-height:1.2}
+.brand span{font-size:10.5px;color:var(--faint)}
+.svc-card{display:flex;gap:9px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px;margin:0 12px 10px}
+.svc-card .ic{width:30px;height:30px;border-radius:7px;background:var(--canvas);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;flex:none}
+.svc-card .tx{min-width:0;flex:1}
+.svc-card .tx b{display:block;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc-card .tx span{display:block;font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc-card .chev{color:var(--faint);font-size:9px}
+.cta-wide{margin:0 12px 14px;height:34px;border-radius:8px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 5px rgba(37,99,235,.3)}
+.hair{height:1px;background:var(--line);margin:14px 14px 12px}
+.side .flexsp{flex:1}
+.env{padding:10px 18px 14px;font-size:10px;color:var(--faint);display:flex;gap:6px;align-items:center}
+.gearrow{display:flex;justify-content:flex-end;padding:0 16px}
+.gearrow .g{width:30px;height:30px;border-radius:7px;border:1px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px}
+/* 状态卡（与已上线版一致，作上下文参照） */
+.status-card{margin:0 12px;background:#fff;border:1px solid var(--line);border-radius:11px;padding:15px 16px}
+.status-card .cap{font-size:10.5px;color:var(--faint);display:flex;justify-content:space-between}
+.verdict-line{display:flex;align-items:center;gap:7px;margin:9px 0 12px;font-size:12px;font-weight:600;color:var(--warn)}
+.verdict-line .dot{width:16px;height:16px;border-radius:50%;background:var(--warn);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.mods{display:flex;flex-direction:column;gap:9px}
+.mods .m{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--muted)}
+.mods .m i{width:7px;height:7px;border-radius:50%;flex:none}
+.mods .m .st{margin-left:auto;font-size:10.5px;color:var(--faint)}
+.go-report{margin-top:12px;font-size:11px;color:var(--accent);font-weight:600}
+
+/* ========== 方案一：双行入口 ========== */
+.v1nav{display:flex;flex-direction:column;gap:6px;margin:2px 12px 0}
+.v1item{display:flex;gap:10px;align-items:center;padding:9px 11px;border-radius:10px}
+.v1item .ic{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:13px;flex:none}
+.v1item .tx{min-width:0}
+.v1item .tx b{display:block;font-size:12.5px;font-weight:650;line-height:1.35}
+.v1item .tx span{display:block;font-size:10.5px;color:var(--faint);line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v1item.on{background:#fff;border:1px solid var(--line);box-shadow:0 1px 3px rgba(20,26,36,.05);position:relative}
+.v1item.on::before{content:"";position:absolute;left:-1px;top:9px;bottom:9px;width:3px;border-radius:3px;background:var(--accent)}
+.v1item.on .ic{background:var(--accent-soft);color:var(--accent)}
+.v1item:not(.on) .ic{background:var(--graphite-soft);color:var(--muted)}
+.v1item:not(.on) .tx b{color:var(--muted);font-weight:550}
+
+/* ========== 方案二：胶囊轨道 ========== */
+.track{margin:2px 12px 0;background:#e7ebef;border-radius:11px;padding:4px;display:flex;flex-direction:column;gap:3px}
+.tseg{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:8px;color:var(--muted);font-size:12.5px}
+.tseg .ic{font-size:13px;width:18px;text-align:center}
+.tseg .cnt{margin-left:auto;background:#fff;color:var(--muted);font-size:10px;font-weight:700;padding:1px 8px;border-radius:99px;border:1px solid var(--line)}
+.tseg.on{background:#fff;box-shadow:0 2px 6px rgba(20,26,36,.09);color:var(--ink);font-weight:650}
+.tseg.on .ic{color:var(--accent)}
+.tseg.on .cnt{background:var(--accent-soft);color:var(--accent);border-color:transparent}
+
+/* ========== 方案三：彩色磁贴列表 ========== */
+.v3cap{font-size:10.5px;font-weight:600;color:var(--faint);letter-spacing:.05em;padding:2px 16px 6px}
+.v3nav{display:flex;flex-direction:column;margin:0 12px}
+.v3item{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;border:1px solid transparent}
+.v3item .tile{width:32px;height:32px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:14px;flex:none;color:#fff}
+.v3item b{font-size:12.5px;font-weight:600}
+.v3item .cnt{margin-left:auto;font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:99px;background:var(--graphite-soft);color:var(--muted)}
+.v3item.on{background:#fff;border-color:var(--line);box-shadow:0 1px 3px rgba(20,26,36,.05);position:relative}
+.v3item.on::before{content:"";position:absolute;left:-1px;top:8px;bottom:8px;width:3px;border-radius:3px;background:var(--accent)}
+.v3item:not(.on) .tile{opacity:.72}
+.v3item:not(.on) b{color:var(--muted)}
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>侧栏导航 · 三版样式</h1>
+  <p class="lede">现状是两行裸图标+文字，没有容器和层次。三版都保持「品牌 → 服务 → 新建检测 → 导航 → 上次体检卡」的结构，只换导航区的样式。注意：导航用蓝色与石墨灰，绿/琥珀/红仍只留给体检状态。</p>
+
+  <div class="grid">
+
+    <!-- ============ 方案一 ============ -->
+    <section class="variant">
+      <div class="frame">
+        <div class="side">
+          <div class="brand"><div class="logo">✚</div><div><b>AgentCheck</b><span>模型服务体检</span></div></div>
+          <div class="svc-card"><div class="ic">⌁</div><div class="tx"><b>agent-prod</b><span>gateway.example.inva…</span></div><div class="chev">▾</div></div>
+          <div class="cta-wide">＋ 新建检测</div>
+
+          <div class="v1nav">
+            <div class="v1item on">
+              <div class="ic">▦</div>
+              <div class="tx"><b>工作台</b><span>发起检测 · 查看进度</span></div>
+            </div>
+            <div class="v1item">
+              <div class="ic">🕘</div>
+              <div class="tx"><b>检测记录</b><span>23 条 · 4 个模型</span></div>
+            </div>
+          </div>
+
+          <div class="hair"></div>
+          <div class="status-card">
+            <div class="cap"><b>上次体检</b><span>9月23日 08:55</span></div>
+            <div class="verdict-line"><span class="dot">!</span>可以使用，但有使用限制</div>
+            <div class="mods">
+              <div class="m"><i style="background:var(--pass)"></i>规格实测<span class="st">已完成</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>能力跑分<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>性能实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>智能体实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>基线对比<span class="st">有限制</span></div>
+            </div>
+            <div class="go-report">查看当前报告 →</div>
+          </div>
+          <div class="flexsp"></div>
+          <div class="gearrow"><div class="g">⚙</div></div>
+          <div class="env">Ⓛ 本机环境 · CLI 已就绪</div>
+        </div>
+      </div>
+      <span class="tag">方案一 · 双行入口</span>
+      <h3>每个入口说清楚自己是干什么的</h3>
+      <p>导航项加第二行说明：工作台=「发起检测 · 查看进度」，检测记录=「23 条 · 4 个模型」。选中项白卡+左蓝条+蓝图标，未选中灰磁贴。</p>
+      <ul>
+        <li>副标题让两个入口自解释，客户不用猜</li>
+        <li>检测记录把数量前置（23 条 · 4 个模型），信息密度更高</li>
+        <li>行高 ~50px，与下方状态卡的分量平衡</li>
+        <li class="bad">占垂直空间最多（两行）</li>
+      </ul>
+    </section>
+
+    <!-- ============ 方案二 ============ -->
+    <section class="variant">
+      <div class="frame">
+        <div class="side">
+          <div class="brand"><div class="logo">✚</div><div><b>AgentCheck</b><span>模型服务体检</span></div></div>
+          <div class="svc-card"><div class="ic">⌁</div><div class="tx"><b>agent-prod</b><span>gateway.example.inva…</span></div><div class="chev">▾</div></div>
+          <div class="cta-wide">＋ 新建检测</div>
+
+          <div class="track">
+            <div class="tseg on"><span class="ic">▦</span>工作台</div>
+            <div class="tseg"><span class="ic">🕘</span>检测记录<span class="cnt">23</span></div>
+          </div>
+
+          <div class="hair"></div>
+          <div class="status-card">
+            <div class="cap"><b>上次体检</b><span>9月23日 08:55</span></div>
+            <div class="verdict-line"><span class="dot">!</span>可以使用，但有使用限制</div>
+            <div class="mods">
+              <div class="m"><i style="background:var(--pass)"></i>规格实测<span class="st">已完成</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>能力跑分<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>性能实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>智能体实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>基线对比<span class="st">有限制</span></div>
+            </div>
+            <div class="go-report">查看当前报告 →</div>
+          </div>
+          <div class="flexsp"></div>
+          <div class="gearrow"><div class="g">⚙</div></div>
+          <div class="env">Ⓛ 本机环境 · CLI 已就绪</div>
+        </div>
+      </div>
+      <span class="tag">方案二 · 胶囊轨道</span>
+      <h3>把导航装进一个「轨道」容器</h3>
+      <p>灰色圆角轨道包裹两个胶囊段，选中段白色浮起+蓝色图标，计数变成蓝色小徽标。一眼可辨「这是一个切换器」。</p>
+      <ul>
+        <li>有明确的容器和选中浮起感，最像「控件」而不是文字列表</li>
+        <li>高度最紧凑（~70px），把空间让给状态卡</li>
+        <li>和顶部工具栏的视觉语言（分段控制）呼应</li>
+        <li class="bad">没有说明性信息，入口语义靠图标和文字本身</li>
+        <li class="bad">两条以上导航时轨道会变长，扩展性一般</li>
+      </ul>
+    </section>
+
+    <!-- ============ 方案三 ============ -->
+    <section class="variant">
+      <div class="frame">
+        <div class="side">
+          <div class="brand"><div class="logo">✚</div><div><b>AgentCheck</b><span>模型服务体检</span></div></div>
+          <div class="svc-card"><div class="ic">⌁</div><div class="tx"><b>agent-prod</b><span>gateway.example.inva…</span></div><div class="chev">▾</div></div>
+          <div class="cta-wide">＋ 新建检测</div>
+
+          <div class="v3cap">导航</div>
+          <div class="v3nav">
+            <div class="v3item on">
+              <div class="tile" style="background:var(--accent)">▦</div>
+              <b>工作台</b>
+            </div>
+            <div class="v3item">
+              <div class="tile" style="background:var(--graphite)">🕘</div>
+              <b>检测记录</b>
+              <span class="cnt">23</span>
+            </div>
+          </div>
+
+          <div class="hair"></div>
+          <div class="status-card">
+            <div class="cap"><b>上次体检</b><span>9月23日 08:55</span></div>
+            <div class="verdict-line"><span class="dot">!</span>可以使用，但有使用限制</div>
+            <div class="mods">
+              <div class="m"><i style="background:var(--pass)"></i>规格实测<span class="st">已完成</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>能力跑分<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>性能实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>智能体实测<span class="st">有限制</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>基线对比<span class="st">有限制</span></div>
+            </div>
+            <div class="go-report">查看当前报告 →</div>
+          </div>
+          <div class="flexsp"></div>
+          <div class="gearrow"><div class="g">⚙</div></div>
+          <div class="env">Ⓛ 本机环境 · CLI 已就绪</div>
+        </div>
+      </div>
+      <span class="tag">方案三 · 彩色磁贴列表</span>
+      <h3>给每个目的地一个固定的颜色磁贴</h3>
+      <p>小节标题「导航」+ 实心彩色磁贴（工作台=蓝、检测记录=石墨），选中项白卡浮起+左蓝条，未选中磁贴降透明度。</p>
+      <ul>
+        <li>颜色磁贴是记忆锚点，扫一眼就能定位</li>
+        <li>有「导航」小节标题，与下方「上次体检」形成两段式结构</li>
+        <li>单行高度，比方案一省空间</li>
+        <li class="bad">「导航」标题占一行却信息量低</li>
+        <li class="bad">颜色数量多了以后容易花（只够 2-3 个目的地）</li>
+      </ul>
+    </section>
+
+  </div>
+</main>
+</body>
+</html>

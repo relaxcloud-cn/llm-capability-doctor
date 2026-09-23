@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>侧栏布局 · 三版设计方案</title>
+<style>
+:root{
+  --ink:#141a24;--muted:#5c6675;--faint:#8f99a8;--line:#e4e7eb;--canvas:#f4f5f7;--soft:#fafbfc;
+  --accent:#2563eb;--accent-soft:#eaf0fe;
+  --pass:#056c4e;--pass-bg:#e6f4ee;
+  --warn:#a16207;--warn-bg:#fdf3e0;
+  --block:#b91c1c;--block-bg:#fdeeed;
+  --unknown:#6f7b86;--unknown-bg:#eef1f4;
+}
+*{box-sizing:border-box;margin:0}
+body{background:#e9edf1;color:var(--ink);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:1240px;margin:0 auto;padding:44px 28px 72px}
+h1{font-size:22px;font-weight:700;letter-spacing:.2px}
+.lede{color:var(--muted);font-size:13px;margin:8px 0 36px;max-width:760px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:34px;align-items:start}
+.variant h3{font-size:15px;font-weight:700;margin:18px 0 4px}
+.variant .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:99px;background:var(--accent-soft);color:var(--accent);margin-bottom:8px}
+.variant p{font-size:12.5px;color:var(--muted);margin-bottom:8px}
+.variant ul{list-style:none;padding:0;font-size:12px;color:var(--muted)}
+.variant li{padding:2px 0 2px 18px;position:relative}
+.variant li::before{content:"·";position:absolute;left:6px;color:var(--faint)}
+.variant li.bad::before{content:"×";color:var(--block)}
+.frame{background:#fff;border:1px solid #d6dce3;border-radius:14px;padding:18px;box-shadow:0 14px 34px rgba(20,26,36,.10);display:flex;gap:14px;align-items:stretch}
+
+/* ============ 侧栏通用 ============ */
+.side{background:var(--canvas);display:flex;flex-direction:column;flex:none}
+.side .hair{height:1px;background:var(--line);margin:12px 0}
+
+/* ---- 方案一：56px 图标栏 ---- */
+.rail{width:56px;border-radius:10px;padding:12px 0;align-items:center;gap:10px}
+.rail .logo{width:32px;height:32px;border-radius:8.5px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px}
+.rail .svc{width:34px;height:34px;border-radius:9px;background:#fff;border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:13px;position:relative}
+.rail .svc i{position:absolute;right:-2px;bottom:-2px;width:9px;height:9px;border-radius:50%;background:var(--pass);border:2px solid var(--canvas)}
+.rail .cta{width:34px;height:34px;border-radius:9px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600}
+.rail .nav{width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:14px;position:relative}
+.rail .nav.on{background:#fff;border:1px solid var(--line);color:var(--ink)}
+.rail .nav .badge{position:absolute;top:-3px;right:-3px;min-width:15px;height:15px;padding:0 4px;border-radius:99px;background:var(--accent);color:#fff;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--canvas)}
+.rail .sp{flex:1}
+.rail .gear{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px}
+
+/* ---- 方案二：224px 状态面板 ---- */
+.side224{width:224px;border-radius:10px;padding:0}
+.brand{display:flex;gap:10px;align-items:center;padding:0 18px;height:64px}
+.brand .logo{width:34px;height:34px;border-radius:8.5px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:17px}
+.brand b{font-size:15px;display:block;line-height:1.2}
+.brand span{font-size:10.5px;color:var(--faint)}
+.svc-card{display:flex;gap:9px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px;margin:0 12px 10px}
+.svc-card .ic{width:30px;height:30px;border-radius:7px;background:var(--canvas);display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px;flex:none}
+.svc-card .tx{min-width:0;flex:1}
+.svc-card .tx b{display:block;font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc-card .tx span{display:block;font-size:10.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.svc-card .chev{color:var(--faint);font-size:9px}
+.cta-wide{margin:0 12px 16px;height:34px;border-radius:8px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px;box-shadow:0 2px 5px rgba(37,99,235,.3)}
+.navrow{display:flex;gap:9px;align-items:center;padding:7px 15px;color:var(--muted);font-size:12.5px}
+.navrow.on{color:var(--ink);font-weight:600;position:relative;background:#fff}
+.navrow.on::before{content:"";position:absolute;left:0;top:6px;bottom:6px;width:3px;border-radius:3px;background:var(--accent)}
+.navrow .n-ic{width:22px;text-align:center;font-size:13px}
+.navrow .cnt{margin-left:auto;background:var(--unknown-bg);color:var(--muted);font-size:10px;font-weight:700;padding:1px 7px;border-radius:99px}
+.status-card{margin:2px 12px 0;background:#fff;border:1px solid var(--line);border-radius:11px;padding:13px 14px}
+.status-card .cap{font-size:10.5px;color:var(--faint);letter-spacing:.05em;display:flex;justify-content:space-between}
+.status-card .cap b{font-weight:600;color:var(--muted)}
+.verdict-line{display:flex;align-items:center;gap:7px;margin:7px 0 10px;font-size:12px;font-weight:600;color:var(--warn)}
+.verdict-line .dot{width:16px;height:16px;border-radius:50%;background:var(--warn);color:#fff;font-size:9px;display:flex;align-items:center;justify-content:center;font-weight:700}
+.mods{display:flex;flex-direction:column;gap:6px}
+.mods .m{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--muted)}
+.mods .m i{width:7px;height:7px;border-radius:50%;flex:none}
+.mods .m .st{margin-left:auto;font-size:10px;color:var(--faint)}
+.go-report{margin-top:11px;font-size:11px;color:var(--accent);font-weight:600;display:flex;align-items:center;gap:4px}
+.side224 .flexsp{flex:1}
+.env{padding:10px 18px 14px;font-size:10px;color:var(--faint);display:flex;gap:6px;align-items:center}
+.gearrow{display:flex;justify-content:flex-end;padding:0 16px}
+.gearrow .g{width:30px;height:30px;border-radius:7px;border:1px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:12px}
+.runstate{margin:0 12px 10px;padding:9px 11px;border-radius:8px;background:var(--accent-soft);color:var(--accent)}
+.runstate .t{font-size:11px;font-weight:600;display:flex;justify-content:space-between}
+.runstate .bar{height:4px;border-radius:99px;background:#fff;margin-top:6px;overflow:hidden}
+.runstate .bar i{display:block;height:100%;width:62%;background:var(--accent);border-radius:99px}
+
+/* ---- 方案三：导航上置 ---- */
+.stage3{flex:1;display:flex;flex-direction:column;min-width:0}
+.side3{width:190px;border-radius:10px;padding:0}
+.side3 .cta-wide{margin-top:2px}
+.topnav{display:flex;gap:6px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:4px;margin-bottom:12px}
+.topnav span{flex:1;text-align:center;padding:6px 0;font-size:12px;color:var(--muted);border-radius:7px}
+.topnav span.on{background:var(--canvas);color:var(--ink);font-weight:600}
+.content-ghost{flex:1;border-radius:10px;background:var(--soft);border:1px dashed #d3dae1;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:12px}
+.paired{display:flex;gap:14px;flex:1;min-width:0}
+.paired .side224{width:190px}
+.paired .stage3{width:auto}
+
+@media (max-width:980px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>侧栏布局 · 三版方向</h1>
+  <p class="lede">现状：只有「工作台 / 检测记录」两个导航项，摘掉报告树后下半截大面积留白。三版思路不同——收窄、填充、上置。每版都包含：品牌、当前服务、新建检测、两个导航、设置与本机环境，以及运行中的形态。</p>
+
+  <div class="grid">
+
+    <!-- ================= 方案一 ================= -->
+    <section class="variant">
+      <div class="frame">
+        <div class="side rail">
+          <div class="logo">✚</div>
+          <div class="svc">⌁<i></i></div>
+          <div class="hair" style="width:26px"></div>
+          <div class="cta">＋</div>
+          <div class="nav on">▦</div>
+          <div class="nav">🕘<span class="badge">23</span></div>
+          <div class="sp"></div>
+          <div class="gear">⚙</div>
+        </div>
+        <div class="stage3" style="min-height:520px">
+          <div class="content-ghost">内容区（宽度 +168px）</div>
+        </div>
+      </div>
+      <span class="tag">方案一 · 图标导航栏（56px）</span>
+      <h3>把侧栏收成一条工具轨</h3>
+      <p>导航只有两项，撑不起 224px 的宽度，那就把宽度还给内容。品牌、服务、新建、导航、设置全部图标化，服务名与记录数靠徽标和悬停呈现。</p>
+      <ul>
+        <li>内容区宽度 +168px，报告与明细一屏能看到更多列</li>
+        <li>「空」的问题从根上消失——工具轨本来就应该是稀疏的</li>
+        <li>运行中时轨道底部出现蓝色进度点，不占位</li>
+        <li class="bad">服务身份弱化（只剩图标 + 状态点），重服务名/地址要悬停</li>
+        <li class="bad">对新用户不够直白，依赖图标认知</li>
+      </ul>
+    </section>
+
+    <!-- ================= 方案二 ================= -->
+    <section class="variant">
+      <div class="frame" style="flex-direction:column">
+        <div class="side side224" style="min-height:560px">
+          <div class="brand"><div class="logo">✚</div><div><b>AgentCheck</b><span>模型服务体检</span></div></div>
+          <div class="svc-card"><div class="ic">⌁</div><div class="tx"><b>agent-prod</b><span>gateway.example.inva…</span></div><div class="chev">▾</div></div>
+          <div class="cta-wide">＋ 新建检测</div>
+          <div class="navrow on"><span class="n-ic">▦</span>工作台</div>
+          <div class="navrow"><span class="n-ic">🕘</span>检测记录<span class="cnt">23</span></div>
+
+          <div class="hair" style="margin:10px 14px"></div>
+
+          <!-- 空闲态：当前服务的上次体检状态 -->
+          <div class="status-card">
+            <div class="cap"><b>上次体检</b><span>9月23日 08:55</span></div>
+            <div class="verdict-line"><span class="dot">!</span>可以使用，但有使用限制</div>
+            <div class="mods">
+              <div class="m"><i style="background:var(--pass)"></i>规格实测<span class="st">已完成</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>能力跑分<span class="st">有问题</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>性能实测<span class="st">有问题</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>智能体实测<span class="st">有问题</span></div>
+              <div class="m"><i style="background:var(--warn)"></i>基线对比<span class="st">有问题</span></div>
+            </div>
+            <div class="go-report">查看当前报告 →</div>
+          </div>
+
+          <div class="flexsp"></div>
+
+          <!-- 运行中替换为这块（示意） -->
+          <div class="runstate" style="margin-bottom:10px">
+            <div class="t"><span>检测中 · 智能体实测</span><span>62%</span></div>
+            <div class="bar"><i></i></div>
+          </div>
+
+          <div class="gearrow"><div class="g">⚙</div></div>
+          <div class="env">Ⓛ 本机环境 · CLI 已就绪</div>
+        </div>
+      </div>
+      <span class="tag">方案二 · 状态面板（保持 224px）</span>
+      <h3>用「当前服务状态」填，而不是历史列表</h3>
+      <p>结构不变，下半截放一张<b>上次体检状态卡</b>：结论 + 五模块点阵 + 直达当前报告。侧栏随时回答「这个服务现在什么状态」。检测运行时该区域替换为实时进度面板。</p>
+      <ul>
+        <li>填进来的是当前服务的状态，不是记录列表——和「历史去检测记录页」的模型一致</li>
+        <li>五模块点阵延续旧版大纲的状态语义，但只反映当前一次</li>
+        <li>运行中时状态卡让位给进度面板，「正在测什么」常驻可见</li>
+        <li class="bad">与首页的上次结论摘要有部分重复</li>
+        <li class="bad">首次使用（无记录）时该区域回到留白</li>
+      </ul>
+    </section>
+
+    <!-- ================= 方案三 ================= -->
+    <section class="variant">
+      <div class="frame">
+        <div class="side side224" style="min-height:560px;width:190px">
+          <div class="brand"><div class="logo">✚</div><div><b>AgentCheck</b><span>模型服务体检</span></div></div>
+          <div class="svc-card"><div class="ic">⌁</div><div class="tx"><b>agent-prod</b><span>gateway.example.inva…</span></div><div class="chev">▾</div></div>
+          <div class="cta-wide">＋ 新建检测</div>
+          <div class="flexsp"></div>
+          <div class="runstate">
+            <div class="t"><span>检测中</span><span>62%</span></div>
+            <div class="bar"><i></i></div>
+          </div>
+          <div class="gearrow"><div class="g">⚙</div></div>
+          <div class="env">Ⓛ 本机环境 · CLI 已就绪</div>
+        </div>
+        <div class="stage3">
+          <div class="topnav"><span class="on">工作台</span><span>检测记录 23</span></div>
+          <div class="content-ghost">内容区（导航在页顶）</div>
+        </div>
+      </div>
+      <span class="tag">方案三 · 导航上置（侧栏瘦身到 190px）</span>
+      <h3>两项导航不配拥有侧栏</h3>
+      <p>「工作台 / 检测记录」搬到内容区顶部分段导航，侧栏只留全局的东西：品牌、当前服务、新建检测、运行状态、设置。没有导航就没有「空」。</p>
+      <ul>
+        <li>侧栏职责变纯粹：它是「发起区」，不是「目录」</li>
+        <li>导航放页顶，与内容同宽，切换不跨视线</li>
+        <li>运行中状态天然属于侧栏底部，不挤占导航</li>
+        <li class="bad">页面顶部多一行，内容起位下移约 44px</li>
+        <li class="bad">工具栏标题与分段导航并排，需要重新编排顶栏</li>
+      </ul>
+    </section>
+
+  </div>
+</main>
+</body>
+</html>

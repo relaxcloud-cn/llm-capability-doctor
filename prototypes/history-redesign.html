@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>检测记录页 · 重设计方案</title>
+<style>
+:root{
+  --ink:#1b2733;--muted:#5d6b78;--faint:#8d99a5;--line:#e3e9ef;--canvas:#f5f7f9;--soft:#fafcfd;
+  --accent:#1769aa;--accent-soft:#eaf2f9;
+  --pass:#1c7f47;--pass-bg:#e9f6ef;
+  --warn:#9c5d08;--warn-bg:#fdf3e3;
+  --block:#b3352c;--block-bg:#fdefee;
+  --unknown:#6f7b86;--unknown-bg:#eef1f4;
+}
+*{box-sizing:border-box;margin:0}
+body{background:var(--canvas);color:var(--ink);font:14px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC","Segoe UI",sans-serif;-webkit-font-smoothing:antialiased}
+main{max-width:880px;margin:0 auto;padding:40px 24px 64px}
+
+/* ---------- 页头：与列表分离 ---------- */
+.pagehead{display:flex;align-items:first-baseline;gap:10px;margin-bottom:18px}
+.pagehead h1{font-size:23px;font-weight:700;letter-spacing:.2px}
+.pagehead .count{font-size:15px;color:var(--faint)}
+.toolbar{display:flex;gap:10px;margin-bottom:22px}
+.seg{display:flex;background:#e9eef3;border-radius:8px;padding:3px}
+.seg span{padding:5px 14px;font-size:12.5px;color:var(--muted);border-radius:6px}
+.seg .on{background:#fff;color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgba(23,33,43,.08)}
+.search{flex:1;display:flex;align-items:center;gap:7px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:0 12px;height:34px;color:var(--faint);font-size:13px}
+
+/* ---------- 记录卡片：结论先行 ---------- */
+.list{display:flex;flex-direction:column;gap:10px}
+.rec{display:flex;gap:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:15px 18px 14px 14px;transition:border-color .15s}
+.rec:hover{border-color:#c8d4de}
+.rec.picked{background:var(--accent-soft);border-color:#c6dcf0}
+.pick{display:flex;align-items:flex-start;padding-top:3px}
+.pick input{width:15px;height:15px;accent-color:var(--accent)}
+.rec-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:8px}
+.rec-main{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.verdict{display:inline-flex;align-items:center;gap:7px;padding:4px 12px 4px 5px;border-radius:99px;font-size:12.5px;font-weight:600}
+.verdict i{font-style:normal;width:20px;height:20px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#fff}
+.v-pass{background:var(--pass-bg);color:var(--pass)}   .v-pass i{background:var(--pass)}
+.v-warn{background:var(--warn-bg);color:var(--warn)}   .v-warn i{background:var(--warn)}
+.v-block{background:var(--block-bg);color:var(--block)} .v-block i{background:var(--block)}
+.v-unknown{background:var(--unknown-bg);color:var(--unknown)} .v-unknown i{background:var(--unknown)}
+.model{font-size:15px;font-weight:650;letter-spacing:.2px}
+.host{font-size:12px;color:var(--faint)}
+.when{margin-left:auto;font-size:12px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.rec-sub{display:flex;align-items:center;gap:14px}
+.stats{display:flex;gap:6px;align-items:center;flex:none}
+.stat{font-size:11.5px;padding:2px 9px;border-radius:6px;background:var(--soft);border:1px solid var(--line);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.stat.bad{color:var(--block);background:var(--block-bg);border-color:#f2d4d1}
+.stat.done{color:var(--pass)}
+.limit{flex:1;min-width:0;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.acts{display:flex;gap:8px;flex:none}
+.btn{display:inline-flex;align-items:center;gap:6px;height:29px;padding:0 13px;border-radius:8px;border:1px solid var(--line);background:#fff;color:var(--muted);font-size:12.5px;font-weight:500;cursor:pointer;transition:all .15s}
+.btn:hover{border-color:#c8d4de;color:var(--ink)}
+.btn.open:hover{color:var(--accent);border-color:#b9d3ea}
+.btn.export{color:var(--accent);border-color:#b9d3ea;background:var(--accent-soft)}
+.btn.export:hover{background:#dfeaf5}
+.btn svg{width:12px;height:12px}
+
+/* ---------- 底部对比条 ---------- */
+.compare{display:flex;align-items:center;gap:14px;margin-top:14px;padding:12px 16px;background:var(--soft);border:1px solid var(--line);border-radius:10px}
+.compare .sel{font-size:12.5px;font-weight:600}
+.compare .hint{font-size:11.5px;color:var(--muted)}
+.compare .go{margin-left:auto;display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 15px;border-radius:8px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:600}
+.compare .go[disabled]{background:#c6d0da}
+
+/* ---------- 设计说明（评审用，不进实现） ---------- */
+.notes{margin-top:40px;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:12.5px}
+.notes h2{font-size:14px;color:var(--ink);margin-bottom:10px}
+.notes ol{padding-left:20px;display:grid;gap:6px}
+.notes b{color:var(--ink)}
+</style>
+</head>
+<body>
+<main>
+  <div class="pagehead"><h1>检测记录</h1><span class="count">3</span></div>
+  <div class="toolbar">
+    <div class="seg"><span>全部服务</span><span class="on">当前服务</span></div>
+    <div class="search">🔍 搜索模型或地址</div>
+  </div>
+
+  <div class="list">
+    <!-- 受限：最常见形态 -->
+    <div class="rec">
+      <label class="pick"><input type="checkbox"></label>
+      <div class="rec-body">
+        <div class="rec-main">
+          <span class="verdict v-warn"><i>!</i>可以使用，但有使用限制</span>
+          <span class="model">deepseek-v4-flash</span>
+          <span class="host">gateway.example.invalid/v1</span>
+          <span class="when">2026/9/22 17:40</span>
+        </div>
+        <div class="rec-sub">
+          <span class="stats">
+            <span class="stat bad">3 项未通过</span>
+            <span class="stat">5/5 模块</span>
+            <span class="stat done">32 次执行</span>
+          </span>
+          <span class="limit">可恢复错误场景下 3/5 任务完成；建议开启失败重试后再测一次</span>
+          <span class="acts">
+            <button class="btn open">打开结果</button>
+            <button class="btn export"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 10V2m0 0L5 5m3-3l3 3M2.5 11v2A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5v-2"/></svg>导出报告</button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 可用：全绿 -->
+    <div class="rec picked">
+      <label class="pick"><input type="checkbox" checked></label>
+      <div class="rec-body">
+        <div class="rec-main">
+          <span class="verdict v-pass"><i>✔</i>可以正常使用</span>
+          <span class="model">qwen3-max</span>
+          <span class="host">internal-gw.corp/v1</span>
+          <span class="when">2026/9/21 09:12</span>
+        </div>
+        <div class="rec-sub">
+          <span class="stats">
+            <span class="stat">全部通过</span>
+            <span class="stat">5/5 模块</span>
+            <span class="stat done">32 次执行</span>
+          </span>
+          <span class="limit">固定题库与智能体任务均按预期完成，未见使用限制</span>
+          <span class="acts">
+            <button class="btn open">打开结果</button>
+            <button class="btn export"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 10V2m0 0L5 5m3-3l3 3M2.5 11v2A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5v-2"/></svg>导出报告</button>
+          </span>
+        </div>
+      </div>
+    </div>
+
+    <!-- 阻断 + 未完成 -->
+    <div class="rec">
+      <label class="pick"><input type="checkbox"></label>
+      <div class="rec-body">
+        <div class="rec-main">
+          <span class="verdict v-block"><i>✕</i>目前不能正常使用</span>
+          <span class="model">glm-5-air</span>
+          <span class="host">gateway.example.invalid/v1</span>
+          <span class="when">2026/9/20 22:03</span>
+        </div>
+        <div class="rec-sub">
+          <span class="stats">
+            <span class="stat bad">12 项未通过</span>
+            <span class="stat">4/5 模块 · 未完成</span>
+          </span>
+          <span class="limit">长上下文与流式输出持续失败，检测中途停止；处理后再补测剩余模块</span>
+          <span class="acts">
+            <button class="btn open">打开结果</button>
+            <button class="btn export"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 10V2m0 0L5 5m3-3l3 3M2.5 11v2A1.5 1.5 0 0 0 4 14.5h8a1.5 1.5 0 0 0 1.5-1.5v-2"/></svg>导出报告</button>
+          </span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="compare">
+    <span class="sel">已选 1 / 2 条记录</span>
+    <span class="hint">再选一条条件一致的记录即可对比两次表现</span>
+    <span class="go" disabled>对比结果</span>
+  </div>
+
+  <div class="notes">
+    <h2>设计说明（评审用，不进实现）</h2>
+    <ol>
+      <li><b>结论升为行首主角</b>：判定从中间的小徽章提到行首，带色底图标的胶囊（绿=可用 / 琥珀=受限 / 红=阻断），扫一眼就知道每条记录的答案。</li>
+      <li><b>补上行动性数字</b>：旧表没有数字。新行给「N 项未通过（红）/ 模块完成 / 执行次数」，未通过的数字直接驱动你点开看。</li>
+      <li><b>导出报告变成明确主操作</b>：图标 + 文字的按钮，蓝底描边，每行固定一个；不再是指针悬停才意识到的角落小图标。打开结果为次按钮。</li>
+      <li><b>旧三列的去向</b>：模型服务 → 模型名 + 地址保留在行首；使用判断与限制 → 升级为结论胶囊 + 限制摘要一行；检测时间 → 右上角，弱化为辅助信息。</li>
+      <li><b>对比选择</b>：勾选框保留在最左，选中行整行淡蓝；底部对比条显示进度与提示。</li>
+    </ol>
+  </div>
+</main>
+</body>
+</html>

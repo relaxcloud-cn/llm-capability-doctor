@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>小项展开区 · 设计方案对比（含数据来源标注）</title>
+<style>
+  :root {
+    --ink: #1c1c1e; --muted: #6e6e73; --faint: #9c9ca1;
+    --line: #e8e8ec; --canvas: #f5f5f7; --accent: #3b82f6;
+    --pass: #1a9e56; --pass-tint: #e9f7ee;
+    --unknown: #8e8e93;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    background: #ececee; color: var(--ink);
+    padding: 40px 24px 80px;
+  }
+  .page { max-width: 780px; margin: 0 auto; }
+  h1 { font-size: 22px; margin-bottom: 6px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 10px; line-height: 1.6; }
+  .rule {
+    background: #fff8e6; border: 1px solid #f0dfa8; border-radius: 10px;
+    padding: 12px 16px; font-size: 12.5px; line-height: 1.7; color: #7a5b12;
+    margin-bottom: 34px;
+  }
+  .rule b { color: #5c440a; }
+
+  .variant { margin-bottom: 44px; }
+  .variant-tag {
+    display: inline-block; font-size: 12px; font-weight: 700;
+    color: #fff; background: #2c2c2e; border-radius: 6px;
+    padding: 3px 10px; margin-bottom: 4px;
+  }
+  .variant-name { font-size: 14px; font-weight: 600; margin: 6px 0 4px; }
+  .variant-why { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
+
+  .card {
+    background: #fff; border: 1px solid var(--line);
+    border-radius: 14px; padding: 20px 22px;
+  }
+
+  .group-head { display: flex; align-items: flex-start; gap: 12px; }
+  .group-icon {
+    width: 20px; height: 20px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; color: #fff; flex: none; margin-top: 1px;
+    background: var(--pass);
+  }
+  .group-name { font-size: 14px; font-weight: 600; }
+  .group-note { font-size: 12px; color: var(--muted); margin-top: 3px; }
+  .group-count { margin-left: auto; font-size: 12.5px; color: var(--pass); font-variant-numeric: tabular-nums; }
+  .chev { color: var(--faint); font-size: 10px; margin-left: 6px; transform: rotate(90deg); display: inline-block; }
+
+  .sample { margin-left: 32px; padding: 10px 0; border-top: 1px solid var(--line); margin-top: 12px; }
+  .sample + .sample { margin-top: 0; }
+  .sample-row { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pass); flex: none; }
+  .dot.unknown { background: var(--faint); }
+  .sample-name { font-size: 12.5px; }
+  .sample-inline { font-size: 12px; color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pill {
+    margin-left: auto; font-size: 11px; font-weight: 500;
+    padding: 3px 10px; border-radius: 999px;
+    color: var(--pass); background: var(--pass-tint); flex: none;
+  }
+  .pill.unknown { color: var(--unknown); background: #f0f0f2; }
+
+  .exp { padding: 8px 0 6px 18px; }
+  .result-line { font-size: 12.5px; color: var(--ink); line-height: 1.55; }
+  .evi-link {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11.5px; font-weight: 500; color: var(--accent);
+    background: none; border: none; cursor: pointer; padding: 0; margin-top: 8px;
+    font-family: inherit;
+  }
+  .evi-body { display: none; margin-top: 10px; }
+  .evi-body.open { display: block; }
+  .field-label { font-size: 11.5px; font-weight: 600; color: var(--muted); margin: 12px 0 6px; }
+  .field-box {
+    font-size: 12.5px; line-height: 1.6; background: var(--canvas);
+    border-radius: 8px; padding: 10px 12px;
+  }
+  .field-box.mono { font-family: ui-monospace, monospace; font-size: 10.5px; white-space: pre-wrap; }
+
+  .kv { display: flex; gap: 10px; font-size: 12.5px; line-height: 1.6; padding: 3px 0; }
+  .kv .k { color: var(--muted); flex: none; width: 62px; }
+
+  /* 数据来源标注 */
+  .src {
+    display: inline-block; font-size: 10px; font-family: ui-monospace, monospace;
+    color: #8a6d00; background: #fff4d6; border: 1px dashed #e0c97e;
+    border-radius: 4px; padding: 1px 6px; margin-top: 4px;
+  }
+  .src.fixed { color: #555; background: #f0f0f2; border-color: #d8d8dc; }
+
+  .now .variant-tag { background: #c0392b; }
+  .divider-note { text-align: center; color: var(--faint); font-size: 11.5px; margin: 6px 0 44px; }
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--faint); margin-top: 14px; }
+
+  /* 数据盘点表 */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 12px; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; background: #fafafa; }
+  td code { font-family: ui-monospace, monospace; font-size: 10.5px; background: #f4f4f6; padding: 1px 5px; border-radius: 4px; }
+  .ok { color: var(--pass); font-weight: 600; }
+  .no { color: #c0392b; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="page">
+  <h1>小项展开区 · 设计对比（含数据来源标注）</h1>
+  <p class="sub">原则：展示出来的每一句描述，都必须能从数据生成。下面每句动态文案都标了来源字段。</p>
+  <div class="rule">
+    <b>数据里现成有什么（可生成）：</b><br>
+    · 逐条判定：<code>verdict</code>（通过/未通过/未判定）+ <code>note</code>（演示＝item.value/summary/boundary；真实＝observation.status/reason）<br>
+    · 逐条证据：<code>request</code>/<code>response</code>/<code>evidenceJSON</code>（真实报告＝真实请求与返回；演示＝题库原文与答案）<br>
+    · 计数：分组内 pass/fail/unverified 数量<br>
+    <b>数据里没有（编不出来的）：</b>「怎么测的」这类方法描述——演示数据有 item.facts 但措辞是内部口径；真实报告没有 method 字段，只能拿 sample_id 映射的名字（如「约 64K token 的真实长度输入」）。
+  </div>
+
+  <!-- ============ 现状 ============ -->
+  <div class="variant now">
+    <span class="variant-tag">现状</span>
+    <div class="variant-name">三段灰框铺开 · 内部测试口径</div>
+    <div class="variant-why">问题：「输入档位/输出预算/已验证方式」是测试程序口径；「模型回了什么」重复结论；三个灰框很重。</div>
+    <div class="card">
+      <div class="group-head">
+        <div class="group-icon">✓</div>
+        <div>
+          <div class="group-name">协议可接受上限</div>
+          <div class="group-note">不同长度的请求都能被服务接受并正常回答</div>
+        </div>
+        <div class="group-count">2 / 2 <span class="chev">›</span></div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">上下文容量</span>
+          <span class="pill">通过</span>
+        </div>
+        <div class="exp">
+          <div class="result-line">已接收 8,192 token</div>
+          <div class="field-label">检测程序发了什么</div>
+          <div class="field-box">输入档位：2,048 / 4,096 / 8,192 token<br>输出预算：每次最多 1,024 token<br>结果：三个输入档位均收到完整回复；更长输入尚未检测</div>
+          <div class="field-label">模型回了什么</div>
+          <div class="field-box">已接收 8,192 token<br><br>在本次输出预算下，8,192 token 输入被接收。<br><br>结论边界：没有找到容量上限；材料能否被正确理解，需要看模型能力跑分。</div>
+          <button class="evi-link" onclick="this.nextElementSibling.classList.toggle('open'); this.textContent=this.nextElementSibling.classList.contains('open')?'▾ 收起原始数据（JSON）':'▸ 查看原始数据（JSON）'">▸ 查看原始数据（JSON）</button>
+          <div class="evi-body">
+            <div class="field-label">原始数据</div>
+            <div class="field-box mono">{ "检查项": "S1", "判定": "已确认", … }</div>
+          </div>
+        </div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">输出长度</span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <p class="divider-note">— 候选方向（动态句子全部标注数据来源）—</p>
+
+  <!-- ============ 方案 A ============ -->
+  <div class="variant">
+    <span class="variant-tag">方案 A</span>
+    <div class="variant-name">结果说明（数据字段）+ 证据二级折叠</div>
+    <div class="variant-why">展开 = 数据里已有的 note/value/boundary 直接拼成一句结果；证据收进折叠。完全符合「可生成」原则——没有一句是新编的话。</div>
+    <div class="card">
+      <div class="group-head">
+        <div class="group-icon">✓</div>
+        <div>
+          <div class="group-name">协议可接受上限</div>
+          <div class="group-note">不同长度的请求都能被服务接受并正常回答</div>
+        </div>
+        <div class="group-count">2 / 2 <span class="chev">›</span></div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">上下文容量</span>
+          <span class="pill">通过</span>
+        </div>
+        <div class="exp">
+          <div class="result-line">已接收 8,192 token。没有找到容量上限；材料能否被正确理解，需要看能力跑分。</div>
+          <div class="src">演示：item.value + item.boundary｜真实：observation.status + reason</div>
+          <br>
+          <button class="evi-link" onclick="this.nextElementSibling.classList.toggle('open'); this.textContent=this.nextElementSibling.classList.contains('open')?'▾ 收起原始证据':'▸ 查看原始证据（请求 · 返回 · JSON）'">▸ 查看原始证据（请求 · 返回 · JSON）</button>
+          <div class="evi-body">
+            <div class="field-label">检测程序发了什么</div>
+            <div class="field-box">输入档位：2,048 / 4,096 / 8,192 token<br>输出预算：每次最多 1,024 token</div>
+            <div class="field-label">模型回了什么</div>
+            <div class="field-box">已接收 8,192 token；在本次输出预算下输入被完整处理。</div>
+            <div class="field-label">原始数据</div>
+            <div class="field-box mono">{ "检查项": "S1", "判定": "已确认", … }</div>
+          </div>
+        </div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">输出长度</span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+    </div>
+    <div class="legend">代价：演示数据的 value/boundary 本身是内部口径（如「已接收 8,192 token」），不润色就有点硬；但它是真实字段，不是编造。</div>
+  </div>
+
+  <!-- ============ 方案 B ============ -->
+  <div class="variant">
+    <span class="variant-tag">方案 B</span>
+    <div class="variant-name">结果 + 「怎么测的」说明</div>
+    <div class="variant-why">「怎么测的」这句<strong style="color:#c0392b">数据里没有对应字段</strong>：演示只有内部口径 facts，真实报告只有 sample_id 可映射成检查项名（如「约 64K token 的真实长度输入」）。要落地只能接受这种半成品的映射。</div>
+    <div class="card">
+      <div class="group-head">
+        <div class="group-icon">✓</div>
+        <div>
+          <div class="group-name">协议可接受上限</div>
+          <div class="group-note">不同长度的请求都能被服务接受并正常回答</div>
+        </div>
+        <div class="group-count">2 / 2 <span class="chev">›</span></div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">上下文容量</span>
+          <span class="pill">通过</span>
+        </div>
+        <div class="exp">
+          <div class="kv"><span class="k">检查项</span><span>约 64K / 128K / 256K / 512K token 的真实长度输入</span></div>
+          <div class="src fixed">来源：sample_id → 固定名称映射（CLI 没有这个字段，只能按 id 查表）</div>
+          <div class="kv"><span class="k">结果</span><span>已接收 8,192 token。没有找到容量上限。</span></div>
+          <div class="src">演示：item.value + item.boundary｜真实：observation.status + reason</div>
+          <br>
+          <button class="evi-link" onclick="this.nextElementSibling.classList.toggle('open'); this.textContent=this.nextElementSibling.classList.contains('open')?'▾ 收起原始数据（JSON）':'▸ 查看原始数据（JSON）'">▸ 查看原始数据（JSON）</button>
+          <div class="evi-body">
+            <div class="field-label">原始数据</div>
+            <div class="field-box mono">{ "检查项": "S1", … }</div>
+          </div>
+        </div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">输出长度</span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+    </div>
+    <div class="legend">代价：「怎么测的」靠 sample_id 查表，能生成但信息增量小（行名已经说了是啥）；边际价值低。</div>
+  </div>
+
+  <!-- ============ 方案 C ============ -->
+  <div class="variant">
+    <span class="variant-tag">方案 C</span>
+    <div class="variant-name">取消展开，行内说完</div>
+    <div class="variant-why">行内一句话 = 数据字段直接拼（同 A），没有二级展开。证据整个页面只留一个统一入口或砍到分组级。</div>
+    <div class="card">
+      <div class="group-head">
+        <div class="group-icon">✓</div>
+        <div>
+          <div class="group-name">协议可接受上限</div>
+          <div class="group-note">不同长度的请求都能被服务接受并正常回答</div>
+        </div>
+        <div class="group-count">2 / 2 <span class="chev">›</span></div>
+      </div>
+      <div class="sample" style="border-top:none; margin-top:14px;">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">上下文容量</span>
+          <span class="sample-inline">已接收 8,192 token；未找到容量上限</span>
+          <span class="pill">通过</span>
+        </div>
+        <div class="src" style="margin-left:18px">演示：item.value + item.boundary 摘要｜真实：status + reason</div>
+      </div>
+      <div class="sample">
+        <div class="sample-row">
+          <span class="dot"></span>
+          <span class="sample-name">输出长度</span>
+          <span class="sample-inline">单次回答最长测到 1,024 token</span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+    </div>
+    <div class="legend">代价：答错的题、失败的批想看「原文/回答/过程」没地方放——这些恰恰是能力/智能体/基线模块最有价值的内容。</div>
+  </div>
+
+  <!-- ============ 方案 A′ ============ -->
+  <div class="variant">
+    <span class="variant-tag" style="background:var(--accent)">方案 A′</span>
+    <div class="variant-name">行内结果句 + 证据折叠（推荐）</div>
+    <div class="variant-why">结果句（数据字段）直接放行内，展开只剩「原始证据」入口。能一句话说清的不用展开；要看题面/返回/过程再点。</div>
+    <div class="card">
+      <div class="group-head">
+        <div class="group-icon">✓</div>
+        <div>
+          <div class="group-name">协议可接受上限</div>
+          <div class="group-note">不同长度的请求都能被服务接受并正常回答</div>
+        </div>
+        <div class="group-count">2 / 2 <span class="chev">›</span></div>
+      </div>
+      <div class="sample">
+        <div class="sample-row" style="align-items:flex-start">
+          <span class="dot" style="margin-top:5px"></span>
+          <span style="flex:1; min-width:0">
+            <span class="sample-name">上下文容量</span>
+            <div class="result-line" style="margin-top:2px; font-size:12px; color:var(--muted)">已接收 8,192 token；未找到容量上限</div>
+            <div class="src">item.value + item.boundary｜真实：status + reason</div>
+            <br>
+            <button class="evi-link" style="margin-top:5px" onclick="this.nextElementSibling.classList.toggle('open'); this.textContent=this.nextElementSibling.classList.contains('open')?'▾ 收起原始证据':'▸ 原始证据'">▸ 原始证据</button>
+            <div class="evi-body">
+              <div class="field-label">检测程序发了什么</div>
+              <div class="field-box">输入档位：2,048 / 4,096 / 8,192 token</div>
+              <div class="field-label">模型回了什么</div>
+              <div class="field-box">已接收 8,192 token。</div>
+              <div class="field-label">原始数据</div>
+              <div class="field-box mono">{ "检查项": "S1", … }</div>
+            </div>
+          </span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+      <div class="sample">
+        <div class="sample-row" style="align-items:flex-start">
+          <span class="dot" style="margin-top:5px"></span>
+          <span style="flex:1; min-width:0">
+            <span class="sample-name">输出长度</span>
+            <div class="result-line" style="margin-top:2px; font-size:12px; color:var(--muted)">单次回答最长测到 1,024 token</div>
+          </span>
+          <span class="pill">通过</span>
+        </div>
+      </div>
+    </div>
+    <div class="legend">动态文案 100% 来自字段，无编造；能力模块答错题的「预期 vs 实际」也已经有 note 字段，行内直接可见。</div>
+  </div>
+
+  <!-- ============ 数据盘点 ============ -->
+  <div class="variant">
+    <span class="variant-tag" style="background:#555">数据盘点</span>
+    <div class="variant-name">五个模块 · 每类小项"一句话结果"能不能生成</div>
+    <table>
+      <tr><th>模块</th><th>行内结果句来源</th><th>能否生成</th></tr>
+      <tr><td>规格实测</td><td>演示 <code>item.value + item.boundary</code>；真实 <code>observation.status + reason</code></td><td class="ok">能</td></tr>
+      <tr><td>能力跑分</td><td>演示 <code>预期/实际</code>；真实 <code>correct / wrong + reason</code></td><td class="ok">能</td></tr>
+      <tr><td>性能实测</td><td>演示 <code>entry.value</code>；真实 <code>sample.terminal_state + metrics</code></td><td class="ok">能</td></tr>
+      <tr><td>智能体实测</td><td>演示 <code>有效N次·未通过M次</code>；真实 <code>attempts + outcome</code></td><td class="ok">能</td></tr>
+      <tr><td>基线对比</td><td>演示 <code>differences</code>；真实 <code>comparison.status + diffs</code></td><td class="ok">能</td></tr>
+      <tr><td>「怎么测的」</td><td>只能靠 <code>sample_id → 名称映射</code>，无 method 字段</td><td class="no">半成品</td></tr>
+    </table>
+  </div>
+
+</div>
+</body>
+</html>
