@@ -117,6 +117,37 @@ pub fn build_default_customer_report(
     build_customer_report(record, ConclusionBuildInput::default())
 }
 
+/// 普通运行路径的客户结论：把失败模块汇成 findings，让"关键发现"如实呈现，
+/// 也让整体结论把模块失败纳入考量（否则 choose_conclusion 对 Fail 视而不见）。
+/// 失败按「受限」级呈现；Blocker 级（如密钥泄漏、越权写入）仍由校准流程细化。
+pub fn build_run_customer_report(
+    record: &DetectionRecord,
+) -> Result<CustomerConclusionReport, String> {
+    let findings: Vec<ConclusionFinding> = record
+        .module_results
+        .iter()
+        .filter(|result| result.state == ModuleResultState::Fail)
+        .map(|result| ConclusionFinding {
+            id: format!("module-{}-fail", result.module_id),
+            module_id: result.module_id.clone(),
+            title: format!("{}未通过", module_display_name(&result.module_id)),
+            impact: FindingImpact::Limitation,
+            summary: result.reason.clone().unwrap_or_else(|| {
+                "该模块存在未通过的检测项，详见模块明细".to_string()
+            }),
+            scope: "本次实测覆盖的项目".into(),
+            evidence_refs: result.evidence_refs.clone(),
+        })
+        .collect();
+    build_customer_report(
+        record,
+        ConclusionBuildInput {
+            findings,
+            ..ConclusionBuildInput::default()
+        },
+    )
+}
+
 pub fn build_customer_report(
     record: &DetectionRecord,
     input: ConclusionBuildInput,
@@ -506,6 +537,54 @@ mod tests {
         assert_eq!(report.kind, CustomerConclusionKind::Unknown);
         assert_eq!(report.text, "目前无法判断这套模型服务是否可用");
         assert!(!report.evidence_gaps.is_empty());
+    }
+
+    #[test]
+    fn failed_modules_enter_findings_and_limit_conclusion() {
+        // 回归护栏：choose_conclusion 原本无视模块 Fail，失败模块会被当成"正常使用"。
+        let mut record = record(vec!["capability", "agent"]);
+        start_run(&mut record, "2026-09-11T00:01:00Z").unwrap();
+        let mut finish = |record: &mut DetectionRecord,
+                          module: &str,
+                          state,
+                          reason: &str,
+                          evidence_id: &str| {
+            let evidence = add_evidence(
+                record,
+                evidence_id,
+                "module_result",
+                "2026-09-11T00:01:01Z",
+                serde_json::json!({"status": "recorded"}),
+            );
+            set_module_result(
+                record,
+                ModuleResult {
+                    module_id: module.into(),
+                    state,
+                    reason: Some(reason.into()),
+                    attempt_refs: Vec::new(),
+                    evidence_refs: vec![evidence.id],
+                    incident_refs: Vec::new(),
+                },
+                "2026-09-11T00:01:02Z",
+            )
+            .unwrap();
+        };
+        finish(
+            &mut record,
+            "capability",
+            ModuleResultState::Fail,
+            "5 个有效样本答案未通过预先定义的判定规则",
+            "ev-capability",
+        );
+        finish(&mut record, "agent", ModuleResultState::Pass, "10 个场景全部通过", "ev-agent");
+        let report = build_run_customer_report(&record).unwrap();
+        assert_eq!(report.kind, CustomerConclusionKind::LimitedUse);
+        assert_eq!(report.text, "这套模型服务可以使用，但存在限制");
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].module_id, "capability");
+        assert_eq!(report.findings[0].title, "模型能力跑分未通过");
+        assert!(report.findings[0].summary.contains("5 个有效样本"));
     }
 
     #[test]

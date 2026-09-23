@@ -26,7 +26,7 @@ use crate::capability::{
     CapabilityResponse, CapabilitySettings, ExecutionState, ToolCall, build_scorecard,
     fixed_capability_catalog,
 };
-use crate::conclusion::{CustomerConclusionReport, build_default_customer_report};
+use crate::conclusion::{CustomerConclusionReport, build_run_customer_report};
 use crate::context_probe;
 use crate::ingress::{ConnectionConfig, redact_endpoint};
 use crate::messages_probe;
@@ -1140,10 +1140,16 @@ impl LiveExecutor {
                     })
                     .count();
                 if execution_gaps > 0 {
+                    // 有真实未通过题时必须一并说明，否则模块理由会掩盖已知的失败事实。
+                    let fail_note = if wrong > 0 {
+                        format!("；另有 {wrong} 题答案未通过预先定义的判定规则")
+                    } else {
+                        String::new()
+                    };
                     (
                         ModuleResultState::Inconclusive,
                         format!(
-                            "{} 个样本没有形成可判定证据，不能归因于模型能力",
+                            "{} 个样本没有形成可判定证据，不能归因于模型能力{fail_note}",
                             execution_gaps
                         ),
                     )
@@ -3261,7 +3267,7 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         overall_evidence_refs,
         &request.started_at,
     )?;
-    let customer_conclusion = build_default_customer_report(&record)?;
+    let customer_conclusion = build_run_customer_report(&record)?;
     let execution_origin = executor.execution_origin();
     let execution_limitation = if execution_origin == "real_service" {
         "已对真实服务接口完成连通性验证；未覆盖完整检测样本的项目标记为「待确认」。"
