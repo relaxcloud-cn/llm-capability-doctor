@@ -81,6 +81,109 @@ extension RunRecord {
   }
 }
 
+// 模块状态点：侧栏大纲树、首页体检环、记录行指纹共用一套口径。
+enum NavDot {
+  case info, pass, warn, fail, none
+  var color: Color {
+    switch self {
+    case .info: return Theme.accent
+    case .pass: return Theme.passBar
+    case .warn: return Theme.limitedBar
+    case .fail: return Theme.blockedBar
+    case .none: return .clear
+    }
+  }
+  // 深色 hero 上的提亮版本，保证状态色在暗底上仍可辨认。
+  var darkColor: Color {
+    switch self {
+    case .info: return Color(red: 0.231, green: 0.510, blue: 0.965)
+    case .pass: return Color(red: 0.204, green: 0.827, blue: 0.600)
+    case .warn: return Color(red: 0.984, green: 0.749, blue: 0.141)
+    case .fail: return Color(red: 0.973, green: 0.443, blue: 0.443)
+    case .none: return .white.opacity(0.14)
+    }
+  }
+}
+
+extension RunRecord {
+  // CLI 模块终态 -> 状态点。未验证/不适用/未选择不是"有限制"，保持空心。
+  static func realStateDot(_ state: String) -> NavDot {
+    switch state {
+    case "pass": return .pass
+    case "fail": return .fail
+    case "not_applicable", "not_selected", "unverified": return .none
+    default: return .warn
+    }
+  }
+  static func realStateLabel(_ state: String, info: Bool) -> String {
+    switch state {
+    case "pass": return info ? "已记录" : "已完成"
+    case "fail": return "未通过"
+    case "unsupported": return "不支持"
+    case "inconclusive": return "无法判定"
+    case "invalid_execution": return "执行无效"
+    case "not_applicable": return "不适用"
+    case "not_selected": return "本次未选"
+    case "unverified": return "无证据"
+    default: return "已结束"
+    }
+  }
+  func navDot(_ module: CheckModule) -> NavDot {
+    if module == .info {
+      if isRealReport, let state = moduleStates?["ingress"] {
+        let dot = Self.realStateDot(state)
+        return dot == .pass ? .info : dot
+      }
+      return .info
+    }
+    guard modules.contains(module), completed.contains(module), hasCurrentEvidence else {
+      return .none
+    }
+    if isRealReport, let backend = module.backendID, let state = moduleStates?[backend] {
+      return Self.realStateDot(state)
+    }
+    // 演示记录与模块页同口径：有未通过项 -> 红点；全部未判定 -> 空心。
+    // 「可以正常使用」的记录不出未通过项，与页内判定一致。
+    let usable = outcome == .usable
+    switch module {
+    case .info: return .info
+    case .agent:
+      let samples = agentSamples
+      if samples.allSatisfy({ $0.validRuns.isEmpty }) { return .none }
+      return samples.flatMap(\.validRuns).contains { !$0.failedChecks.isEmpty } ? .fail : .pass
+    case .parameters:
+      return !usable && Catalog.specifications.contains { $0.state == .limited } ? .fail : .pass
+    case .performance:
+      return !usable && Catalog.performance.contains { $0.state == .limited } ? .fail : .pass
+    case .functions:
+      return !usable && Scores.all.contains { $0.correct < $0.cases.count } ? .fail : .pass
+    case .comparison:
+      return !usable && BaselineItem.all.contains(where: \.hasDifference) ? .fail : .pass
+    }
+  }
+  func navDotLabel(_ module: CheckModule) -> String {
+    if module == .info {
+      if isRealReport, let state = moduleStates?["ingress"] {
+        return Self.realStateLabel(state, info: true)
+      }
+      return "已记录"
+    }
+    if !modules.contains(module) { return "本次未选" }
+    if !completed.contains(module) { return "未完成" }
+    if !hasCurrentEvidence { return "旧版记录" }
+    if isRealReport, let backend = module.backendID, let state = moduleStates?[backend] {
+      return Self.realStateLabel(state, info: false)
+    }
+    switch navDot(module) {
+    case .info: return "已记录"
+    case .pass: return "已完成"
+    case .warn: return "有限制"
+    case .fail: return "有问题"
+    case .none: return "无证据"
+    }
+  }
+}
+
 extension ObservationState {
   var style: StatusStyle {
     switch self {

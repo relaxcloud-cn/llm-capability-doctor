@@ -52,6 +52,28 @@ enum CheckModule: String, CaseIterable, Codable, Identifiable {
     case .comparison: return "arrow.left.arrow.right"
     }
   }
+  // 侧栏大纲与首页清单使用的短名：上下文已经表明是模型检测，不再重复「模型」前缀。
+  var shortTitle: String {
+    switch self {
+    case .info: return "接入信息"
+    case .parameters: return "规格实测"
+    case .functions: return "能力跑分"
+    case .performance: return "性能实测"
+    case .agent: return "智能体实测"
+    case .comparison: return "基线对比"
+    }
+  }
+  // 首页体检清单用的一行内容简介（比 scope 短，不重复模块名）。
+  var coverDesc: String {
+    switch self {
+    case .info: return "本次接入的服务、接口与响应来源"
+    case .parameters: return "上下文容量、工具调用、结构化输出、多轮消息、流式响应"
+    case .functions: return "文本理解、信息提取、工具选择、多轮承接、长材料、逻辑计算"
+    case .performance: return "首字等待、生成速度、并发承载、持续运行、长文本负载"
+    case .agent: return "规则遵循、工具运用、错误恢复、权限边界、真实交付"
+    case .comparison: return "返回数据结构与官方规范示例逐项对照"
+    }
+  }
 }
 
 enum Outcome: String, CaseIterable, Codable, Identifiable {
@@ -156,8 +178,6 @@ final class Workbench: ObservableObject {
   @Published var outcome: Outcome = .limited
   @Published var agentMode = "standard"
   @Published var responseNameDiff = false
-  @Published var accessExpanded = false
-  @Published var accessRequested = false
   @Published var catalogSelection = ""
   @Published var catalogFilter = "all"
   @Published var running = false
@@ -174,6 +194,8 @@ final class Workbench: ObservableObject {
   @Published var expandedModuleIDs: Set<String> = []
   @Published var realRunError: String?
   @Published var selectedRecordID: UUID?
+  // 历史回看的只读查看器：打开它不改写工作台当前记录。
+  @Published var viewedRecord: RunRecord?
   @Published var toast: String?
   @Published var persistenceError: String?
   @Published var evidenceExpanded = false
@@ -292,10 +314,10 @@ final class Workbench: ObservableObject {
   }
   func showModule(_ module: CheckModule) {
     if module == .info {
+      // 接入信息不是检测项目：入口已移除，兜底回到报告页（报告抬头即接入事实）
       cancelConfiguration()
-      accessExpanded = true
-      accessRequested.toggle()
-      if selectedRecordID != nil { screen = .result } else { screen = .home }
+      catalogSelection = ""
+      screen = currentRecord != nil ? .result : .home
       return
     }
     catalogSelection = ""
@@ -694,7 +716,8 @@ final class Workbench: ObservableObject {
     var completedBefore = 0
     progressItems = progressItems.map { item in
       var item = item
-      if item.id == itemID {
+      if item.id == itemID || (index > completedBefore && index <= completedBefore + item.total) {
+        // 编号命中的小项之外，样本位置落在哪项就推进哪项（detail_id 滞后时不至于停住）
         item.completed = min(item.total, max(0, index - completedBefore))
         item.state = item.completed >= item.total ? "已完成" : "进行中"
       } else if completedBefore + item.total <= index {
@@ -794,6 +817,68 @@ final class Workbench: ObservableObject {
 
   func openRecord(_ record: RunRecord) {
     evidenceExpanded = false
+    selectedRecordID = record.id
+    screen = .result
+  }
+
+  // 历史回看：进只读查看器。「检测报告」与各模块页永远属于当前这一次检测，
+  // 不允许被历史记录切换来切换去。
+  func reviewRecord(_ record: RunRecord) {
+    viewedRecord = record
+  }
+
+  // 回到当前这一次检测的报告页（跑完检测的落地页，侧栏不设常驻入口）。
+  func showCurrentReport() {
+    selectedRecordID = nil
+    screen = .result
+  }
+
+  // 联调入口：把磁盘上的 CLI run.json 载入为一条记录，验证真实报告渲染。
+  func loadReportFile(_ url: URL) {
+    guard let data = try? Data(contentsOf: url),
+      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let recordObject = object["record"] as? [String: Any]
+    else {
+      realRunError = "无法读取报告文件：\(url.lastPathComponent)"
+      return
+    }
+    let configuration = object["configuration"] as? [String: Any] ?? [:]
+    let target = recordObject["target"] as? [String: Any] ?? [:]
+    let service = Service(
+      url: configuration["url"] as? String ?? target["endpointFingerprint"] as? String
+        ?? "已导入报告",
+      model: target["model"] as? String ?? configuration["model"] as? String ?? "未知模型")
+    var states: [String: String] = [:]
+    var completed: [CheckModule] = []
+    for result in recordObject["moduleResults"] as? [[String: Any]] ?? [] {
+      guard let id = result["moduleId"] as? String ?? result["module_id"] as? String else {
+        continue
+      }
+      let state = result["state"] as? String ?? "unknown"
+      states[id] = state
+      if let module = CheckModule.fromBackend(id), state != "not_selected",
+        !completed.contains(module)
+      {
+        completed.append(module)
+      }
+    }
+    let selected = (object["selected_modules"] as? [String] ?? [])
+      .compactMap(CheckModule.fromBackend)
+    let overall = object["overall"] as? String
+    let record = RunRecord(
+      service: service,
+      modules: selected.isEmpty ? completed : selected,
+      completed: completed,
+      outcome: Outcome(rawValue: overall ?? "inconclusive") ?? .inconclusive,
+      stopped: false,
+      presentationVersion: 4,
+      context: nil,
+      agentMode: "real",
+      responseModel: (recordObject["serviceReturnedModel"] as? [String: Any])?["modelId"]
+        as? String,
+      reportJSON: String(decoding: data, as: UTF8.self),
+      moduleStates: states)
+    records.insert(record, at: 0)
     selectedRecordID = record.id
     screen = .result
   }

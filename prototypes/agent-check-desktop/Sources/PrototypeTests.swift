@@ -61,7 +61,7 @@ func runModelTests() async throws {
     eventStore.progressItems[3].state == "进行中" && eventStore.progressItems[3].completed == 1,
     "规格小项按真实样本数推进")
   try expect(
-    eventStore.progressItems[2].state == "已完成" && eventStore.progressItems[2].completed == 5,
+    eventStore.progressItems[1].state == "已完成" && eventStore.progressItems[1].completed == 5,
     "进度越过的小项按样本数收尾")
   try expect(eventStore.currentItemName == "工具调用", "当前小项显示正式名称")
   eventStore.handleProgress(
@@ -88,7 +88,7 @@ func runModelTests() async throws {
       #"{"phase":"module_completed","module_id":"specification","index":1,"total":5,"state":"pass","message":"specification 检测完成"}"#
     ))
   try expect(
-    eventStore.moduleProgressSnapshots["specification"]?.count == 7
+    eventStore.moduleProgressSnapshots["specification"]?.count == 5
       && eventStore.moduleProgressSnapshots["specification"]?.first?.state == "已完成",
     "完成后保留小项快照")
   try expect(!eventStore.isModuleExpanded(.parameters), "模块完成后自动收起")
@@ -151,7 +151,8 @@ func runModelTests() async throws {
   try expect(!store.running, "未选模块不能开始")
   store.showConfirmation = false
   store.prepareRun(module: .info)
-  try expect(!store.showConfirmation && store.accessExpanded && store.screen == .home, "接入信息回到首页摘要")
+  try expect(
+    !store.showConfirmation && store.screen == .home, "接入信息无记录时留在工作台")
   store.selectedModules = Set(CheckModule.allCases)
   store.startRun(automatic: false)
   store.advance()
@@ -243,16 +244,19 @@ func runModelTests() async throws {
   store.draftKey = "temporary-secret"
   await store.connect()
   try expect(store.latestForService == nil, "换配置不沿用旧结果")
-  store.openRecord(limited)
-  store.showModule(.agent)
-  try expect(store.currentRecord?.id == limited.id, "历史详情切换保留记录")
+  store.reviewRecord(limited)
+  try expect(
+    store.viewedRecord?.id == limited.id && store.selectedRecordID == nil,
+    "历史回看走只读查看器，不改写当前记录")
+  try expect(store.currentRecord?.id != limited.id, "查看器不把工作台切到历史记录")
+  store.viewedRecord = nil
   store.navigate(.home)
   try expect(store.selectedRecordID == nil, "回首页退出历史上下文")
   store.editService()
   store.draftKey = "temporary-secret"
   store.showModule(.info)
   try expect(
-    !store.configuring && store.draftKey.isEmpty && store.accessExpanded, "从编辑配置进入接入信息时退出编辑并清除密钥")
+    !store.configuring && store.draftKey.isEmpty, "从编辑配置进入接入信息时退出编辑并清除密钥")
   let snapshot = String(
     decoding: try JSONEncoder().encode(
       LocalSnapshot(service: store.service, records: store.records)), as: UTF8.self)
@@ -294,8 +298,8 @@ func runModelTests() async throws {
   store.historySearch = "no-record"
   try expect(store.visibleRecords.isEmpty, "搜索空状态不返回无关记录")
   try expect(
-    Catalog.specifications.count == 7 && Scores.all.count == 6 && Catalog.performance.count == 5,
-    "分类范围七六五与文档一致")
+    Catalog.specifications.count == 6 && Scores.all.count == 6 && Catalog.performance.count == 5,
+    "分类范围六六五与文档一致")
   try expect(Scores.all.map(\.correct) == [4, 5, 3, 4, 3, 4], "成绩源于实际演示样本")
   try expect(
     Scores.all[4].comparisonCases.count == 5 && Scores.all[4].comparisonCases.allSatisfy(\.passed),
@@ -350,6 +354,17 @@ func runModelTests() async throws {
   let safeExport = String(
     decoding: try JSONEncoder().encode(ReportExport(record: sensitive)), as: UTF8.self)
   try expect(!safeExport.contains("secret") && !safeExport.contains("hidden"), "历史导出脱敏地址")
+  let reportHTML = renderReportHTML(record: limited)
+  try expect(
+    reportHTML.contains(limited.admissionTitle) && reportHTML.contains("检测方式")
+      && reportHTML.contains("判定方式") && reportHTML.contains("这次检测的结论一览"),
+    "HTML 报告含大结论、模块一览与明细口径")
+  try expect(
+    reportHTML.contains("<details><summary>查看原始 curl 请求</summary>")
+      && reportHTML.contains("chat.completion"),
+    "HTML 报告折叠原始 curl 与完整响应体")
+  try expect(reportHTML.contains("任务执行记录（JSON）"), "智能体任务按任务执行记录导出")
+  try expect(!reportHTML.contains("<script"), "HTML 报告自包含且无脚本")
   let temp = FileManager.default.temporaryDirectory.appendingPathComponent(
     "agent-check-\(UUID()).json")
   let persisted = Workbench(storageURL: temp)

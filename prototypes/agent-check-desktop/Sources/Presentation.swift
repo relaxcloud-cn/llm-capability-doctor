@@ -255,6 +255,29 @@ extension CheckModule {
 extension RunRecord {
   var readableID: String { String(id.uuidString.prefix(8)).lowercased() }
   var isRealReport: Bool { reportJSON != nil }
+  // 真实报告的解析入口：customer_conclusion 是 CLI 自己生成的客户结论。
+  private var reportRootObject: [String: Any]? {
+    guard let reportJSON, let data = reportJSON.data(using: .utf8) else { return nil }
+    return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+  }
+  private var customerConclusion: [String: Any]? {
+    reportRootObject?["customer_conclusion"] as? [String: Any]
+  }
+  private var customerConclusionText: String? {
+    customerConclusion?["text"] as? String
+  }
+  private var conclusionScope: [[String: Any]] {
+    customerConclusion?["scope"] as? [[String: Any]] ?? []
+  }
+  private var conclusionFindings: [[String: Any]] {
+    customerConclusion?["findings"] as? [[String: Any]] ?? []
+  }
+  private func realModuleResult(_ backendID: String) -> [String: Any]? {
+    let results = (reportRootObject?["record"] as? [String: Any])?["moduleResults"]
+      as? [[String: Any]] ?? []
+    return results.first { ($0["moduleId"] as? String) == backendID }
+      ?? results.first { ($0["module_id"] as? String) == backendID }
+  }
   var agentCoverage: String {
     if isRealReport { return "真实 CLI 已完成的 Agent 模块与其证据入口" }
     return "查询、连续追问、多步操作、工具调用、错误恢复、权限边界与结果交付"
@@ -276,6 +299,14 @@ extension RunRecord {
     return "补齐未完成诊断后，再形成接入决定"
   }
   var admissionTitle: String {
+    if isRealReport {
+      switch customerConclusion?["kind"] as? String {
+      case "normal_use": return "可以正常使用"
+      case "limited_use": return "可以使用，存在限制"
+      case "cannot_use": return "目前不能正常使用"
+      default: return "暂不能判断是否可用"
+      }
+    }
     if hasConfirmedBlocker { return "暂不建议接入" }
     if stopped || !completed.contains(.agent) || !hasCurrentEvidence { return "暂不能决定是否接入" }
     switch outcome {
@@ -286,6 +317,10 @@ extension RunRecord {
     }
   }
   var admissionExplanation: String {
+    if isRealReport {
+      return customerConclusionText
+        ?? "本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。"
+    }
     if hasConfirmedBlocker { return "发现会导致智能体产品不可用的阻断问题；请修复后重新诊断。" }
     if stopped || !completed.contains(.agent) || !hasCurrentEvidence {
       return "全方位诊断尚未完成，当前结果不能作为模型接入依据。"
@@ -304,7 +339,8 @@ extension RunRecord {
   var agentFindings: [AgentFinding] { AgentEvidence.findings(samples: agentSamples) }
   var explanation: String {
     if isRealReport {
-      return "本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。"
+      return customerConclusionText
+        ?? "本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。"
     }
     if !hasCurrentEvidence { return "旧版记录保留当时摘要：\(outcome.title)。不套用本版分类和证据。" }
     if hasConfirmedBlocker { return "只读任务中发生未经批准的写入请求；尚无已验证的可靠规避方式。" }
@@ -322,6 +358,12 @@ extension RunRecord {
     }
   }
   var usableScope: String {
+    if isRealReport {
+      let verified = conclusionScope
+        .filter { ($0["verified"] as? Bool) == true }
+        .compactMap { $0["description"] as? String }
+      return verified.isEmpty ? "本次未取得可确认的可用范围" : verified.joined(separator: "；")
+    }
     if hasConfirmedBlocker { return "只读与审批边界未满足，不能确认本次工作方式可用" }
     guard hasCurrentEvidence, completed.contains(.agent), !stopped, outcome != .inconclusive else {
       return "证据不足，尚不能确认可用范围"
@@ -329,6 +371,13 @@ extension RunRecord {
     return outcome == .usable ? "本次只读任务、异常处理与结果交付" : "正常查询、多步操作、连续追问、真实结果交付"
   }
   var limitation: String {
+    if isRealReport {
+      let findings = conclusionFindings
+        .filter { ($0["impact"] as? String ?? "none") != "none" }
+        .compactMap { $0["title"] as? String }
+      if !findings.isEmpty { return findings.joined(separator: "；") }
+      return (customerConclusion?["limitations"] as? [String])?.first ?? "未发现明确限制"
+    }
     if !hasCurrentEvidence { return "旧版证据不包含本版分类" }
     if hasConfirmedBlocker { return "审批拒绝后仍请求写入" }
     if stopped { return "必要检查未完成" }
@@ -340,6 +389,14 @@ extension RunRecord {
     return outcome == .usable ? "仅限已测条件，不保证全部业务" : "测试环境未就绪"
   }
   var missingScope: String {
+    if isRealReport {
+      let unverified = conclusionScope
+        .filter { ($0["verified"] as? Bool) != true }
+        .compactMap { $0["description"] as? String }
+      let gaps = customerConclusion?["evidence_gaps"] as? [String] ?? []
+      let combined = unverified + gaps
+      return combined.isEmpty ? "本次所选模块均已取得结论" : combined.joined(separator: "；")
+    }
     let missing = CheckModule.testModules.filter { !completed.contains($0) }.map(\.title)
     return (missing + ["业务场景、生产写入、长期无人值守", completed.contains(.parameters) ? "流式工具组合、规格上限" : ""])
       .filter { !$0.isEmpty }.joined(separator: "；")
@@ -351,7 +408,13 @@ extension RunRecord {
     guard hasCurrentEvidence else { return "旧版记录，不套用新版结果" }
     if isRealReport {
       let backendID = module.backendID ?? "ingress"
-      return "真实执行状态：\(moduleStates?[backendID] ?? "已完成")；详细证据见导出报告"
+      let result = realModuleResult(backendID)
+      let state = moduleStates?[backendID] ?? result?["state"] as? String
+      let label = state.map { RunRecord.realStateLabel($0, info: module == .info) } ?? "已结束"
+      if let reason = result?["reason"] as? String, !reason.isEmpty {
+        return "\(label)：\(reason)"
+      }
+      return label
     }
     switch module {
     case .info: return "当前服务与本次记录"

@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
       }
     }
+    if let reportIndex = args.firstIndex(of: "--agentcheck-load-report"),
+      args.count > reportIndex + 1
+    {
+      store.loadReportFile(URL(fileURLWithPath: args[reportIndex + 1]))
+    }
     if args.contains("--review-all") {
       Task {
         store.fillExample()
@@ -236,9 +241,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     try await capture("overview-key-evidence", folder: folder)
     try await capture("overview-key-delivery", folder: folder, bottom: true)
     store.navigate(.home)
-    store.accessExpanded = true
-    try await capture("09-access-expanded", folder: folder)
-    store.accessExpanded = false
     for module in CheckModule.testModules {
       store.showModule(module)
       try await capture("detail-\(module.rawValue)", folder: folder)
