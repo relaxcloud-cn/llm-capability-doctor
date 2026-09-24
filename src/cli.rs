@@ -3185,6 +3185,7 @@ pub struct ProgressPlanItem {
 pub fn module_display_name(module_id: &str) -> &'static str {
     match module_id {
         "ingress" => "服务接入",
+        "preflight" => "并发预检",
         "specification" => "模型规格实测",
         "capability" => "模型能力跑分",
         "performance" => "模型性能实测",

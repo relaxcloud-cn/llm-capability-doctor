@@ -258,6 +258,13 @@ impl Inner {
                 let Some(id) = event.module_id.as_deref() else {
                     return;
                 };
+                // 没经过 ModuleStarted 就进入 Running 的行（如并发预检只发 Progress），
+                // 在真正的模块开始后回到等待态，避免残留一行假"进行中"。
+                for module in &mut self.modules {
+                    if module.status == ModuleStatus::Running && module.started.is_none() {
+                        module.status = ModuleStatus::Waiting;
+                    }
+                }
                 let pos = self.module_mut(id);
                 let module = &mut self.modules[pos];
                 module.status = ModuleStatus::Running;
@@ -282,6 +289,10 @@ impl Inner {
                 let pos = self.module_mut(id);
                 let label = self.detail_label(event, pos);
                 let module = &mut self.modules[pos];
+                // 并发预检等只发 Progress 不发 Started 的前置步骤：探测期间显示进行中。
+                if module.status == ModuleStatus::Waiting {
+                    module.status = ModuleStatus::Running;
+                }
                 module.detail_index = event.detail_index.unwrap_or(0);
                 module.detail_total = event.detail_total.unwrap_or(0);
                 self.active = Some(ActiveDetail {
@@ -337,12 +348,14 @@ impl Inner {
             }
             ModuleStatus::Done { state, stats, .. } => {
                 // 统一口径：完成后显示"X通过 Y未通过 Z需人工确认"三段计数，
-                // 不再出现"待确认"这类没有行为指向的中间态词。
+                // 分段配色：通过绿、未通过红、需人工确认黄。
                 let (marker_color, marker, text) = match stats {
                     Some(stats) => {
                         let text = format!(
-                            "{}通过 {}未通过 {}需人工确认",
-                            stats.passed, stats.failed, stats.needs_manual
+                            "{} {} {}",
+                            self.paint("32", &format!("{}通过", stats.passed)),
+                            self.paint("31", &format!("{}未通过", stats.failed)),
+                            self.paint("33", &format!("{}需人工确认", stats.needs_manual)),
                         );
                         if stats.failed > 0 {
                             ("31", "✗", text)
@@ -359,7 +372,7 @@ impl Inner {
                     },
                 };
                 let marker = self.paint(marker_color, marker);
-                let styled = self.paint(marker_color, &text);
+                let styled = text;
                 let elapsed = module
                     .elapsed
                     .map(|elapsed| format!(" {}", self.paint("2", &format_duration(elapsed))))
