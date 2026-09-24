@@ -3190,7 +3190,6 @@ pub fn module_display_name(module_id: &str) -> &'static str {
         "performance" => "模型性能实测",
         "agent" => "智能体实测",
         "baseline" => "模型基线对比",
-        "preflight" => "并发预检",
         _ => "未知项目",
     }
 }
