@@ -1385,7 +1385,6 @@ impl LiveExecutor {
                 // 造不出并行 worker 就走串行路径，不让检测失败。
                 vec![]
             } else {
-            let limit = workers.len();
             let next = AtomicUsize::new(0);
             let (tx, rx) =
                 mpsc::channel::<(usize, ChatCompletionsRequest, ChatCompletionsResponse)>();
@@ -3191,6 +3190,7 @@ pub fn module_display_name(module_id: &str) -> &'static str {
         "performance" => "模型性能实测",
         "agent" => "智能体实测",
         "baseline" => "模型基线对比",
+        "preflight" => "并发预检",
         _ => "未知项目",
     }
 }
@@ -3425,6 +3425,32 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             item_stats: None,
         });
         if let Some(payload) = executor.probe_execution_concurrency() {
+            let max_clean = payload
+                .pointer("/payload/max_clean")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            let chosen = payload
+                .pointer("/payload/chosen")
+                .and_then(Value::as_u64)
+                .unwrap_or(1);
+            // 结果要大声说出来:终端与 GUI 的进度状态行都会显示这条消息,
+            // 用户明确知道探测出的最优并发和本次实际采用的执行并发。
+            progress.emit(ProgressEvent {
+                phase: ProgressPhase::ModuleProgress,
+                module_id: Some("preflight".into()),
+                index: 1,
+                total: selected.len(),
+                state: None,
+                message: format!(
+                    "并发预检完成：服务最高可稳定承受 {max_clean} 并发，本次按并发 {chosen} 执行后续检测"
+                ),
+                detail_index: None,
+                detail_total: None,
+                detail_id: None,
+                items: None,
+                modules: None,
+                item_stats: None,
+            });
             add_evidence(
                 &mut record,
                 "cli-preflight-0",
@@ -4334,11 +4360,23 @@ mod tests {
                 .unwrap();
         let mut request = request(Some(vec!["capability".into()]));
         request.concurrency_preflight = true;
-        struct QuietSink;
-        impl ProgressSink for QuietSink {
-            fn emit(&mut self, _event: ProgressEvent) {}
+        struct CapturingSink(std::sync::mpsc::Sender<String>);
+        impl ProgressSink for CapturingSink {
+            fn emit(&mut self, event: ProgressEvent) {
+                let _ = self.0.send(event.message);
+            }
         }
-        let report = run_with_executor_reporting(request, &mut executor, &mut QuietSink).unwrap();
+        let (messages_tx, messages_rx) = mpsc::channel::<String>();
+        let mut sink = CapturingSink(messages_tx);
+        let report =
+            run_with_executor_reporting(request, &mut executor, &mut sink).unwrap();
+        drop(sink);
+        let messages: Vec<String> = messages_rx.iter().collect();
+        assert!(
+            messages.iter().any(|message| message.contains("按并发 8 执行后续检测")),
+            "进度消息必须报出实测并发:最后几条={:?}",
+            messages.iter().rev().take(3).collect::<Vec<_>>()
+        );
         // 预检证据落盘,module=preflight 不参与模块结论
         let preflight = report
             .record
