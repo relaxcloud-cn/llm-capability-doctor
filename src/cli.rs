@@ -3424,25 +3424,21 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
             item_stats: None,
         });
         if let Some(payload) = executor.probe_execution_concurrency() {
-            let max_clean = payload
-                .pointer("/payload/max_clean")
-                .and_then(Value::as_u64)
-                .unwrap_or(1);
             let chosen = payload
                 .pointer("/payload/chosen")
                 .and_then(Value::as_u64)
                 .unwrap_or(1);
             // 结果要大声说出来:终端与 GUI 的进度状态行都会显示这条消息,
             // 用户明确知道探测出的最优并发和本次实际采用的执行并发。
+            // 两阶段文案：进行中「正在分析」→ 完成「已设置…为 X」；
+            // 同时发 ModuleCompleted，让终端/进度里的预检行进入完成态。
             progress.emit(ProgressEvent {
-                phase: ProgressPhase::ModuleProgress,
+                phase: ProgressPhase::ModuleCompleted,
                 module_id: Some("preflight".into()),
-                index: 1,
+                index: 0,
                 total: selected.len(),
-                state: None,
-                message: format!(
-                    "并发预检完成：服务最高可稳定承受 {max_clean} 并发，本次按并发 {chosen} 执行后续检测"
-                ),
+                state: Some("pass".into()),
+                message: format!("已设置本次检测任务并发阈值为 {chosen}"),
                 detail_index: None,
                 detail_total: None,
                 detail_id: None,
@@ -4372,8 +4368,8 @@ mod tests {
         drop(sink);
         let messages: Vec<String> = messages_rx.iter().collect();
         assert!(
-            messages.iter().any(|message| message.contains("按并发 8 执行后续检测")),
-            "进度消息必须报出实测并发:最后几条={:?}",
+            messages.iter().any(|message| message.contains("已设置本次检测任务并发阈值为 8")),
+            "进度消息必须报出并发阈值:最后几条={:?}",
             messages.iter().rev().take(3).collect::<Vec<_>>()
         );
         // 预检证据落盘,module=preflight 不参与模块结论

@@ -208,6 +208,14 @@ impl Inner {
         if let Some(pos) = self.positions.get(module_id) {
             return *pos;
         }
+        // 并发预检先于一切模块执行，永远排在列表最前，不随事件到达顺序漂移。
+        if module_id == "preflight" && !self.modules.is_empty() {
+            self.modules.insert(0, ModuleView::new(module_id));
+            for (index, module) in self.modules.iter().enumerate() {
+                self.positions.insert(module.id.clone(), index);
+            }
+            return 0;
+        }
         let pos = self.modules.len();
         self.modules.push(ModuleView::new(module_id));
         self.positions.insert(module_id.into(), pos);
