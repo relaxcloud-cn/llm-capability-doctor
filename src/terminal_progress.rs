@@ -7,8 +7,8 @@
 //! 全部输出走调用方给的 writer（main 里接 stderr），不污染 stdout。
 
 use crate::cli::{
-    ProgressEvent, ProgressPhase, ProgressPlanItem, ProgressSink, module_display_name,
-    module_state_label,
+    ProgressEvent, ProgressPhase, ProgressPlanItem, ProgressSink, ProgressItemStats,
+    module_display_name, module_state_label,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -29,8 +29,8 @@ enum ModuleStatus {
     Done {
         state: String,
         reason: String,
-        /// （未通过小项数，小项总数），事件未携带统计时为 None。
-        stats: Option<(usize, usize)>,
+        /// 三段判定计数（通过/未通过/需人工确认），事件未携带统计时为 None。
+        stats: Option<ProgressItemStats>,
     },
 }
 
@@ -301,10 +301,7 @@ impl Inner {
                 self.modules[pos].status = ModuleStatus::Done {
                     state: event.state.clone().unwrap_or_else(|| "unknown".into()),
                     reason: event.message.clone(),
-                    stats: event
-                        .item_stats
-                        .as_ref()
-                        .map(|stats| (stats.failed, stats.total)),
+                    stats: event.item_stats.clone(),
                 };
                 self.modules[pos].elapsed = elapsed;
                 self.completed = event.index;
@@ -339,20 +336,30 @@ impl Inner {
                 format!("{marker} {name}  {state}")
             }
             ModuleStatus::Done { state, stats, .. } => {
-                let (marker, styled) = match state.as_str() {
-                    "pass" => (self.paint("32", "✓"), self.paint("32", "通过")),
-                    "fail" => {
-                        let label = stats.map_or_else(
-                            || "未通过".to_string(),
-                            |(failed, total)| format!("{failed}/{total} 未通过"),
+                // 统一口径：完成后显示"X通过 Y未通过 Z需人工确认"三段计数，
+                // 不再出现"待确认"这类没有行为指向的中间态词。
+                let (marker_color, marker, text) = match stats {
+                    Some(stats) => {
+                        let text = format!(
+                            "{}通过 {}未通过 {}需人工确认",
+                            stats.passed, stats.failed, stats.needs_manual
                         );
-                        (self.paint("31", "✗"), self.paint("31", &label))
+                        if stats.failed > 0 {
+                            ("31", "✗", text)
+                        } else if stats.needs_manual > 0 {
+                            ("33", "●", text)
+                        } else {
+                            ("32", "✓", text)
+                        }
                     }
-                    _ => (
-                        self.paint("33", "●"),
-                        self.paint("33", module_state_label(state)),
-                    ),
+                    None => match state.as_str() {
+                        "pass" => ("32", "✓", "通过".to_string()),
+                        "fail" => ("31", "✗", "未通过".to_string()),
+                        _ => ("33", "●", module_state_label(state).to_string()),
+                    },
                 };
+                let marker = self.paint(marker_color, marker);
+                let styled = self.paint(marker_color, &text);
                 let elapsed = module
                     .elapsed
                     .map(|elapsed| format!(" {}", self.paint("2", &format_duration(elapsed))))
@@ -570,11 +577,12 @@ impl Inner {
                     .as_deref()
                     .map(module_state_label)
                     .unwrap_or("未知");
-                let state = match (event.state.as_deref(), &event.item_stats) {
-                    (Some("fail"), Some(stats)) => {
-                        format!("{state_label} {}/{}", stats.failed, stats.total)
-                    }
-                    _ => state_label.to_string(),
+                let state = match &event.item_stats {
+                    Some(stats) => format!(
+                        "{}通过 {}未通过 {}需人工确认",
+                        stats.passed, stats.failed, stats.needs_manual
+                    ),
+                    None => state_label.to_string(),
                 };
                 let reason = if event.message.is_empty() {
                     String::new()
@@ -685,7 +693,7 @@ fn truncate(text: &str, max_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::ProgressPhase;
+    use crate::cli::{ProgressItemStats, ProgressPhase};
 
     fn event(phase: ProgressPhase, module: Option<&str>) -> ProgressEvent {
         ProgressEvent {
@@ -780,5 +788,31 @@ mod tests {
         inner.handle(&progress);
         let line = inner.module_line(0);
         assert!(line.contains("进行中 5/18"));
+    }
+
+    #[test]
+    fn done_module_shows_three_way_counts() {
+        // 统一口径：完成后不再出现"待确认"字样，改为三段计数。
+        let sink = TerminalProgressSink::new(Vec::new(), true, false, "m", "e");
+        sink.inner
+            .lock()
+            .unwrap()
+            .handle(&event(ProgressPhase::RunStarted, None));
+        sink.inner
+            .lock()
+            .unwrap()
+            .handle(&event(ProgressPhase::ModuleStarted, Some("capability")));
+        let mut completed = event(ProgressPhase::ModuleCompleted, Some("capability"));
+        completed.state = Some("inconclusive".into());
+        completed.item_stats = Some(ProgressItemStats {
+            passed: 141,
+            failed: 1,
+            needs_manual: 2,
+        });
+        let mut inner = sink.inner.lock().unwrap();
+        inner.handle(&completed);
+        let line = inner.module_line(0);
+        assert!(line.contains("141通过 1未通过 2需人工确认"));
+        assert!(!line.contains("待确认"));
     }
 }

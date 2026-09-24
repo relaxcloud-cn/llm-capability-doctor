@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::cli::{CliRunReport, ReportMode};
+use crate::cli::{CliRunReport, ReportMode, module_item_tallies};
 
 pub const GUI_VERSION: &str = "gui/v1";
 
@@ -256,6 +256,7 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
         .replace('>', "\\u003e");
+    let tallies_json = serde_json::to_string(&module_item_tallies(report))?;
     let module_labels = [
         ("ingress", "服务接入"),
         ("specification", "模型规格"),
@@ -356,7 +357,12 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
   <script>
     const report = {report_json};
     const labels = {{ ingress: "服务接入", specification: "模型规格", capability: "能力跑分", performance: "性能实测", agent: "智能体实测", baseline: "模型基线" }};
-    const statusLabel = state => ({{ pass: "通过", fail: "失败", unsupported: "不支持", inconclusive: "待确认", invalid_execution: "执行无效", not_applicable: "不适用", not_selected: "未选择", unverified: "未验证" }}[state] || state);
+    const statusLabel = state => ({{ pass: "通过", fail: "失败", unsupported: "不支持", inconclusive: "需人工确认", invalid_execution: "执行无效", not_applicable: "不适用", not_selected: "未选择", unverified: "未验证" }}[state] || state);
+    const tallies = {tallies_json};
+    const tallyLabel = moduleId => {{
+      const tally = tallies[moduleId];
+      return tally ? `${{tally.passed}}通过 ${{tally.failed}}未通过 ${{tally.needs_manual}}需人工确认` : null;
+    }};
     document.querySelector("#model").textContent = report.configuration.model;
     document.querySelector("#endpoint").textContent = report.configuration.redacted_endpoint;
     document.querySelector("#record-id").textContent = report.record.id;
@@ -384,7 +390,7 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
     report.record.module_results.forEach(result => {{
       const row = document.createElement("div"); row.className = "row";
       const name = document.createElement("strong"); name.textContent = labels[result.module_id] || result.module_id;
-      const state = document.createElement("span"); state.className = `state ${{result.state}}`; state.textContent = statusLabel(result.state);
+      const state = document.createElement("span"); state.className = `state ${{result.state}}`; state.textContent = tallyLabel(result.module_id) || statusLabel(result.state);
       const reason = document.createElement("span"); reason.className = "source"; reason.textContent = result.reason || "已记录当前状态和证据入口";
       row.append(name, state, reason); progress.append(row);
     }});

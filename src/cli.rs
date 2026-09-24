@@ -2841,60 +2841,107 @@ pub struct ProgressEvent {
     pub item_stats: Option<ProgressItemStats>,
 }
 
-/// 模块内检测小项的判定统计：未通过多少项、共多少项。
+/// 模块内检测小项的三段判定计数：通过 / 未通过 / 需人工确认。
+/// 需人工确认 = 已执行但未形成可判定证据（如响应截断），原始证据随记录交付，可人工复核。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProgressItemStats {
+    pub passed: usize,
     pub failed: usize,
-    pub total: usize,
+    pub needs_manual: usize,
 }
 
-/// 从各模块执行结果里提取"未通过小项数 / 小项总数"；提取不到时返回 None，
-/// 显示端退回只显示状态标签。
+/// 从各模块执行结果里提取三段判定计数；提取不到时返回 None，
+/// 显示端退回只显示状态标签。各模块计数单位：
+/// 规格实测按检测行，能力跑分按题目，智能体按检查项合计，基线按对比场景。
 pub(crate) fn module_item_stats(
     module_id: &str,
     payload: &serde_json::Value,
 ) -> Option<ProgressItemStats> {
-    let stats =
-        |failed: usize, total: usize| (total > 0).then(|| ProgressItemStats { failed, total });
+    let stats = |passed: usize, failed: usize, needs_manual: usize| {
+        (passed + failed + needs_manual > 0)
+            .then(|| ProgressItemStats { passed, failed, needs_manual })
+    };
     match module_id {
         "specification" => {
             let rows = payload["report"]["rows"].as_array()?;
-            let failed = rows
-                .iter()
-                .filter(|row| row["result"].as_str() == Some("failed"))
-                .count();
-            stats(failed, rows.len())
+            let mut passed = 0;
+            let mut failed = 0;
+            let mut needs_manual = 0;
+            for row in rows {
+                match row["result"].as_str() {
+                    Some("effective") | Some("verified_range") => passed += 1,
+                    Some("failed") => failed += 1,
+                    _ => needs_manual += 1,
+                }
+            }
+            stats(passed, failed, needs_manual)
         }
         "capability" => {
-            let summaries = payload["scorecard"]["summaries"].as_array()?;
-            let failed = summaries
-                .iter()
-                .filter(|summary| {
-                    summary["wrong"].as_u64().unwrap_or(0)
-                        + summary["missing"].as_u64().unwrap_or(0)
-                        > 0
-                })
-                .count();
-            stats(failed, summaries.len())
+            let observations = payload["scorecard"]["observations"].as_array()?;
+            let mut passed = 0;
+            let mut failed = 0;
+            let mut needs_manual = 0;
+            for observation in observations {
+                match observation["label"].as_str() {
+                    Some("correct") => passed += 1,
+                    Some("wrong") => failed += 1,
+                    _ => needs_manual += 1,
+                }
+            }
+            stats(passed, failed, needs_manual)
         }
         "agent" => {
             let checks = payload["report"]["check_summaries"].as_array()?;
-            let failed = checks
-                .iter()
-                .filter(|check| check["fail"].as_u64().unwrap_or(0) > 0)
-                .count();
-            stats(failed, checks.len())
+            let mut passed = 0;
+            let mut failed = 0;
+            let mut needs_manual = 0;
+            for check in checks {
+                passed += check["pass"].as_u64().unwrap_or(0) as usize;
+                failed += check["fail"].as_u64().unwrap_or(0) as usize;
+                needs_manual += (check["inconclusive"].as_u64().unwrap_or(0)
+                    + check["not_measured"].as_u64().unwrap_or(0))
+                    as usize;
+            }
+            stats(passed, failed, needs_manual)
         }
         "baseline" => {
             let comparisons = payload["report"]["comparisons"].as_array()?;
-            let failed = comparisons
-                .iter()
-                .filter(|comparison| comparison["status"].as_str() == Some("different"))
-                .count();
-            stats(failed, comparisons.len())
+            let mut passed = 0;
+            let mut failed = 0;
+            let mut needs_manual = 0;
+            for comparison in comparisons {
+                match comparison["status"].as_str() {
+                    // 结构差异不是失败，是值得人工看一眼的对照事实。
+                    Some("same_structure") => passed += 1,
+                    Some("different") => needs_manual += 1,
+                    _ => needs_manual += 1,
+                }
+            }
+            stats(passed, failed, needs_manual)
         }
         _ => None,
     }
+}
+
+/// 每个模块的三段判定计数，供 GUI 等展示端从运行记录直接取用。
+pub fn module_item_tallies(report: &CliRunReport) -> BTreeMap<String, ProgressItemStats> {
+    let mut tallies = BTreeMap::new();
+    for module_id in &report.selected_modules {
+        let payload = report
+            .record
+            .evidence
+            .iter()
+            .find(|item| {
+                item.payload.get("module").and_then(Value::as_str) == Some(module_id.as_str())
+                    && item.payload.get("origin").and_then(Value::as_str)
+                        == Some("cli_orchestration")
+            })
+            .and_then(|item| item.payload.get("payload"));
+        if let Some(stats) = payload.and_then(|payload| module_item_stats(module_id, payload)) {
+            tallies.insert(module_id.clone(), stats);
+        }
+    }
+    tallies
 }
 
 /// 模块内部检测小项的展示定义；module_started 事件携带，
@@ -2925,7 +2972,7 @@ pub fn module_state_label(state: &str) -> &'static str {
         "pass" => "通过",
         "fail" => "未通过",
         "unsupported" => "不支持",
-        "inconclusive" => "待确认",
+        "inconclusive" => "需人工确认",
         "invalid_execution" => "执行无效",
         "not_applicable" => "不适用",
         "not_selected" => "未选择",
@@ -3509,6 +3556,42 @@ mod tests {
             "{\"type\":\"agent_start\"}\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":\"OK\"}}"
         ));
     }
+
+    fn module_item_stats_counts_three_verdict_buckets() {
+        // 能力跑分按题目计数：correct→通过，wrong→未通过，其余→需人工确认。
+        let payload = json!({
+            "scorecard": {"observations": [
+                {"label": "correct"},
+                {"label": "correct"},
+                {"label": "wrong"},
+                {"label": "pending"},
+                {"label": "incomplete"}
+            ]}
+        });
+        let stats = module_item_stats("capability", &payload).unwrap();
+        assert_eq!(stats.passed, 2);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.needs_manual, 2);
+        // 规格实测按检测行计数：effective/verified_range 算通过。
+        let spec = json!({"report": {"rows": [
+            {"result": "verified_range"},
+            {"result": "effective"},
+            {"result": "inconclusive"}
+        ]}});
+        let stats = module_item_stats("specification", &spec).unwrap();
+        assert_eq!(stats.passed, 2);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.needs_manual, 1);
+        // 没有任何可计数的小项时返回 None，显示端回退状态标签。
+        assert!(
+            module_item_stats(
+                "capability",
+                &json!({"scorecard": {"observations": []}})
+            )
+            .is_none()
+        );
+    }
+
 
     #[derive(Debug)]
     struct TestExecutor {

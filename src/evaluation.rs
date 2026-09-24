@@ -615,11 +615,10 @@ pub fn build_module_reports(
             findings.push(Finding {
                 item_id: "检测项统计".into(),
                 verdict: if stats.failed == 0 { "pass" } else { "fail" }.into(),
-                rationale: if stats.failed == 0 {
-                    format!("{} 个检测项全部通过", stats.total)
-                } else {
-                    format!("{}/{} 个检测项未通过", stats.failed, stats.total)
-                },
+                rationale: format!(
+                    "{} 项通过，{} 项未通过，{} 项需人工确认",
+                    stats.passed, stats.failed, stats.needs_manual
+                ),
                 evidence_refs: evidence_refs.clone(),
             });
         }
