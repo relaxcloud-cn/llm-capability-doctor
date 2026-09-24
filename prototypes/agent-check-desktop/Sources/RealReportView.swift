@@ -599,6 +599,48 @@ struct RealModuleView: View {
   }
 
   private var failCount: Int { tasks.filter { $0.verdict == .fail }.count }
+
+  /// 记录列表/对比页只需要"未通过项数"与结论短语。`tasks` 会为每条样本
+  /// pretty-print 完整请求与响应（能力跑分 144 条 × 数 KB 文本），
+  /// 每秒多次重渲染时就是数秒级卡顿的根源；判定本身只依赖 taskSpecs 的
+  /// verdict，计数与标题走这条轻量路径，口径与 failCount/headline 一致。
+  var cheapFailCount: Int {
+    if !record.isRealReport {
+      return demoTasks.filter { $0.verdict == .fail }.count
+    }
+    let specs = taskSpecs
+    if !specs.isEmpty {
+      return specs.filter { $0.verdict == .fail }.count
+    }
+    // 与 tasks 的回退口径一致：status != "请求成功" 记未通过
+    return evidenceItems.filter { statusText(from: $0) != "请求成功" }.count
+  }
+  private var cheapUnverifiedCount: Int {
+    if !record.isRealReport { return 0 }
+    let specs = taskSpecs
+    guard !specs.isEmpty else { return 0 }
+    return specs.filter { $0.verdict == .unverified }.count
+  }
+  var cheapHeadline: String {
+    if cheapFailCount > 0 { return "有问题" }
+    let moduleState = record.isRealReport
+      ? (record.moduleStates?[backendID]
+        ?? moduleResult?["state"] as? String
+        ?? "unverified")
+      : "unverified"
+    switch moduleState {
+    case "pass":
+      return cheapUnverifiedCount > 0 ? "通过，部分项未判定" : "通过"
+    case "fail": return "有问题"
+    case "unsupported": return "不支持"
+    case "invalid_execution": return "本次检测未完成"
+    case "inconclusive": return "证据不足，暂不能判断"
+    case "not_applicable": return "不适用"
+    case "not_selected": return "本次未选"
+    case "unverified": return "缺少判定证据"
+    default: return "尚未检测"
+    }
+  }
   private var unverifiedCount: Int { tasks.filter { $0.verdict == .unverified }.count }
   private var passCount: Int { tasks.count - failCount - unverifiedCount }
 

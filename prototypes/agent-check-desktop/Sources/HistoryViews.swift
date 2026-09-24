@@ -182,7 +182,7 @@ private struct HistoryRow: View {
     guard record.hasCurrentEvidence else { return [] }
     return CheckModule.testModules
       .filter { record.modules.contains($0) }
-      .map { (title: $0.title, fails: RealModuleView(module: $0, record: record).exportModule.failCount) }
+      .map { (title: $0.title, fails: RealModuleView(module: $0, record: record).cheapFailCount) }
       .filter { $0.fails > 0 }
       .sorted { $0.fails > $1.fails }
   }
@@ -301,8 +301,8 @@ struct HistoryComparison: View {
       return SideModule(headline: record.modules.contains(module) ? "缺少判定证据" : "本次未选",
         failCount: 0, dot: .none, tested: false)
     }
-    let export = RealModuleView(module: module, record: record).exportModule
-    return SideModule(headline: export.headline, failCount: export.failCount,
+    let view = RealModuleView(module: module, record: record)
+    return SideModule(headline: view.cheapHeadline, failCount: view.cheapFailCount,
       dot: record.navDot(module), tested: true)
   }
 
