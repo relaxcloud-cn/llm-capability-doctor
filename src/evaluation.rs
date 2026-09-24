@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -178,6 +178,63 @@ const OMP_CHUNK_BUDGET_BYTES: usize = 128 * 1024;
 /// 22 条即使给了 25 分钟仍可能被掐断），因此体积之外再按条目数切一刀。
 const OMP_MAX_ITEMS_PER_CHUNK: usize = 12;
 
+/// 单行刷新的状态行：交互终端用 \r + 清行码原地更新，批次进度只占一行；
+/// 非 TTY（重定向到日志文件）退化为逐行输出，保留完整历史。
+struct StatusLine {
+    interactive: bool,
+    /// 交互模式下当前行是否有未换行的内容；Drop 时补换行，避免错误信息粘连在行尾。
+    pending: bool,
+}
+
+impl StatusLine {
+    fn new() -> Self {
+        Self {
+            interactive: std::io::stderr().is_terminal()
+                && std::env::var_os("TERM").is_none_or(|term| term != "dumb"),
+            pending: false,
+        }
+    }
+
+    /// 原地更新当前行；非 TTY 下逐行打印。
+    fn update(&mut self, message: &str) {
+        if self.interactive {
+            eprint!("\r\x1b[2K{message}");
+            let _ = std::io::stderr().flush();
+            self.pending = true;
+        } else {
+            eprintln!("{message}");
+        }
+    }
+
+    /// 落定一行正式输出（覆盖行内进度），后续消息从新行开始。
+    fn commit(&mut self, message: &str) {
+        if self.interactive {
+            eprintln!("\r\x1b[2K{message}");
+        } else {
+            eprintln!("{message}");
+        }
+        self.pending = false;
+    }
+}
+
+impl Drop for StatusLine {
+    fn drop(&mut self) {
+        if self.pending {
+            eprintln!();
+        }
+    }
+}
+
+/// 耗时短格式，与终端进度条一致：60s 内 "42s"，以上 "3m12s"。
+fn elapsed_short(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m{:02}s", seconds / 60, seconds % 60)
+    }
+}
+
 pub fn analyze_modules(
     input_paths: &[PathBuf],
     report_dir: impl AsRef<Path>,
@@ -188,16 +245,19 @@ pub fn analyze_modules(
     let omp = resolve_omp_path();
     let omp_config = OmpConfig::new(analyzer_config)?;
     let mut paths = Vec::new();
+    let mut status = StatusLine::new();
     for input_path in input_paths {
         let module = input_path
             .file_name()
             .and_then(|name| name.to_str())
             .and_then(|name| name.strip_suffix(".input.json"))
             .ok_or_else(|| format!("无法从输入文件识别模块：{}", input_path.display()))?;
+        let module_started = Instant::now();
         let output_path = report_dir.join(format!("{module}.report.json"));
         if let Err(error) = &omp {
             let report = inconclusive_report(module, error);
             write_json(&output_path, &report)?;
+            status.commit(&format!("[报告] OhMyPi 不可用，{module} 待确认：{error}"));
             paths.push(output_path);
             continue;
         }
@@ -242,7 +302,9 @@ pub fn analyze_modules(
                     ),
                 )
             };
-            eprintln!("[报告] OhMyPi 分析模块 {module} 批次 {batch}/{total_chunks}（{group}）…");
+            status.update(&format!(
+                "[报告] OhMyPi 分析模块 {module} 批次 {batch}/{total_chunks}（{group}）…"
+            ));
             let timeout = chunk_timeout_for(entries.len());
             let mut command = Command::new(omp.as_ref().unwrap());
             command
@@ -291,7 +353,9 @@ pub fn analyze_modules(
                             || reason.starts_with("不可用");
                         if transient && retries_left > 0 {
                             retries_left -= 1;
-                            eprintln!("[报告] OhMyPi 批次失败（{reason}），5 秒后重试一次…");
+                            status.update(&format!(
+                                "[报告] OhMyPi 批次失败（{reason}），5 秒后重试一次…"
+                            ));
                             std::thread::sleep(Duration::from_secs(5));
                             continue;
                         }
@@ -303,6 +367,11 @@ pub fn analyze_modules(
         }
         let report = merge_chunk_reports(module, chunk_reports);
         write_json(&output_path, &report)?;
+        status.commit(&format!(
+            "[报告] OhMyPi 分析模块 {module} {}（共 {total_chunks} 批，{}）",
+            verdict_label(&report.verdict),
+            elapsed_short(module_started.elapsed()),
+        ));
         paths.push(output_path);
     }
     Ok(paths)
