@@ -63,7 +63,7 @@ enum CheckModule: String, CaseIterable, Codable, Identifiable {
     case .comparison: return "基线对比"
     }
   }
-  // 首页体检清单用的一行内容简介（比 scope 短，不重复模块名）。
+  // 首页检测清单用的一行内容简介（比 scope 短，不重复模块名）。
   var coverDesc: String {
     switch self {
     case .info: return "本次接入的服务、接口与响应来源"
@@ -296,14 +296,21 @@ final class Workbench: ObservableObject {
   var comparedRecords: [RunRecord] { records.filter { historySelection.contains($0.id) } }
   var comparisonBlocker: String? {
     let pair = comparedRecords
-    guard pair.count == 2 else { return "选择两次记录后才能比较。" }
+    guard pair.count == 2 else { return "选择两条记录后即可对比。" }
     guard pair.allSatisfy({ !$0.stopped && $0.hasCurrentEvidence }) else {
-      return "仅能比较完成的同版本演示记录；中止或旧版记录可单独查看。"
+      return "中止或旧版记录不能对比；可在列表中单独打开查看。"
     }
-    guard Set(pair[0].modules) == Set(pair[1].modules) else { return "两次检查范围不同，不能直接比较结论。" }
-    guard let left = pair[0].context, let right = pair[1].context else { return "缺少测试条件，暂不能比较。" }
-    guard left == right else { return "样本、规则、平台、参数、运行环境或基线不同，暂不能直接比较。" }
     return nil
+  }
+
+  // 条件一致的两次检测可以做严格 A/B；不一致（典型是跨模型选型）按模块并排对照。
+  var comparisonSameConditions: Bool {
+    let pair = comparedRecords
+    guard pair.count == 2,
+      Set(pair[0].modules) == Set(pair[1].modules),
+      let left = pair[0].context, let right = pair[1].context
+    else { return false }
+    return left == right
   }
   func navigate(_ destination: Screen, retainRecord: Bool = false) {
     guard !connecting else { return }

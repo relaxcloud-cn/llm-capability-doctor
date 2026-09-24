@@ -81,7 +81,7 @@ extension RunRecord {
   }
 }
 
-// 模块状态点：侧栏大纲树、首页体检环、记录行指纹共用一套口径。
+// 模块状态点：侧栏大纲树、首页检测环、记录行指纹共用一套口径。
 enum NavDot {
   case info, pass, warn, fail, none
   var color: Color {

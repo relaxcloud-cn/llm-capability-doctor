@@ -65,7 +65,7 @@ struct HistoryView: View {
           VStack(alignment: .leading, spacing: 4) {
             Text("已选 \(store.historySelection.count) / 2 条记录")
               .font(.system(size: 12.5, weight: .medium))
-            Text(store.comparisonBlocker ?? "测试条件一致，可以比较分类表现。")
+            Text(store.comparisonBlocker ?? "选择任意两条记录（不同模型也可以）按模块并排对照。")
               .font(Theme.captionFont).foregroundStyle(Theme.muted)
               .fixedSize(horizontal: false, vertical: true)
           }
@@ -131,9 +131,9 @@ private struct HistoryRow: View {
       .disabled(store.historySelection.count == 2 && !selected)
       .padding(.top, 7)
       VStack(alignment: .leading, spacing: 10) {
-        // 第一行：模型与地址 + 结论胶囊 + 时间（点这行打开结果）
+        // 第一行：模型与地址 + 结论胶囊 + 时间（点这行进只读回看）
         Button {
-          store.openRecord(record)
+          store.reviewRecord(record)
         } label: {
           HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
@@ -260,56 +260,168 @@ private struct HistoryRow: View {
 }
 
 // 两次检测的对照：同条件下逐模块比。
+// 模型对比（选型参考）：任选两条记录按模块并排对照。
+// 条件一致时是严格 A/B；不一致（典型是跨模型选型）呈现逐模块判定与更优方，
+// 底部注明条件差异，不冒充同条件结论。
 struct HistoryComparison: View {
   @ObservedObject var store: Workbench
+
+  private var pair: [RunRecord] { store.comparedRecords }
+  private var sameModel: Bool { pair.count == 2 && pair[0].service.model == pair[1].service.model }
+
+  // 单侧单模块的表现摘要：与结果页同一数据管道。
+  private struct SideModule {
+    var headline: String
+    var failCount: Int
+    var dot: NavDot
+    var tested: Bool
+    // 排序用：通过且零失败最好，其次有失败，未测/无证据最弱
+    var rank: Int {
+      if !tested { return 0 }
+      if failCount == 0 && dot == .pass { return 3 }
+      return 2
+    }
+  }
+
+  private func side(_ record: RunRecord, module: CheckModule) -> SideModule {
+    guard record.modules.contains(module), record.hasCurrentEvidence else {
+      return SideModule(headline: record.modules.contains(module) ? "缺少判定证据" : "本次未选",
+        failCount: 0, dot: .none, tested: false)
+    }
+    let export = RealModuleView(module: module, record: record).exportModule
+    return SideModule(headline: export.headline, failCount: export.failCount,
+      dot: record.navDot(module), tested: true)
+  }
+
   var body: some View {
-    VStack(alignment: .leading, spacing: 20) {
+    VStack(alignment: .leading, spacing: 18) {
       HStack {
-        Text("两次检测对比").font(.system(size: 20, weight: .bold))
+        Text(sameModel ? "两次检测对比" : "模型对比 · 选型参考")
+          .font(.system(size: 20, weight: .bold))
         Spacer()
         IconButton(symbol: "xmark", help: "关闭对比") { store.showHistoryComparison = false }
       }
-      Pill(text: "样本、规则与运行条件一致", style: FindingState.pass.style, icon: "checkmark.seal")
+      if store.comparisonSameConditions {
+        Pill(text: "样本、规则与运行条件一致，可作同条件 A/B", style: FindingState.pass.style, icon: "checkmark.seal")
+      } else {
+        Text("两次检测的条件（样本、规则或平台）不同：按模块并排对照，供选型参考，不构成同条件结论。")
+          .font(Theme.captionFont).foregroundStyle(Theme.muted)
+          .fixedSize(horizontal: false, vertical: true)
+      }
       ScrollView {
         VStack(alignment: .leading, spacing: 0) {
-          HStack(alignment: .top, spacing: 24) {
-            ForEach(store.comparedRecords) { record in
-              VStack(alignment: .leading, spacing: 9) {
-                Text(record.service.model)
-                  .font(.system(size: 15, weight: .bold)).lineLimit(2)
-                Text(record.date.formatted(date: .numeric, time: .shortened))
-                  .font(Theme.captionFont).foregroundStyle(Theme.faint)
-                Pill(text: record.title, style: record.style)
-                Text(record.explanation)
-                  .font(Theme.captionFont).foregroundStyle(Theme.muted)
-                  .fixedSize(horizontal: false, vertical: true)
-                Action(title: "查看这次依据", icon: "doc.text.magnifyingglass", primary: false) {
-                  store.showHistoryComparison = false
-                  store.reviewRecord(record)
-                }
-              }.frame(maxWidth: .infinity, alignment: .leading)
+          HStack(alignment: .top, spacing: 14) {
+            ForEach(Array(pair.enumerated()), id: \.element.id) { _, record in
+              comparisonCard(record)
             }
-          }.padding(.bottom, 20)
-          ForEach(CheckModule.testModules) { module in
-            VStack(alignment: .leading, spacing: 11) {
-              Label(module.title, systemImage: module.symbol)
-                .font(.system(size: 12.5, weight: .semibold))
-              HStack(alignment: .top, spacing: 24) {
-                ForEach(store.comparedRecords) { record in
-                  Text(record.brief(module))
-                    .font(Theme.captionFont).foregroundStyle(Theme.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-              }
-            }
-            .padding(.vertical, 14)
-            .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
+          }.padding(.bottom, 18)
+          ForEach(commonModules, id: \.self) { module in
+            moduleRow(module)
           }
+          readingBar
         }
-      }.frame(maxHeight: 540)
+      }.frame(maxHeight: 560)
     }
-    .padding(28).frame(width: 780).background(.white).foregroundStyle(Theme.ink)
+    .padding(28).frame(width: 820).background(.white).foregroundStyle(Theme.ink)
+  }
+
+  private var commonModules: [CheckModule] {
+    CheckModule.testModules.filter { module in pair.contains { $0.modules.contains(module) } }
+  }
+
+  private func comparisonCard(_ record: RunRecord) -> some View {
+    let failed = commonModules.reduce(0) { $0 + side(record, module: $1).failCount }
+    return VStack(alignment: .leading, spacing: 8) {
+      Text(record.service.model)
+        .font(.system(size: 15, weight: .bold)).lineLimit(2)
+      Text("\(record.service.host) · \(record.date.formatted(date: .numeric, time: .shortened))")
+        .font(Theme.captionFont).foregroundStyle(Theme.faint).lineLimit(1)
+      Pill(text: record.title, style: record.style)
+      HStack(spacing: 6) {
+        if failed > 0 {
+          Text("\(failed) 项未通过")
+            .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.blocked)
+            .padding(.horizontal, 8).padding(.vertical, 2)
+            .background(Theme.blockedTint, in: RoundedRectangle(cornerRadius: 6))
+        } else {
+          Text("全部通过")
+            .font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.pass)
+            .padding(.horizontal, 8).padding(.vertical, 2)
+            .background(Theme.passTint, in: RoundedRectangle(cornerRadius: 6))
+        }
+        Text("\(record.completed.count)/\(record.modules.count) 个模块")
+          .font(.system(size: 10.5)).foregroundStyle(Theme.muted)
+          .padding(.horizontal, 8).padding(.vertical, 2)
+          .background(Theme.canvas, in: RoundedRectangle(cornerRadius: 6))
+      }
+      Action(title: "查看这次依据", icon: "doc.text.magnifyingglass", primary: false) {
+        store.showHistoryComparison = false
+        store.reviewRecord(record)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(14)
+    .background(Theme.canvas.opacity(0.5), in: RoundedRectangle(cornerRadius: 12))
+    .overlay(RoundedRectangle(cornerRadius: 12).stroke(Theme.line))
+  }
+
+  private func moduleRow(_ module: CheckModule) -> some View {
+    let left = side(pair[0], module: module)
+    let right = side(pair[1], module: module)
+    let leftWins = left.rank > right.rank
+    let rightWins = right.rank > left.rank
+    return HStack(spacing: 0) {
+      Text(module.title)
+        .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Theme.muted)
+        .frame(width: 128, alignment: .leading)
+      moduleCell(left, wins: leftWins)
+      moduleCell(right, wins: rightWins)
+    }
+    .padding(.vertical, 9)
+    .overlay(alignment: .top) { Rectangle().fill(Theme.line).frame(height: 1) }
+  }
+
+  private func moduleCell(_ side: SideModule, wins: Bool) -> some View {
+    HStack(spacing: 8) {
+      navDotView(side.dot, dark: false, size: 8)
+      Text(side.headline)
+        .font(.system(size: 12.5, weight: .medium))
+      if side.failCount > 0 {
+        Text("\(side.failCount) 项未通过")
+          .font(.system(size: 10.5)).foregroundStyle(Theme.blocked)
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .padding(.horizontal, 10).padding(.vertical, 5)
+    .background(
+      wins ? Theme.passTint : Theme.canvas.opacity(0.4),
+      in: RoundedRectangle(cornerRadius: 8))
+  }
+
+  private var readingBar: some View {
+    let leftWins = commonModules.filter { side(pair[0], module: $0).rank > side(pair[1], module: $0).rank }.count
+    let rightWins = commonModules.filter { side(pair[1], module: $0).rank > side(pair[0], module: $0).rank }.count
+    let better = leftWins >= rightWins ? pair[0] : pair[1]
+    let wins = max(leftWins, rightWins)
+    let agent = CheckModule.testModules.first { $0 == .agent }
+    var agentNote = ""
+    if let agent, pair.allSatisfy({ $0.modules.contains(agent) }) {
+      let l = side(pair[0], module: agent), r = side(pair[1], module: agent)
+      if l.rank != r.rank {
+        agentNote = "，智能体任务 \((l.rank > r.rank ? pair[0] : pair[1]).service.model) 更稳"
+      }
+    }
+    return HStack(alignment: .top, spacing: 8) {
+      Image(systemName: "text.book.closed")
+        .font(.system(size: 12)).foregroundStyle(Theme.accent)
+      Text("读法：\(better.service.model) 在 \(wins) 个模块表现更优\(agentNote)；另一侧在其余模块各有取舍，按业务侧重选择。绿底 = 该模块更优的一方。")
+        .font(Theme.captionFont).foregroundStyle(Theme.muted)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+    .padding(12)
+    .background(Theme.infoTint, in: RoundedRectangle(cornerRadius: 10))
+    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.accent.opacity(0.2)))
+    .padding(.top, 14)
   }
 }
 
@@ -319,6 +431,7 @@ struct HistoryComparison: View {
 struct HistoryRecordViewer: View {
   @ObservedObject var store: Workbench
   let record: RunRecord
+  @State private var currentModule: CheckModule?
 
   var body: some View {
     VStack(alignment: .leading, spacing: 0) {
@@ -339,20 +452,74 @@ struct HistoryRecordViewer: View {
       }
       .padding(.horizontal, 28).padding(.vertical, 16)
       .overlay(alignment: .bottom) { Rectangle().fill(Theme.line).frame(height: 1) }
-      ScrollView {
-        VStack(alignment: .leading, spacing: 26) {
-          VerdictBanner(
-            style: record.style, title: record.admissionTitle,
-            detail: record.admissionExplanation)
-          ForEach(CheckModule.testModules.filter { record.modules.contains($0) }) { module in
-            RealModuleView(module: module, record: record)
+      // 吸附式模块目录：点击跳转，滚动联动高亮，状态色点顺带当摘要
+      ScrollViewReader { proxy in
+        VStack(alignment: .leading, spacing: 0) {
+          HStack(spacing: 8) {
+            ForEach(visibleModules) { module in
+              Button {
+                currentModule = module
+                withAnimation { proxy.scrollTo(module.id, anchor: .top) }
+              } label: {
+                HStack(spacing: 6) {
+                  navDotView(record.navDot(module), dark: false, size: 7)
+                  Text(module.shortTitle)
+                    .font(.system(size: 11.5, weight: currentModule == module ? .semibold : .regular))
+                    .foregroundStyle(currentModule == module ? Theme.accent : Theme.muted)
+                }
+                .padding(.horizontal, 12).padding(.vertical, 5)
+                .background(
+                  currentModule == module ? Theme.infoTint : .white,
+                  in: Capsule())
+                .overlay(
+                  Capsule().stroke(currentModule == module ? Theme.accent.opacity(0.3) : Theme.line))
+              }
+              .buttonStyle(.plain)
+              .help("跳到\(module.title)")
+            }
+            Spacer()
+          }
+          .padding(.horizontal, 28).padding(.vertical, 10)
+          .overlay(alignment: .bottom) { Rectangle().fill(Theme.canvas).frame(height: 1) }
+          ScrollView {
+            VStack(alignment: .leading, spacing: 26) {
+              VerdictBanner(
+                style: record.style, title: record.admissionTitle,
+                detail: record.admissionExplanation)
+              ForEach(visibleModules) { module in
+                RealModuleView(module: module, record: record)
+                  .id(module.id)
+                  .background(
+                    ViewerSectionSpy(module: module) { currentModule = $0 })
+              }
+            }
+            .padding(28).frame(maxWidth: 980, alignment: .leading)
           }
         }
-        .padding(28).frame(maxWidth: 980, alignment: .leading)
       }
     }
     .frame(minWidth: 920, minHeight: 640)
     .background(.white)
     .foregroundStyle(Theme.ink)
+    .onAppear { currentModule = visibleModules.first }
+  }
+
+  private var visibleModules: [CheckModule] {
+    CheckModule.testModules.filter { record.modules.contains($0) }
+  }
+}
+
+// 滚动联动：模块区块进入视口顶部时回调，目录同步高亮。
+private struct ViewerSectionSpy: View {
+  let module: CheckModule
+  let onVisible: (CheckModule) -> Void
+  var body: some View {
+    GeometryReader { proxy in
+      Color.clear
+        .onChange(of: proxy.frame(in: .global).minY) { _, y in
+          if y < 140 && y > -400 { onVisible(module) }
+        }
+    }
+    .allowsHitTesting(false)
   }
 }

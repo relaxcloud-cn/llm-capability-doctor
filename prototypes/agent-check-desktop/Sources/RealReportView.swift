@@ -1022,19 +1022,19 @@ private struct RealSampleRow: View {
             curlVisible ? "收起原始请求" : requestLabel,
             visible: $curlVisible)
           if curlVisible {
-            EvidenceField(
+            CodeReader(
               title: "原始请求",
-              value: sample.curl.isEmpty ? sample.request : sample.curl,
-              monospaced: true)
+              value: sample.curl.isEmpty ? sample.request : sample.curl)
           }
           disclosureLink(
             respVisible ? "收起\(responseTitle)" : "查看\(responseTitle)",
             visible: $respVisible)
           if respVisible {
-            EvidenceField(
-              title: responseTitle,
-              value: sample.rawResponse.isEmpty ? responseEmptyNote : sample.rawResponse,
-              monospaced: !sample.rawResponse.isEmpty)
+            if sample.rawResponse.isEmpty {
+              EvidenceField(title: responseTitle, value: responseEmptyNote)
+            } else {
+              CodeReader(title: responseTitle, value: sample.rawResponse, searchable: true)
+            }
           }
         }
         .padding(.leading, 18)
@@ -1083,6 +1083,150 @@ private struct RealSampleRow: View {
     }
     .buttonStyle(.plain)
     .foregroundStyle(Theme.accent)
+  }
+}
+
+// 原始证据阅读器:行数前置、超长折叠中段、搜索命中自动展开并高亮、一键复制。
+// 展开大响应不再刷屏。
+private struct CodeReader: View {
+  let title: String
+  let value: String
+  var searchable = false
+  @State private var query = ""
+  @State private var expandedAll = false
+
+  private static let threshold = 200
+  private static let headCount = 100
+  private static let tailCount = 60
+
+  private var lines: [String] { value.components(separatedBy: "\n") }
+  private var searching: Bool { searchable && !query.isEmpty }
+
+  private struct DisplayLine {
+    var number: Int
+    var text: String
+    var highlight: String?
+  }
+
+  private var display: (lines: [DisplayLine], note: String?, expandable: Bool) {
+    let all = lines
+    if searching {
+      let matched = all.enumerated().filter { $0.element.localizedCaseInsensitiveContains(query) }
+      return (
+        matched.map {
+          DisplayLine(number: $0.offset + 1, text: $0.element, highlight: query)
+        },
+        matched.isEmpty ? "没有命中「\(query)」" : "命中 \(matched.count) 行",
+        false
+      )
+    }
+    if expandedAll || all.count <= Self.threshold {
+      return (all.enumerated().map { DisplayLine(number: $0.offset + 1, text: $0.element, highlight: nil) }, nil, false)
+    }
+    let head = all.prefix(Self.headCount)
+    let tail = all.suffix(Self.tailCount)
+    var shown: [DisplayLine] = []
+    shown += head.enumerated().map { DisplayLine(number: $0.offset + 1, text: $0.element, highlight: nil) }
+    let tailStart = all.count - Self.tailCount
+    shown += tail.enumerated().map {
+      DisplayLine(number: tailStart + $0.offset + 1, text: $0.element, highlight: nil)
+    }
+    let omitted = all.count - Self.headCount - Self.tailCount
+    return (shown, "已折叠中段 \(omitted) 行（搜索命中的字段会自动展开）", true)
+  }
+
+  var body: some View {
+    let shown = display
+    return VStack(alignment: .leading, spacing: 7) {
+      HStack(spacing: 8) {
+        Text(title).font(.system(size: 11.5, weight: .medium)).foregroundStyle(Theme.accent)
+        Text("\(lines.count) 行")
+          .font(.system(size: 10.5)).foregroundStyle(Theme.faint)
+          .monospacedDigit()
+        Spacer()
+        if searchable {
+          HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass").font(.system(size: 8.5)).foregroundStyle(Theme.faint)
+            TextField("搜字段…", text: $query)
+              .textFieldStyle(.plain)
+              .font(.system(size: 10.5))
+              .frame(width: 96)
+          }
+          .padding(.horizontal, 8).frame(height: 22)
+          .background(.white, in: RoundedRectangle(cornerRadius: 6))
+          .overlay(
+            RoundedRectangle(cornerRadius: 6)
+              .stroke(searching ? Theme.accent.opacity(0.4) : Theme.line))
+        }
+        Button {
+          NSPasteboard.general.clearContents()
+          NSPasteboard.general.setString(value, forType: .string)
+        } label: {
+          Label("复制", systemImage: "doc.on.doc")
+            .font(.system(size: 10.5, weight: .medium))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.muted)
+        .help("复制全文")
+      }
+      ScrollView {
+        VStack(alignment: .leading, spacing: 0) {
+          ForEach(Array(shown.lines.enumerated()), id: \.offset) { _, line in
+            HStack(alignment: .top, spacing: 0) {
+              Text("\(line.number)")
+                .font(.system(size: 10).monospaced())
+                .foregroundStyle(Color(red: 0.71, green: 0.76, blue: 0.81))
+                .frame(width: 34, alignment: .trailing)
+                .padding(.trailing, 10)
+              highlighted(line.text, query: line.highlight)
+                .font(.system(size: 11).monospaced())
+                .foregroundStyle(Theme.ink)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.vertical, 0.5)
+          }
+        }
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+      }
+      .frame(maxHeight: 380)
+      .background(Color(red: 0.973, green: 0.98, blue: 0.984), in: RoundedRectangle(cornerRadius: 9))
+      .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color(red: 0.91, green: 0.93, blue: 0.95)))
+      if let note = shown.note {
+        HStack {
+          Rectangle().fill(Theme.line).frame(height: 1)
+          Text(note).font(.system(size: 10)).foregroundStyle(Theme.faint).fixedSize()
+          Rectangle().fill(Theme.line).frame(height: 1)
+        }
+      }
+      if shown.expandable {
+        Button {
+          expandedAll = true
+        } label: {
+          Text("展开全部 \(lines.count) 行")
+            .font(.system(size: 11, weight: .semibold))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.accent)
+        .frame(maxWidth: .infinity)
+      }
+    }
+    .animation(.easeInOut(duration: 0.15), value: query)
+    .animation(.easeInOut(duration: 0.15), value: expandedAll)
+  }
+
+  // 命中片段加粗提亮;SwiftUI 的 Text 拼接足够,不引第三方高亮。
+  private func highlighted(_ line: String, query: String?) -> Text {
+    guard let query, !query.isEmpty,
+      let range = line.range(of: query, options: .caseInsensitive)
+    else { return Text(line) }
+    let before = String(line[..<range.lowerBound])
+    let match = String(line[range])
+    let after = String(line[range.upperBound...])
+    return Text(before)
+      + Text(match).fontWeight(.bold).foregroundColor(Theme.limitedBar)
+      + Text(after)
   }
 }
 

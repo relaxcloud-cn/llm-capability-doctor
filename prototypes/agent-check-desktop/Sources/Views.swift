@@ -91,7 +91,7 @@ struct WorkbenchView: View {
           .background(Theme.accent, in: RoundedRectangle(cornerRadius: 8.5))
         VStack(alignment: .leading, spacing: 1.5) {
           Text("AgentCheck").font(.system(size: 15, weight: .semibold))
-          Text("模型服务体检").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
+          Text("模型服务检测").font(.system(size: 10.5)).foregroundStyle(Theme.faint)
         }
       }
       .padding(.horizontal, 18).frame(height: 64)
@@ -152,7 +152,7 @@ struct WorkbenchView: View {
           disabled: store.records.isEmpty)
       }
 
-      // 上次体检状态卡（检测运行时让位给进度面板）
+      // 上次检测状态卡（检测运行时让位给进度面板）
       if store.running {
         runPanel
       } else if let latest = store.latestForService {
@@ -178,12 +178,12 @@ struct WorkbenchView: View {
     .background(Theme.canvas)
   }
 
-  // 上次体检状态卡：侧栏随时回答「当前服务现在什么状态」。
+  // 上次检测状态卡：侧栏随时回答「当前服务现在什么状态」。
   // 只反映当前服务最近一次，不是历史列表；检测运行时让位给进度面板。
   private func lastCheckCard(_ record: RunRecord) -> some View {
     VStack(alignment: .leading, spacing: 0) {
       HStack {
-        Text("上次体检").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.faint)
+        Text("上次检测").font(.system(size: 10.5, weight: .semibold)).foregroundStyle(Theme.faint)
         Spacer()
         Text(record.date.formatted(.dateTime.month().day().hour().minute()))
           .font(.system(size: 10.5)).foregroundStyle(Theme.faint)

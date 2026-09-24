@@ -286,13 +286,15 @@ func runModelTests() async throws {
   store.toggleHistory(legacy.id)
   try expect(store.historySelection.count == 2, "历史最多选择两个")
   store.records[1].context?.samples = "other"
-  try expect(store.comparisonBlocker != nil, "不同样本不能直接比较")
+  try expect(
+    store.comparisonBlocker == nil && !store.comparisonSameConditions,
+    "不同样本按选型对照呈现，不再拦截")
   store.records[1] = other
   store.records[1].context?.environment = "other"
-  try expect(store.comparisonBlocker != nil, "不同环境不能直接比较")
+  try expect(!store.comparisonSameConditions, "不同环境按选型对照呈现")
   store.records[1] = other
   store.records[1].modules = [.functions]
-  try expect(store.comparisonBlocker != nil, "不同范围不能直接比较")
+  try expect(!store.comparisonSameConditions, "不同范围按选型对照呈现")
   store.historySelection = [limited.id, legacy.id]
   try expect(store.comparisonBlocker != nil, "新旧版本不能直接比较")
   store.historySearch = "no-record"

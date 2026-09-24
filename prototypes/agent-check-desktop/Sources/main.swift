@@ -24,7 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
       contentRect: NSRect(x: 0, y: 0, width: 1180, height: 830),
       styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false
     )
-    window.title = "AgentCheck — 模型服务体检"
+    window.title = "AgentCheck — 模型服务检测"
     window.minSize = NSSize(width: 1000, height: 740)
     window.isReleasedWhenClosed = false
     window.delegate = self

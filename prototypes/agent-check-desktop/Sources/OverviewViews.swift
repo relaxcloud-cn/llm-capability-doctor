@@ -32,7 +32,7 @@ struct HomeView: View {
     }
   }
 
-  // MARK: 主行动面板：深色仪器面板 = 发起体检 + 上次体检环
+  // MARK: 主行动面板：深色仪器面板 = 发起检测 + 上次检测环
 
   private var hero: some View {
     HStack(spacing: 0) {
@@ -51,7 +51,7 @@ struct HomeView: View {
           }
           .buttonStyle(.plain).disabled(store.running)
         }
-        Text(latest == nil ? "开始第一次体检" : "开始一次新体检")
+        Text(latest == nil ? "开始第一次检测" : "开始一次新检测")
           .font(.system(size: 30, weight: .bold)).foregroundStyle(.white)
           .padding(.top, 18)
         Text(
@@ -131,7 +131,7 @@ struct HomeView: View {
     } label: {
       HStack(spacing: 9) {
         Image(systemName: "play.fill").font(.system(size: 11))
-        Text("开始体检")
+        Text("开始检测")
       }
       .font(.system(size: 15, weight: .semibold)).foregroundStyle(.white)
       .padding(.horizontal, 30).frame(height: 46)
@@ -187,7 +187,7 @@ struct HomeView: View {
         Button {
           store.showCurrentReport()
         } label: {
-          Text("上次体检 \(record.date.formatted(date: .numeric, time: .shortened)) · 查看报告 →")
+          Text("上次检测 \(record.date.formatted(date: .numeric, time: .shortened)) · 查看报告 →")
             .font(.system(size: 11)).foregroundStyle(.white.opacity(0.45))
         }
         .buttonStyle(.plain)
@@ -260,7 +260,7 @@ struct HomeView: View {
     .help("打开这次检测结果")
   }
 
-  // MARK: 首次使用：同一 hero 之下接三步引导与体检清单
+  // MARK: 首次使用：同一 hero 之下接三步引导与检测清单
 
   private var welcome: some View {
     VStack(alignment: .leading, spacing: 26) {
@@ -306,7 +306,7 @@ struct HomeView: View {
   private var coverList: some View {
     VStack(spacing: 0) {
       HStack(alignment: .firstTextBaseline) {
-        Text("一次体检覆盖什么").font(.system(size: 14, weight: .semibold))
+        Text("一次检测覆盖什么").font(.system(size: 14, weight: .semibold))
         Spacer()
         Text("点击任意一项可单独检测").font(.system(size: 11.5)).foregroundStyle(Theme.faint)
       }
@@ -341,7 +341,7 @@ struct HomeView: View {
   }
 }
 
-// 体检环：五段弧 = 五个检测模块，颜色 = 该模块当次状态。
+// 检测环：五段弧 = 五个检测模块，颜色 = 该模块当次状态。
 // 无记录时呈现空环，组件状态连续。
 struct CoverageRing: View {
   var record: RunRecord?
@@ -376,7 +376,7 @@ struct CoverageRing: View {
     guard let record else { return "待检" }
     return "\(record.completed.count)/\(record.modules.count)"
   }
-  private var centerSub: String { record == nil ? "还没有体检记录" : "模块已检" }
+  private var centerSub: String { record == nil ? "还没有检测记录" : "模块已检" }
 }
 
 struct ResultView: View {

@@ -11,7 +11,7 @@ struct ConnectionView: View {
       VStack(alignment: .leading, spacing: 10) {
         Text(store.service == nil ? "连接你的模型服务" : "更换模型服务")
           .font(.system(size: 27, weight: .bold))
-        Text("填写接入信息后开始第一次体检。")
+        Text("填写接入信息后开始第一次检测。")
           .font(.system(size: 13.5)).foregroundStyle(Theme.muted)
       }
       VStack(alignment: .leading, spacing: 18) {
@@ -185,7 +185,13 @@ struct ConfirmationView: View {
                 Text(module.subtitle).font(Theme.captionFont).foregroundStyle(Theme.faint)
               }
               Spacer()
-              Text(moduleCount(module)).font(Theme.captionFont).foregroundStyle(Theme.faint)
+              VStack(alignment: .trailing, spacing: 2) {
+                Text(moduleCount(module)).font(Theme.captionFont).foregroundStyle(Theme.faint)
+                if store.selectedModules.contains(module) {
+                  Text(estimate(for: module).label)
+                    .font(Theme.captionFont).foregroundStyle(Theme.muted)
+                }
+              }
             }.padding(.leading, 7)
           }
           .toggleStyle(.checkbox)
@@ -199,15 +205,32 @@ struct ConfirmationView: View {
         Label("未选智能体实测，本次不会给出「能否胜任 Agent 任务」的结论。", systemImage: "info.circle")
           .font(Theme.captionFont).foregroundStyle(Theme.limited)
       }
+      if !store.selectedModules.isEmpty {
+        // 合计预估:时长 / 请求数 / token 三件事,开工前心里有数(按固定样本折算,以实际为准)
+        HStack(spacing: 16) {
+          Text("合计").font(.system(size: 12.5, weight: .semibold))
+          Text("⏱ 约 \(totalEstimate.lowMinutes)–\(totalEstimate.highMinutes) 分钟")
+          Text("→ ≈\(totalEstimate.requests) 次请求")
+          Text("◈ ≈\(totalEstimate.tokenRange)")
+          Spacer()
+        }
+        .font(.system(size: 11.5)).foregroundStyle(Theme.muted)
+        .padding(.horizontal, 14).padding(.vertical, 9)
+        .background(Theme.canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 9))
+        Label(
+          "时间紧？先只勾「模型规格 + 基线对比」，约 3 分钟出基础结论，其余模块随时补测。",
+          systemImage: "timer")
+          .font(Theme.captionFont).foregroundStyle(Theme.muted)
+      }
       HStack(alignment: .center) {
         VStack(alignment: .leading, spacing: 4) {
           Text(
             store.selectedModules.isEmpty
               ? "请选择检测范围"
-              : "已选 \(store.selectedModules.count) 个模块 · 预计约 \(store.selectedModules.count * 2) 秒"
+              : "已选 \(store.selectedModules.count) 个模块"
           )
           .font(.system(size: 12.5, weight: .medium))
-          Text(store.isRealMode ? "真实执行会调用目标模型服务并产生对应费用。" : "开始后将调用目标模型并记录检测证据。")
+          Text("预估按固定样本量折算；真实执行会调用目标模型服务并产生对应费用，以实际为准。")
             .font(Theme.captionFont).foregroundStyle(Theme.faint)
         }
         Spacer()
@@ -221,6 +244,35 @@ struct ConfirmationView: View {
     .background(.white)
     .foregroundStyle(Theme.ink)
   }
+  // 各模块预估:固定样本量天然可估;文案写「约/≈」,以实际为准。
+  private struct ModuleEstimate {
+    var label: String
+    var requests: Int
+    var lowMinutes: Int
+    var highMinutes: Int
+  }
+  private func estimate(for module: CheckModule) -> ModuleEstimate {
+    switch module {
+    case .info: return ModuleEstimate(label: "", requests: 0, lowMinutes: 0, highMinutes: 0)
+    case .parameters: return ModuleEstimate(label: "18 次请求 · 约 2 分钟", requests: 18, lowMinutes: 2, highMinutes: 3)
+    case .functions: return ModuleEstimate(label: "40 题 · 约 4 分钟", requests: 40, lowMinutes: 3, highMinutes: 5)
+    case .performance: return ModuleEstimate(label: "5 批负载 · 约 6 分钟", requests: 40, lowMinutes: 5, highMinutes: 8)
+    case .agent: return ModuleEstimate(label: "10 个任务 · 32 次执行 · 约 10 分钟", requests: 32, lowMinutes: 8, highMinutes: 14)
+    case .comparison: return ModuleEstimate(label: "14 项 · 约 1 分钟", requests: 14, lowMinutes: 1, highMinutes: 2)
+    }
+  }
+  private var totalEstimate: (lowMinutes: Int, highMinutes: Int, requests: Int, tokenRange: String) {
+    let selected = CheckModule.testModules.filter { store.selectedModules.contains($0) }
+    let all = selected.map { estimate(for: $0) }
+    let low = all.reduce(0) { $0 + $1.lowMinutes }
+    let high = all.reduce(0) { $0 + $1.highMinutes }
+    let requests = all.reduce(0) { $0 + $1.requests }
+    let lowWan = Double(requests) * 0.035
+    let highWan = Double(requests) * 0.065
+    let tokenRange = String(format: "%.0f–%.0f 万 token", lowWan, highWan)
+    return (low, high, requests, tokenRange)
+  }
+
   private func moduleCount(_ module: CheckModule) -> String {
     switch module {
     case .info: return ""
