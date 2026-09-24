@@ -230,7 +230,7 @@ struct ConfirmationView: View {
               : "已选 \(store.selectedModules.count) 个模块"
           )
           .font(.system(size: 12.5, weight: .medium))
-          Text("预估按固定样本量折算；真实执行会调用目标模型服务并产生对应费用，以实际为准。")
+          Text("开始前会先探测服务能承受多少并发，并按实测并发执行——能并发的服务会明显快于预估上限。真实执行调用目标模型服务并产生对应费用，以实际为准。")
             .font(Theme.captionFont).foregroundStyle(Theme.faint)
         }
         Spacer()

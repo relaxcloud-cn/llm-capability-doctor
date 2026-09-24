@@ -483,6 +483,7 @@ mod tests {
             stop_after: None,
             run_id: "run-gui".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
+            concurrency_preflight: false,
         };
         run_with_executor(request, &mut UnavailableExecutor).unwrap()
     }
@@ -534,3 +535,4 @@ mod tests {
         assert_eq!(launcher.paths.len(), 1);
     }
 }
+

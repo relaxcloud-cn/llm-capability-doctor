@@ -4,6 +4,7 @@ mod bundle_format;
 pub mod calibration;
 pub mod capability;
 pub mod cli;
+pub mod concurrency;
 pub mod conclusion;
 pub mod context_probe;
 pub mod evaluation;

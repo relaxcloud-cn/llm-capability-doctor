@@ -191,6 +191,7 @@ fn main() {
         stop_after,
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
+        concurrency_preflight: true,
     };
     let mut executor = match LiveExecutor::new_full(
         request.endpoint.clone(),

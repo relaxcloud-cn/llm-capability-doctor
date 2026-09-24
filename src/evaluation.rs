@@ -2228,6 +2228,7 @@ mod tests {
             stop_after: None,
             run_id: "run-20260921-001".into(),
             started_at: "2026-09-21T00:00:00Z".into(),
+            concurrency_preflight: false,
         };
         crate::cli::run_with_executor(request, &mut crate::cli::UnavailableExecutor).unwrap()
     }
@@ -2473,3 +2474,4 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 }
+

@@ -79,6 +79,7 @@ pub struct ChatCompletionsTransport {
     endpoint: String,
     model: String,
     api_key: String,
+    timeout: Duration,
     runtime: std::sync::Arc<tokio::runtime::Runtime>,
 }
 
@@ -114,8 +115,20 @@ impl ChatCompletionsTransport {
             endpoint: endpoint.into(),
             model: model.into(),
             api_key: api_key.into(),
+            timeout,
             runtime: std::sync::Arc::new(runtime),
         })
+    }
+
+    /// 独立克隆：新建自己的 runtime 与连接池。并行执行时每个工作线程
+    /// 必须持有独立传输层——current_thread runtime 不允许跨线程共享 block_on。
+    pub fn clone_independent(&self) -> Result<Self, String> {
+        Self::new(
+            self.endpoint.clone(),
+            self.model.clone(),
+            self.api_key.clone(),
+            self.timeout,
+        )
     }
 
     /// 返回当前检测目标（endpoint, model, api_key），供内置 OMP 运行时复用。

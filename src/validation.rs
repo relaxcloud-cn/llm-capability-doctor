@@ -305,6 +305,7 @@ fn record_cases() -> Vec<ValidationCase> {
             stop_after: None,
             run_id: "validation-record".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
+            concurrency_preflight: false,
         },
         &mut executor,
     )
@@ -371,6 +372,7 @@ fn cli_cases() -> Vec<ValidationCase> {
             stop_after: Some("specification".into()),
             run_id: "validation-stop".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
+            concurrency_preflight: false,
         },
         &mut executor,
     )
@@ -429,6 +431,7 @@ fn gui_cases() -> Vec<ValidationCase> {
             stop_after: None,
             run_id: "validation-gui".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
+            concurrency_preflight: false,
         },
         &mut executor,
     )

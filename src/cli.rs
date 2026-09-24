@@ -10,6 +10,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::agent::{
@@ -87,7 +88,8 @@ pub struct CliConfiguration {
     pub api_key_provided: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
 pub struct CliRunRequest {
     pub endpoint: String,
     pub model: String,
@@ -96,6 +98,9 @@ pub struct CliRunRequest {
     pub stop_after: Option<String>,
     pub run_id: String,
     pub started_at: String,
+    /// 并发预检：正式检测前先探测服务能稳定承受的并发。默认关闭（测试与联调用），
+    /// 真实运行由 main 打开。
+    pub concurrency_preflight: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,6 +114,11 @@ pub struct ModuleRunResult {
 
 pub trait ModuleExecutor {
     fn execute(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult;
+
+    /// 并发预检（正式检测前调用一次）：返回证据条目则落盘审计。默认无预检。
+    fn probe_execution_concurrency(&mut self) -> Option<Value> {
+        None
+    }
 
     fn execute_with_record(
         &mut self,
@@ -157,9 +167,309 @@ impl ModuleExecutor for UnavailableExecutor {
 /// 单个性能请求的硬超时；挂死的请求记为超时样本而非拖垮整体检测。
 const PERF_REQUEST_TIMEOUT_MS: u64 = 120_000;
 
+/// 能力跑分单题请求构造：串行与并行路径共用，保证两条路径行为一致。
+fn capability_request(sample: &crate::capability::CapabilitySample) -> ChatCompletionsRequest {
+    let messages = sample.messages.as_ref().map(|turns| {
+        turns
+            .iter()
+            .map(|turn| json!({"role": turn.role, "content": turn.content}))
+            .collect::<Vec<serde_json::Value>>()
+    });
+    ChatCompletionsRequest {
+        module_id: "capability".into(),
+        prompt: sample.prompt.clone(),
+        messages,
+        tools: sample.tools.clone(),
+        max_tokens: 1024,
+        stream: false,
+        allow_retry: true,
+        timeout_ms: None,
+    }
+}
+
+/// 单场景一次完整执行：独立临时工作区 + OMP 多轮会话。
+/// 自由函数（只依赖目标三元组与场景），供串行路径与并行工作线程共用；
+/// 模型调用由 OMP 自行发起，线程间不共享任何传输层状态。
+fn execute_agent_scenario_once(
+    spec: &AgentScenarioSpec,
+    endpoint: &str,
+    model: &str,
+    api_key: &str,
+) -> (crate::agent::AgentExecution, Value) {
+        let invalid = |reason: &str, evidence: Value| {
+            (
+                crate::agent::invalid_execution(
+                    spec.workspace.task_id.clone(),
+                    spec.scenario,
+                    1,
+                    crate::agent::AgentAttemptKind::Initial,
+                    ExecutionOrigin::RealOmp,
+                    reason,
+                    Vec::new(),
+                ),
+                evidence,
+            )
+        };
+        let Some(omp) = resolve_agent_omp() else {
+            return invalid(
+                "内置 OMP 运行时不可用，未执行该场景",
+                json!({"sample_id": spec.workspace.task_id}),
+            );
+        };
+        let agent_config =
+            match crate::evaluation::OmpConfig::new(&crate::evaluation::AnalyzerConfig {
+                endpoint: endpoint.to_owned(),
+                model: model.to_owned(),
+                api_key: api_key.to_owned(),
+            }) {
+                Ok(config) => config,
+                Err(error) => {
+                    return invalid(
+                        &format!("准备 OMP 运行配置失败：{error}"),
+                        json!({"sample_id": spec.workspace.task_id}),
+                    );
+                }
+            };
+        let root = std::env::temp_dir().join(format!(
+            "agentcheck-agent-{}-{}",
+            spec.workspace.task_id,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|span| span.as_nanos())
+                .unwrap_or_default()
+        ));
+        if let Err(error) = prepare_agent_workspace(spec, &root) {
+            return invalid(
+                &format!("准备工作区失败：{error}"),
+                json!({"sample_id": spec.workspace.task_id}),
+            );
+        }
+        let material_digests = spec
+            .materials
+            .iter()
+            .map(|file| (file.path.clone(), digest_text(&file.content)))
+            .collect::<BTreeMap<_, _>>();
+
+        let mut session_log = String::new();
+        let mut spawn_error = None;
+        for (index, prompt) in spec.turns.iter().enumerate() {
+            let mut command = Command::new(&omp);
+            command
+                .current_dir(&root)
+                .args([
+                    "-p",
+                    "--mode",
+                    "json",
+                    "--tools",
+                    "read,write",
+                    "--auto-approve",
+                    "--no-extensions",
+                    "--no-skills",
+                    "--no-rules",
+                    "--no-lsp",
+                    "--no-pty",
+                    "--no-title",
+                    "--max-time",
+                ])
+                .arg(format!("{}", spec.timeout_ms / 1000))
+                .arg("--model")
+                .arg(format!("agentcheck-target/{model}"))
+                .env("PI_CODING_AGENT_DIR", &agent_config.agent_dir)
+                .env("AGENTCHECK_MODEL_API_KEY", api_key);
+            if index > 0 {
+                command.arg("--continue");
+            }
+            command.arg(prompt);
+            // OMP 自身有 --max-time；看门狗再兜底覆盖子进程无响应、
+            // 管道不关闭等 --max-time 失效的场景，避免 CLI 永久挂住。
+            let watchdog_ms = spec.timeout_ms.saturating_add(60_000);
+            match crate::evaluation::run_command_with_timeout(
+                &mut command,
+                std::time::Duration::from_millis(watchdog_ms),
+            ) {
+                Ok(output) => {
+                    session_log.push_str(&String::from_utf8_lossy(&output.stdout));
+                    session_log.push_str(&String::from_utf8_lossy(&output.stderr));
+                    if output.status.is_none() {
+                        spawn_error = Some(format!(
+                            "OMP 会话超过看门狗时限 {} 秒，已终止该进程",
+                            watchdog_ms / 1000
+                        ));
+                        break;
+                    }
+                }
+                Err(error) => {
+                    spawn_error = Some(format!("OMP 进程启动失败：{error}"));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = spawn_error {
+            return invalid(
+                &error,
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
+        // 会话中出现模型服务侧拒绝（欠费/认证/限流/模型未开通）时，场景没有真实的
+        // 模型行为可评判，按无效执行处理；否则会把"产物缺失"误判成模型能力失败
+        // （2026-09-23 doubao 欠费实测：全场景 403 仍产出 A1 pass + 模块 fail）。
+        if LiveExecutor::session_has_model_access_rejection(&session_log) {
+            return invalid(
+                "模型调用被服务拒绝（欠费/认证/限流等），未获得真实模型行为，不归因模型能力",
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
+
+        let mut outcome = parse_agent_session(&session_log);
+        if !outcome.terminated && outcome.calls.is_empty() && outcome.final_message.is_none() {
+            return invalid(
+                "OMP 会话未产生可用事件，无法判定场景终态",
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
+        outcome.snapshot = snapshot_workspace(&root);
+        outcome.input_intact = material_digests.iter().all(|(path, digest)| {
+            outcome
+                .snapshot
+                .get(path)
+                .is_some_and(|content| digest_text(content) == *digest)
+        });
+        classify_agent_paths(&root, &mut outcome);
+
+        let mut events = Vec::new();
+        let mut permission_events = Vec::new();
+        let mut sequence = 0_u32;
+        for call in &outcome.calls {
+            sequence += 1;
+            events.push(AgentEvent {
+                id: format!("{}-call-{sequence}", spec.workspace.task_id),
+                kind: AgentEventKind::ToolCall,
+                sequence,
+                summary: format!("{} {}", call.name, call.path.clone().unwrap_or_default()),
+                path: call.path.clone(),
+                operation: Some(call.name.clone()),
+                incident_id: None,
+                evidence_refs: Vec::new(),
+            });
+            sequence += 1;
+            events.push(AgentEvent {
+                id: format!("{}-return-{sequence}", spec.workspace.task_id),
+                kind: if call.ok {
+                    AgentEventKind::ToolReturn
+                } else {
+                    AgentEventKind::Error
+                },
+                sequence,
+                summary: call.result_text.chars().take(2000).collect(),
+                path: call.path.clone(),
+                operation: Some(call.name.clone()),
+                incident_id: None,
+                evidence_refs: Vec::new(),
+            });
+        }
+        for path in &outcome.unauthorized_writes {
+            permission_events.push(PermissionEvent {
+                path: path.clone(),
+                operation: "write".into(),
+                decision: PermissionDecision::Allowed,
+                effect: PermissionEffect::UnauthorizedWrite,
+                evidence_refs: Vec::new(),
+            });
+        }
+        for path in &outcome.out_of_scope_reads {
+            permission_events.push(PermissionEvent {
+                path: path.clone(),
+                operation: "read".into(),
+                decision: PermissionDecision::Allowed,
+                effect: PermissionEffect::Read,
+                evidence_refs: Vec::new(),
+            });
+        }
+
+        let (facts, artifact_satisfied) = judge_scenario(spec, &outcome);
+        let artifact = outcome
+            .snapshot
+            .get(&spec.expected_artifact.path)
+            .map(|content| crate::agent::ArtifactObservation {
+                path: spec.expected_artifact.path.clone(),
+                exists: true,
+                content_digest: Some(digest_text(content)),
+                content_matches: artifact_satisfied,
+                evidence_refs: Vec::new(),
+            })
+            .or_else(|| {
+                (!spec.artifact_optional).then(|| crate::agent::ArtifactObservation {
+                    path: spec.expected_artifact.path.clone(),
+                    exists: false,
+                    content_digest: None,
+                    content_matches: artifact_satisfied,
+                    evidence_refs: Vec::new(),
+                })
+            });
+        let execution = assess_execution(AgentExecutionInput {
+            sample_id: spec.workspace.task_id.clone(),
+            scenario: spec.scenario,
+            attempt_no: 1,
+            attempt_kind: crate::agent::AgentAttemptKind::Initial,
+            origin: ExecutionOrigin::RealOmp,
+            facts,
+            permission_events,
+            events,
+            artifact,
+            final_message: outcome.final_message.clone(),
+            evidence_refs: Vec::new(),
+        });
+        (
+            execution,
+            json!({
+                "sample_id": spec.workspace.task_id,
+                "workspace_root": root,
+                "session": session_log,
+                "tool_calls": outcome.calls.len(),
+                "terminated": outcome.terminated,
+            }),
+        )
+}
+
+/// 场景结果落盘：证据条目、执行/事件/权限引用串接。串行与并行路径共用，
+/// 保证两种执行方式产出的记录完全一致。
+fn record_agent_outcome(
+    record: &mut DetectionRecord,
+    spec: &AgentScenarioSpec,
+    execution: crate::agent::AgentExecution,
+    turn_evidence: Value,
+    attempts: &mut Vec<crate::agent::AgentExecution>,
+    evidence: &mut Vec<Value>,
+) {
+    let evidence_id = format!("cli-agent-{}", spec.workspace.task_id);
+    let captured = add_evidence(
+        record,
+        &evidence_id,
+        "real_agent_scenario",
+        "agent-execution",
+        turn_evidence,
+    );
+    let mut execution = execution;
+    let evidence_ref = captured.id.clone();
+    execution.evidence_refs.push(evidence_ref.clone());
+    for event in &mut execution.events {
+        event.evidence_refs.push(evidence_ref.clone());
+    }
+    for permission in &mut execution.permission_events {
+        permission.evidence_refs.push(evidence_ref.clone());
+    }
+    if let Some(artifact) = &mut execution.artifact {
+        artifact.evidence_refs.push(evidence_ref.clone());
+    }
+    attempts.push(execution);
+    evidence.push(json!({"sample_id": spec.workspace.task_id, "evidence_id": captured.id}));
+}
+
 pub struct LiveExecutor {
     transport: ChatCompletionsTransport,
     full: bool,
+    /// 预检实测出的执行并发；1 = 串行（默认，未预检或服务只撑得住串行）。
+    execution_concurrency: u32,
 }
 
 impl std::fmt::Debug for LiveExecutor {
@@ -181,6 +491,7 @@ impl LiveExecutor {
         Ok(Self {
             transport: ChatCompletionsTransport::new(endpoint, model, api_key, timeout)?,
             full: false,
+            execution_concurrency: 1,
         })
     }
 
@@ -196,9 +507,32 @@ impl LiveExecutor {
     }
 }
 
+impl LiveExecutor {
+    #[cfg(test)]
+    pub(crate) fn execution_concurrency_for_test(&self) -> u32 {
+        self.execution_concurrency
+    }
+
+    /// 并发预检：阶梯探测服务能稳定承受的并发，结果留在本执行器上，
+    /// 后续独立样本按此并发执行。返回证据条目（供审计与回看）。
+    pub fn probe_execution_concurrency(&mut self) -> Value {
+        if !self.full {
+            return Value::Null;
+        }
+        let outcome = crate::concurrency::probe(&self.transport);
+        self.execution_concurrency = outcome.chosen;
+        crate::concurrency::evidence_payload(&outcome)
+    }
+}
+
 impl ModuleExecutor for LiveExecutor {
     fn execution_origin(&self) -> &'static str {
         "real_service"
+    }
+
+    fn probe_execution_concurrency(&mut self) -> Option<Value> {
+        let payload = LiveExecutor::probe_execution_concurrency(self);
+        if payload.is_null() { None } else { Some(payload) }
     }
 
     fn execute(&mut self, module_id: &str, record: &DetectionRecord) -> ModuleRunResult {
@@ -1040,36 +1374,102 @@ impl LiveExecutor {
         progress: &mut dyn FnMut(ProgressDetail),
     ) -> ModuleRunResult {
         let samples = fixed_capability_catalog();
+        let limit = (self.execution_concurrency as usize).min(samples.len()).max(1);
+        // 预检并发 >1 时并行收题：题与题相互独立，工作线程各持传输层克隆，
+        // 主线程按完成顺序发进度；串行路径保持原行为不动。
+        let pairs: Vec<(ChatCompletionsRequest, ChatCompletionsResponse)> = if limit > 1 {
+            let workers: Vec<ChatCompletionsTransport> = (0..limit)
+                .filter_map(|_| self.transport.clone_independent().ok())
+                .collect();
+            if workers.len() < 2 {
+                // 造不出并行 worker 就走串行路径，不让检测失败。
+                vec![]
+            } else {
+            let limit = workers.len();
+            let next = AtomicUsize::new(0);
+            let (tx, rx) =
+                mpsc::channel::<(usize, ChatCompletionsRequest, ChatCompletionsResponse)>();
+            thread::scope(|scope| {
+                for transport in workers {
+                    let tx = tx.clone();
+                    let transport = transport;
+                    let next = &next;
+                    let samples = &samples;
+                    scope.spawn(move || loop {
+                        let index = next.fetch_add(1, Ordering::SeqCst);
+                        if index >= samples.len() {
+                            break;
+                        }
+                        let request = capability_request(&samples[index]);
+                        let response = transport.send(request.clone());
+                        let _ = tx.send((index, request, response));
+                    });
+                }
+            });
+            drop(tx);
+            let mut slots: Vec<Option<(ChatCompletionsRequest, ChatCompletionsResponse)>> =
+                vec![None; samples.len()];
+            let mut done = 0;
+            while let Ok((index, request, response)) = rx.recv() {
+                done += 1;
+                progress(ProgressDetail {
+                    index: done - 1,
+                    total: samples.len(),
+                    id: samples[index].id.clone(),
+                    message: format!("已完成能力样本 {done} / {}", samples.len()),
+                });
+                slots[index] = Some((request, response));
+            }
+            slots
+                .into_iter()
+                .map(|slot| slot.expect("并行收题时每个样本都有结果"))
+                .collect()
+            }
+        } else {
+            let mut pairs = Vec::with_capacity(samples.len());
+            for (position, sample) in samples.iter().enumerate() {
+                progress(ProgressDetail {
+                    index: position,
+                    total: samples.len(),
+                    id: sample.id.clone(),
+                    message: format!(
+                        "正在检测能力样本 {} / {}",
+                        position + 1,
+                        samples.len()
+                    ),
+                });
+                let request = capability_request(sample);
+                let response = self.transport.send(request.clone());
+                pairs.push((request, response));
+            }
+            pairs
+        };
+        // 并行退化（worker 不足）时落到串行
+        let pairs = if pairs.is_empty() && !samples.is_empty() {
+            let mut sequential = Vec::with_capacity(samples.len());
+            for (position, sample) in samples.iter().enumerate() {
+                progress(ProgressDetail {
+                    index: position,
+                    total: samples.len(),
+                    id: sample.id.clone(),
+                    message: format!(
+                        "正在检测能力样本 {} / {}",
+                        position + 1,
+                        samples.len()
+                    ),
+                });
+                let request = capability_request(sample);
+                let response = self.transport.send(request.clone());
+                sequential.push((request, response));
+            }
+            sequential
+        } else {
+            pairs
+        };
         let mut responses = Vec::with_capacity(samples.len());
         let mut evidence = Vec::with_capacity(samples.len());
-        for sample in &samples {
-            progress(ProgressDetail {
-                index: evidence.len(),
-                total: samples.len(),
-                id: sample.id.clone(),
-                message: format!(
-                    "正在检测能力样本 {} / {}",
-                    evidence.len() + 1,
-                    samples.len()
-                ),
-            });
-            let messages = sample.messages.as_ref().map(|turns| {
-                turns
-                    .iter()
-                    .map(|turn| json!({"role": turn.role, "content": turn.content}))
-                    .collect::<Vec<serde_json::Value>>()
-            });
-            let request = ChatCompletionsRequest {
-                module_id: "capability".into(),
-                prompt: sample.prompt.clone(),
-                messages,
-                tools: sample.tools.clone(),
-                max_tokens: 1024,
-                stream: false,
-                allow_retry: true,
-                timeout_ms: None,
-            };
-            let response = self.transport.send(request.clone());
+        for (index, (request, response)) in pairs.into_iter().enumerate() {
+            let sample = &samples[index];
             let text = completion_text(response.parsed.as_ref());
             let tool_calls = parse_tool_calls(response.parsed.as_ref());
             let truncated =
@@ -1096,12 +1496,14 @@ impl LiveExecutor {
                 },
             ));
             evidence.push(json!({"sample_id": sample.id, "payload": self.transport.evidence_payload(&request, &response)}));
-            progress(ProgressDetail {
-                index: evidence.len(),
-                total: samples.len(),
-                id: sample.id.clone(),
-                message: format!("已完成能力样本 {} / {}", evidence.len(), samples.len()),
-            });
+            if self.execution_concurrency <= 1 {
+                progress(ProgressDetail {
+                    index: evidence.len(),
+                    total: samples.len(),
+                    id: sample.id.clone(),
+                    message: format!("已完成能力样本 {} / {}", evidence.len(), samples.len()),
+                });
+            }
         }
         let scorecard = build_scorecard(
             record.id.as_str(),
@@ -1648,43 +2050,101 @@ impl LiveExecutor {
         let mut executed = 0_usize;
         let mut attempts = Vec::new();
         let mut evidence = Vec::new();
-        for spec in scenarios {
+        // 场景流水线并行：每个场景自带独立临时工作区与 OMP 子进程会话，
+        // 模型调用由 OMP 发起、不共享传输层；预检并发 >1 时按工作队列并行。
+        let limit = (self.execution_concurrency as usize).min(total_scenarios).max(1);
+        let parallel: Vec<(usize, crate::agent::AgentExecution, Value)> = if limit > 1 {
             progress(ProgressDetail {
-                index: executed,
+                index: 0,
                 total: total_scenarios,
-                id: spec.scenario.id().into(),
-                message: format!("正在执行智能体场景 {} / {}", executed + 1, total_scenarios),
+                id: "agent".into(),
+                message: format!("按并发 {limit} 并行执行 {total_scenarios} 个智能体场景"),
             });
-            let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
-            let evidence_id = format!("cli-agent-{}", spec.workspace.task_id);
-            let captured = add_evidence(
-                record,
-                &evidence_id,
-                "real_agent_scenario",
-                "agent-execution",
-                turn_evidence.clone(),
-            );
-            let mut execution = execution;
-            let evidence_ref = captured.id.clone();
-            execution.evidence_refs.push(evidence_ref.clone());
-            for event in &mut execution.events {
-                event.evidence_refs.push(evidence_ref.clone());
-            }
-            for permission in &mut execution.permission_events {
-                permission.evidence_refs.push(evidence_ref.clone());
-            }
-            if let Some(artifact) = &mut execution.artifact {
-                artifact.evidence_refs.push(evidence_ref.clone());
-            }
-            attempts.push(execution);
-            evidence.push(json!({"sample_id": spec.workspace.task_id, "evidence_id": captured.id}));
-            executed += 1;
-            progress(ProgressDetail {
-                index: executed,
-                total: total_scenarios,
-                id: spec.scenario.id().into(),
-                message: format!("已完成智能体场景 {} / {}", executed, total_scenarios),
+            let (endpoint, model, api_key) = self.transport.target();
+            let target = (endpoint.to_owned(), model.to_owned(), api_key.to_owned());
+            let next = AtomicUsize::new(0);
+            let (tx, rx) =
+                mpsc::channel::<(usize, crate::agent::AgentExecution, Value)>();
+            let scenarios = &scenarios;
+            thread::scope(|scope| {
+                for worker in 0..limit {
+                    let tx = tx.clone();
+                    let next = &next;
+                    let target = target.clone();
+                    let _ = worker;
+                    scope.spawn(move || loop {
+                        let index = next.fetch_add(1, Ordering::SeqCst);
+                        if index >= scenarios.len() {
+                            break;
+                        }
+                        let (execution, turn_evidence) = execute_agent_scenario_once(
+                            &scenarios[index],
+                            &target.0,
+                            &target.1,
+                            &target.2,
+                        );
+                        let _ = tx.send((index, execution, turn_evidence));
+                    });
+                }
             });
+            drop(tx);
+            let mut collected = Vec::with_capacity(scenarios.len());
+            while let Ok(item) = rx.recv() {
+                collected.push(item);
+            }
+            collected.sort_by_key(|(index, _, _)| *index);
+            collected
+        } else {
+            Vec::new()
+        };
+        if limit > 1 {
+            for (index, execution, turn_evidence) in parallel {
+                let spec = &scenarios[index];
+                record_agent_outcome(
+                    record,
+                    spec,
+                    execution,
+                    turn_evidence,
+                    &mut attempts,
+                    &mut evidence,
+                );
+                executed += 1;
+                progress(ProgressDetail {
+                    index: executed,
+                    total: total_scenarios,
+                    id: spec.scenario.id().into(),
+                    message: format!("已完成智能体场景 {} / {}", executed, total_scenarios),
+                });
+            }
+        } else {
+            for spec in scenarios {
+                progress(ProgressDetail {
+                    index: executed,
+                    total: total_scenarios,
+                    id: spec.scenario.id().into(),
+                    message: format!(
+                        "正在执行智能体场景 {} / {}",
+                        executed + 1,
+                        total_scenarios
+                    ),
+                });
+                let (execution, turn_evidence) = self.execute_agent_scenario(&spec);
+                record_agent_outcome(
+                    record,
+                    &spec,
+                    execution,
+                    turn_evidence,
+                    &mut attempts,
+                    &mut evidence,
+                );
+                executed += 1;
+                progress(ProgressDetail {
+                    index: executed,
+                    total: total_scenarios,
+                    id: spec.scenario.id().into(),
+                    message: format!("已完成智能体场景 {} / {}", executed, total_scenarios),
+                });
+            }
         }
         let report_result = build_report_for_record(
             record,
@@ -1746,240 +2206,8 @@ impl LiveExecutor {
         &mut self,
         spec: &AgentScenarioSpec,
     ) -> (crate::agent::AgentExecution, Value) {
-        let invalid = |reason: &str, evidence: Value| {
-            (
-                crate::agent::invalid_execution(
-                    spec.workspace.task_id.clone(),
-                    spec.scenario,
-                    1,
-                    crate::agent::AgentAttemptKind::Initial,
-                    ExecutionOrigin::RealOmp,
-                    reason,
-                    Vec::new(),
-                ),
-                evidence,
-            )
-        };
-        let Some(omp) = resolve_agent_omp() else {
-            return invalid(
-                "内置 OMP 运行时不可用，未执行该场景",
-                json!({"sample_id": spec.workspace.task_id}),
-            );
-        };
         let (endpoint, model, api_key) = self.transport.target();
-        let agent_config =
-            match crate::evaluation::OmpConfig::new(&crate::evaluation::AnalyzerConfig {
-                endpoint: endpoint.to_owned(),
-                model: model.to_owned(),
-                api_key: api_key.to_owned(),
-            }) {
-                Ok(config) => config,
-                Err(error) => {
-                    return invalid(
-                        &format!("准备 OMP 运行配置失败：{error}"),
-                        json!({"sample_id": spec.workspace.task_id}),
-                    );
-                }
-            };
-        let root = std::env::temp_dir().join(format!(
-            "agentcheck-agent-{}-{}",
-            spec.workspace.task_id,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|span| span.as_nanos())
-                .unwrap_or_default()
-        ));
-        if let Err(error) = prepare_agent_workspace(spec, &root) {
-            return invalid(
-                &format!("准备工作区失败：{error}"),
-                json!({"sample_id": spec.workspace.task_id}),
-            );
-        }
-        let material_digests = spec
-            .materials
-            .iter()
-            .map(|file| (file.path.clone(), digest_text(&file.content)))
-            .collect::<BTreeMap<_, _>>();
-
-        let mut session_log = String::new();
-        let mut spawn_error = None;
-        for (index, prompt) in spec.turns.iter().enumerate() {
-            let mut command = Command::new(&omp);
-            command
-                .current_dir(&root)
-                .args([
-                    "-p",
-                    "--mode",
-                    "json",
-                    "--tools",
-                    "read,write",
-                    "--auto-approve",
-                    "--no-extensions",
-                    "--no-skills",
-                    "--no-rules",
-                    "--no-lsp",
-                    "--no-pty",
-                    "--no-title",
-                    "--max-time",
-                ])
-                .arg(format!("{}", spec.timeout_ms / 1000))
-                .arg("--model")
-                .arg(format!("agentcheck-target/{model}"))
-                .env("PI_CODING_AGENT_DIR", &agent_config.agent_dir)
-                .env("AGENTCHECK_MODEL_API_KEY", api_key);
-            if index > 0 {
-                command.arg("--continue");
-            }
-            command.arg(prompt);
-            // OMP 自身有 --max-time；看门狗再兜底覆盖子进程无响应、
-            // 管道不关闭等 --max-time 失效的场景，避免 CLI 永久挂住。
-            let watchdog_ms = spec.timeout_ms.saturating_add(60_000);
-            match crate::evaluation::run_command_with_timeout(
-                &mut command,
-                std::time::Duration::from_millis(watchdog_ms),
-            ) {
-                Ok(output) => {
-                    session_log.push_str(&String::from_utf8_lossy(&output.stdout));
-                    session_log.push_str(&String::from_utf8_lossy(&output.stderr));
-                    if output.status.is_none() {
-                        spawn_error = Some(format!(
-                            "OMP 会话超过看门狗时限 {} 秒，已终止该进程",
-                            watchdog_ms / 1000
-                        ));
-                        break;
-                    }
-                }
-                Err(error) => {
-                    spawn_error = Some(format!("OMP 进程启动失败：{error}"));
-                    break;
-                }
-            }
-        }
-        if let Some(error) = spawn_error {
-            return invalid(
-                &error,
-                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
-            );
-        }
-        // 会话中出现模型服务侧拒绝（欠费/认证/限流/模型未开通）时，场景没有真实的
-        // 模型行为可评判，按无效执行处理；否则会把"产物缺失"误判成模型能力失败
-        // （2026-09-23 doubao 欠费实测：全场景 403 仍产出 A1 pass + 模块 fail）。
-        if Self::session_has_model_access_rejection(&session_log) {
-            return invalid(
-                "模型调用被服务拒绝（欠费/认证/限流等），未获得真实模型行为，不归因模型能力",
-                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
-            );
-        }
-
-        let mut outcome = parse_agent_session(&session_log);
-        if !outcome.terminated && outcome.calls.is_empty() && outcome.final_message.is_none() {
-            return invalid(
-                "OMP 会话未产生可用事件，无法判定场景终态",
-                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
-            );
-        }
-        outcome.snapshot = snapshot_workspace(&root);
-        outcome.input_intact = material_digests.iter().all(|(path, digest)| {
-            outcome
-                .snapshot
-                .get(path)
-                .is_some_and(|content| digest_text(content) == *digest)
-        });
-        classify_agent_paths(&root, &mut outcome);
-
-        let mut events = Vec::new();
-        let mut permission_events = Vec::new();
-        let mut sequence = 0_u32;
-        for call in &outcome.calls {
-            sequence += 1;
-            events.push(AgentEvent {
-                id: format!("{}-call-{sequence}", spec.workspace.task_id),
-                kind: AgentEventKind::ToolCall,
-                sequence,
-                summary: format!("{} {}", call.name, call.path.clone().unwrap_or_default()),
-                path: call.path.clone(),
-                operation: Some(call.name.clone()),
-                incident_id: None,
-                evidence_refs: Vec::new(),
-            });
-            sequence += 1;
-            events.push(AgentEvent {
-                id: format!("{}-return-{sequence}", spec.workspace.task_id),
-                kind: if call.ok {
-                    AgentEventKind::ToolReturn
-                } else {
-                    AgentEventKind::Error
-                },
-                sequence,
-                summary: call.result_text.chars().take(2000).collect(),
-                path: call.path.clone(),
-                operation: Some(call.name.clone()),
-                incident_id: None,
-                evidence_refs: Vec::new(),
-            });
-        }
-        for path in &outcome.unauthorized_writes {
-            permission_events.push(PermissionEvent {
-                path: path.clone(),
-                operation: "write".into(),
-                decision: PermissionDecision::Allowed,
-                effect: PermissionEffect::UnauthorizedWrite,
-                evidence_refs: Vec::new(),
-            });
-        }
-        for path in &outcome.out_of_scope_reads {
-            permission_events.push(PermissionEvent {
-                path: path.clone(),
-                operation: "read".into(),
-                decision: PermissionDecision::Allowed,
-                effect: PermissionEffect::Read,
-                evidence_refs: Vec::new(),
-            });
-        }
-
-        let (facts, artifact_satisfied) = judge_scenario(spec, &outcome);
-        let artifact = outcome
-            .snapshot
-            .get(&spec.expected_artifact.path)
-            .map(|content| crate::agent::ArtifactObservation {
-                path: spec.expected_artifact.path.clone(),
-                exists: true,
-                content_digest: Some(digest_text(content)),
-                content_matches: artifact_satisfied,
-                evidence_refs: Vec::new(),
-            })
-            .or_else(|| {
-                (!spec.artifact_optional).then(|| crate::agent::ArtifactObservation {
-                    path: spec.expected_artifact.path.clone(),
-                    exists: false,
-                    content_digest: None,
-                    content_matches: artifact_satisfied,
-                    evidence_refs: Vec::new(),
-                })
-            });
-        let execution = assess_execution(AgentExecutionInput {
-            sample_id: spec.workspace.task_id.clone(),
-            scenario: spec.scenario,
-            attempt_no: 1,
-            attempt_kind: crate::agent::AgentAttemptKind::Initial,
-            origin: ExecutionOrigin::RealOmp,
-            facts,
-            permission_events,
-            events,
-            artifact,
-            final_message: outcome.final_message.clone(),
-            evidence_refs: Vec::new(),
-        });
-        (
-            execution,
-            json!({
-                "sample_id": spec.workspace.task_id,
-                "workspace_root": root,
-                "session": session_log,
-                "tool_calls": outcome.calls.len(),
-                "terminated": outcome.terminated,
-            }),
-        )
+        execute_agent_scenario_once(spec, endpoint, model, api_key)
     }
 
     fn execute_baseline(&mut self, record: &DetectionRecord) -> ModuleRunResult {
@@ -3176,6 +3404,35 @@ pub fn run_with_executor_reporting<E: ModuleExecutor, S: ProgressSink>(
         .as_deref()
         .and_then(|module| selected.iter().position(|item| item == module));
     let mut stopped = false;
+    // 并发预检：真实运行显式开启时才做（最小请求、秒级开销）；
+    // 测试与联调默认关闭，避免烧光 mock 服务的连接数。
+    if request.concurrency_preflight
+        && selected.iter().any(|module| matches!(module.as_str(), "capability" | "specification" | "agent"))
+    {
+        progress.emit(ProgressEvent {
+            phase: ProgressPhase::ModuleProgress,
+            module_id: Some("preflight".into()),
+            index: 0,
+            total: selected.len(),
+            state: None,
+            message: "并发预检：探测这个服务能稳定承受多少并发…".into(),
+            detail_index: None,
+            detail_total: None,
+            detail_id: None,
+            items: None,
+            modules: None,
+            item_stats: None,
+        });
+        if let Some(payload) = executor.probe_execution_concurrency() {
+            add_evidence(
+                &mut record,
+                "cli-preflight-0",
+                "concurrency_preflight",
+                &request.started_at,
+                payload,
+            );
+        }
+    }
     for (index, module_id) in selected.iter().enumerate() {
         if stop_index.is_some_and(|stop_index| index > stop_index) {
             break;
@@ -3632,6 +3889,7 @@ mod tests {
             stop_after: None,
             run_id: "run-cli".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
+            concurrency_preflight: false,
         }
     }
 
@@ -3966,6 +4224,107 @@ mod tests {
         server.join().unwrap();
         assert_eq!(result.state, ModuleResultState::Fail);
         assert!(result.reason.unwrap().contains("不符合标准对话接口"));
+    }
+
+    #[test]
+    fn parallel_agent_scenarios_keep_all_ten_executions() {
+        // 智能体并行端到端:预检开启 + OMP 不可用(场景快速记为无效执行),
+        // 验证并行收集不丢场景、证据齐全、执行器采用预检并发。
+        unsafe { std::env::set_var("OMP_BIN", "/nonexistent-agentcheck-omp") };
+        let (endpoint, server) = mock_server_with(200, 31, |_| {
+            r#"{"id":"chatcmpl-mock","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#.into()
+        });
+        let mut executor = LiveExecutor::new_full(
+            endpoint,
+            "mock-model",
+            "secret".to_string(),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let mut request = request(Some(vec!["agent".into()]));
+        request.concurrency_preflight = true;
+        struct QuietSink;
+        impl ProgressSink for QuietSink {
+            fn emit(&mut self, _event: ProgressEvent) {}
+        }
+        let report = run_with_executor_reporting(request, &mut executor, &mut QuietSink).unwrap();
+        assert_eq!(executor.execution_concurrency_for_test(), 8, "采用预检并发");
+        let agent = report
+            .record
+            .evidence
+            .iter()
+            .find(|evidence| {
+                evidence.payload.get("module").and_then(Value::as_str) == Some("agent")
+            })
+            .expect("智能体模块证据存在");
+        let scenarios = agent
+            .payload
+            .pointer("/payload/evidence")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .expect("智能体证据含逐场景记录");
+        assert_eq!(scenarios, 10, "并行执行不丢场景");
+        // 探测的 31 个请求都到了 mock,join 即返回
+        assert_eq!(server.join().unwrap().len(), 31);
+    }
+
+    #[test]
+    fn concurrency_preflight_measures_and_parallel_capability_keeps_all_samples() {
+        // 端到端:开预检的完整跑——先阶梯探测,再按实测并发并行收题。
+        // mock 恒 200:预检应爬到上限(16→夹 8),能力题并行执行且一题不少。
+        // 连接数精确 = 阶梯全档之和(31) + 题库规模,mock 收满即退出,join 才能返回。
+        let connections = 31 + fixed_capability_catalog().len();
+        let (endpoint, server) = mock_server_with(200, connections, |_| {
+            r#"{"id":"chatcmpl-mock","object":"chat.completion","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":10,"completion_tokens":1,"total_tokens":11}}"#.into()
+        });
+        let mut executor =
+            LiveExecutor::new_full(endpoint, "mock-model", "secret".to_string(), std::time::Duration::from_secs(30))
+                .unwrap();
+        let mut request = request(Some(vec!["capability".into()]));
+        request.concurrency_preflight = true;
+        struct QuietSink;
+        impl ProgressSink for QuietSink {
+            fn emit(&mut self, _event: ProgressEvent) {}
+        }
+        let report = run_with_executor_reporting(request, &mut executor, &mut QuietSink).unwrap();
+        // 预检证据落盘,module=preflight 不参与模块结论
+        let preflight = report
+            .record
+            .evidence
+            .iter()
+            .find(|evidence| evidence.payload.get("module").and_then(Value::as_str) == Some("preflight"))
+            .expect("并发预检证据必须落盘");
+        let chosen = preflight
+            .payload
+            .pointer("/payload/chosen")
+            .and_then(Value::as_u64)
+            .expect("预检证据包含 chosen");
+        assert_eq!(chosen, 8, "恒 200 的 mock 应爬满阶梯并夹到上限 8");
+        assert_eq!(
+            executor.execution_concurrency_for_test(), 8,
+            "执行器采用预检并发"
+        );
+        // 能力模块一题不少:observations 数等于固定题库规模
+        let capability = report
+            .record
+            .evidence
+            .iter()
+            .find(|evidence| {
+                evidence.payload.get("module").and_then(Value::as_str) == Some("capability")
+            })
+            .expect("能力模块证据存在");
+        let samples = capability
+            .payload
+            .pointer("/payload/evidence")
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .or_else(|| {
+                capability.payload.pointer("/payload/report/observations").and_then(Value::as_array).map(Vec::len)
+            })
+            .expect("能力证据包含逐题记录");
+        assert_eq!(samples, fixed_capability_catalog().len(), "并行收题不丢题");
+        let requests = server.join().unwrap();
+        assert!(requests.len() >= fixed_capability_catalog().len(), "mock 收到全部请求");
     }
 
     #[test]
