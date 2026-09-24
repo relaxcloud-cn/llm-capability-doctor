@@ -10,8 +10,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const EVALUATION_VERSION: &str = "evaluation-pipeline/v1";
 
-/// OhMyPi 单次模块分析的看门狗超时；子进程超过该时长直接杀死并按 inconclusive 处理。
-const OMP_ANALYSIS_TIMEOUT: Duration = Duration::from_secs(600);
+/// OhMyPi 单批分析的自适应看门狗超时：每条约 60 秒分析时间，
+/// 下限 600 秒、上限 1800 秒。固定超时会掐断重批次（如 C01 指令遵循
+/// 22 条实测约 880 秒，900 秒固定值刚好不够），导致结论截断。
+fn chunk_timeout_for(entries: usize) -> Duration {
+    let per_entry = 60u64.saturating_mul(entries as u64);
+    Duration::from_secs((180 + per_entry).clamp(600, 1800))
+}
 
 #[derive(Debug, Clone)]
 pub struct AnalyzerConfig {
@@ -163,6 +168,16 @@ fn write_module_inputs_with_rules(
     Ok(paths)
 }
 
+/// 单批证据的体积上限（字节）。模块整包不超过它时保持整包一次喂；
+/// 超过时按检测项分组，超预算的组再按条目顺序装箱切批，
+/// 避免大模块（能力跑分、性能实测）证据包超出模型上下文。
+/// 128KB：单批约 10 个条目；实测 256KB（约 20 条）会让模型写不完结论被截断。
+const OMP_CHUNK_BUDGET_BYTES: usize = 128 * 1024;
+
+/// 单批条目数上限。截断风险随条目数上升（实测重批次每条需 60-70 秒分析时间，
+/// 22 条即使给了 25 分钟仍可能被掐断），因此体积之外再按条目数切一刀。
+const OMP_MAX_ITEMS_PER_CHUNK: usize = 12;
+
 pub fn analyze_modules(
     input_paths: &[PathBuf],
     report_dir: impl AsRef<Path>,
@@ -180,104 +195,363 @@ pub fn analyze_modules(
             .and_then(|name| name.strip_suffix(".input.json"))
             .ok_or_else(|| format!("无法从输入文件识别模块：{}", input_path.display()))?;
         let output_path = report_dir.join(format!("{module}.report.json"));
-        let input: ModuleInput = serde_json::from_slice(
-            &fs::read(input_path).map_err(|e| format!("读取模块输入失败：{e}"))?,
-        )
-        .map_err(|e| format!("解析模块输入失败：{e}"))?;
-        let cli_state = input
-            .hard_facts
-            .get("module_state")
-            .and_then(Value::as_str)
-            .unwrap_or("inconclusive");
         if let Err(error) = &omp {
-            let mut report = inconclusive_report(module, error);
-            report.limitations.push(format!(
-                "CLI 原始状态为 {cli_state}；OhMyPi 未完成分析，不能形成最终模块结论"
-            ));
+            let report = inconclusive_report(module, error);
             write_json(&output_path, &report)?;
             paths.push(output_path);
             continue;
         }
         let model_selector = format!("agentcheck-target/{}", analyzer_config.model);
-        let prompt = format!(
-            "你是 AgentCheck 评估器。附件是 {path} 对应的完整模块输入 JSON，包含判定规则和完整检测证据。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。严格依据规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、analyzer；verdict 只能是 pass、fail、limited、inconclusive；任何证据不足必须是 inconclusive；每个 finding 必须引用 evidence_id。不要输出 Markdown，不要输出 JSON 之外的内容。",
-            path = input_path.display(),
-        );
-        eprintln!("[报告] OhMyPi 分析模块 {module}…");
-        let mut command = Command::new(omp.as_ref().unwrap());
-        command
-            .args([
-                "-p",
-                "--mode",
-                "json",
-                "--no-title",
-                "--no-pty",
-                "--no-tools",
-            ])
-            .args(["--model", model_selector.as_str()])
-            .args(["--no-extensions", "--no-skills", "--no-rules", "--no-lsp"])
-            .arg("--max-time")
-            .arg(
-                OMP_ANALYSIS_TIMEOUT
-                    .as_secs()
-                    .saturating_sub(30)
-                    .to_string(),
-            )
-            .arg(format!("@{}", input_path.display()))
-            .arg(prompt)
-            .env("PI_CODING_AGENT_DIR", &omp_config.agent_dir)
-            .env("AGENTCHECK_MODEL_API_KEY", &analyzer_config.api_key);
-        let result = run_command_with_timeout(&mut command, OMP_ANALYSIS_TIMEOUT);
-        let report = match result {
-            Ok(result) if result.status.is_none() => inconclusive_report(
-                module,
-                &format!(
-                    "OhMyPi 分析超时（{} 秒），已终止该进程",
-                    OMP_ANALYSIS_TIMEOUT.as_secs()
-                ),
-            ),
-            Ok(result) if result.status.is_some_and(|status| status.success()) => {
-                let raw_output_path = report_dir.join(format!("{module}.omp.jsonl"));
-                fs::write(&raw_output_path, &result.stdout)
-                    .map_err(|e| format!("保存 OhMyPi 原始输出失败：{e}"))?;
-                parse_module_report(&extract_omp_text(&result.stdout), module).unwrap_or_else(
-                    || inconclusive_report(module, "OhMyPi 输出不是符合约定的 JSON"),
-                )
-            }
-            Ok(result) => inconclusive_report(
-                module,
-                &format!("OhMyPi 退出失败：{}", trim_error(&result.stderr)),
-            ),
-            Err(error) => inconclusive_report(module, &format!("OhMyPi 不可用：{error}")),
+        let input_value: Value = serde_json::from_slice(
+            &fs::read(input_path).map_err(|e| format!("读取模块输入失败：{e}"))?,
+        )
+        .map_err(|e| format!("解析模块输入失败：{e}"))?;
+        let chunks = match chunk_units(&input_value, OMP_CHUNK_BUDGET_BYTES) {
+            chunks if !chunks.is_empty() => chunks,
+            _ => vec![(String::from("all"), Vec::new())],
         };
-        let report = merge_cli_and_analyzer_result(report, cli_state);
+        let total_chunks = chunks.len();
+        let mut chunk_reports = Vec::new();
+        for (index, (group, entries)) in chunks.iter().enumerate() {
+            let batch = index + 1;
+            let raw_suffix = if total_chunks == 1 {
+                String::new()
+            } else {
+                format!(".chunk-{batch:02}")
+            };
+            let (attachment, prompt) = if total_chunks == 1 {
+                (
+                    input_path.display().to_string(),
+                    format!(
+                        "你是 AgentCheck 评估器。附件是 {path} 对应的完整模块输入 JSON，包含判定规则和完整检测证据。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。严格依据规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、analyzer；verdict 只能是 pass、fail、limited、inconclusive；任何证据不足必须是 inconclusive；每个 finding 必须引用 evidence_id，rationale 用一两句话直接说明依据；不得虚构附件中没有的样本计数或统计数字；确保 JSON 完整闭合后输出结束，不要中途截断。不要输出 Markdown，不要输出 JSON 之外的内容。",
+                        path = input_path.display(),
+                    ),
+                )
+            } else {
+                let chunk_path = report_dir.join(format!("{module}{raw_suffix}.input.json"));
+                let mut chunk_input = input_value.clone();
+                chunk_input["evidence"] = Value::Array(entries.clone());
+                write_json(&chunk_path, &chunk_input)?;
+                (
+                    chunk_path.display().to_string(),
+                    format!(
+                        "你是 AgentCheck 评估器。附件是模块 {module} 检测输入的第 {batch}/{total} 批（同一模块按检测项分批分析，附件只包含本批条目）。只判定本批条目：不要因为附件不含其他批次而输出 inconclusive，也不要臆测未包含的条目。依据附件中的判定规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、analyzer；verdict 是本批条目的总体结论，只能是 pass、fail、limited、inconclusive；本批内证据不足必须是 inconclusive；每个 finding 必须引用 evidence_id，rationale 用一两句话直接说明依据；不得虚构附件中没有的样本计数或统计数字；确保 JSON 完整闭合后输出结束，不要中途截断。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。不要输出 Markdown，不要输出 JSON 之外的内容。",
+                        module = module,
+                        batch = batch,
+                        total = total_chunks,
+                    ),
+                )
+            };
+            eprintln!("[报告] OhMyPi 分析模块 {module} 批次 {batch}/{total_chunks}（{group}）…");
+            let timeout = chunk_timeout_for(entries.len());
+            let mut command = Command::new(omp.as_ref().unwrap());
+            command
+                .args(["-p", "--mode", "json", "--no-title", "--no-pty", "--no-tools"])
+                .args(["--model", model_selector.as_str()])
+                .args(["--no-extensions", "--no-skills", "--no-rules", "--no-lsp"])
+                .arg("--max-time")
+                .arg(timeout.as_secs().saturating_sub(30).to_string())
+                .arg(format!("@{attachment}"))
+                .arg(prompt)
+                .env("PI_CODING_AGENT_DIR", &omp_config.agent_dir)
+                .env("AGENTCHECK_MODEL_API_KEY", &analyzer_config.api_key);
+            // omp 偶发崩溃/挂死（实测出现过空 stderr 退出失败）重试一次；
+            // 输出格式解析失败不重试——模型输出已确定，重试改变不了结果。
+            let raw_output_path = report_dir.join(format!("{module}{raw_suffix}.omp.jsonl"));
+            let mut retries_left = 1_u8;
+            let report = loop {
+                let result = run_command_with_timeout(&mut command, timeout);
+                let outcome = match result {
+                    Ok(result) if result.status.is_none() => Err(format!(
+                        "分析超时（{} 秒），已终止该进程",
+                        timeout.as_secs()
+                    )),
+                    Ok(result) if result.status.is_some_and(|status| status.success()) => {
+                        fs::write(&raw_output_path, &result.stdout)
+                            .map_err(|e| format!("保存 OhMyPi 原始输出失败：{e}"))?;
+                        Ok(parse_module_report(
+                            &extract_omp_text(&result.stdout),
+                            module,
+                        ))
+                    }
+                    Ok(result) => {
+                        Err(format!("退出失败：{}", trim_error(&result.stderr)))
+                    }
+                    Err(error) => Err(format!("不可用：{error}")),
+                };
+                match outcome {
+                    Ok(parsed) => {
+                        break parsed.unwrap_or_else(|| {
+                            inconclusive_report(module, "OhMyPi 输出不是符合约定的 JSON")
+                        });
+                    }
+                    Err(reason) => {
+                        let transient = reason.starts_with("分析超时")
+                            || reason.starts_with("退出失败")
+                            || reason.starts_with("不可用");
+                        if transient && retries_left > 0 {
+                            retries_left -= 1;
+                            eprintln!("[报告] OhMyPi 批次失败（{reason}），5 秒后重试一次…");
+                            std::thread::sleep(Duration::from_secs(5));
+                            continue;
+                        }
+                        break inconclusive_report(module, &format!("OhMyPi {reason}"));
+                    }
+                }
+            };
+            chunk_reports.push(report);
+        }
+        let report = merge_chunk_reports(module, chunk_reports);
         write_json(&output_path, &report)?;
         paths.push(output_path);
     }
     Ok(paths)
 }
 
-fn merge_cli_and_analyzer_result(mut report: ModuleReport, cli_state: &str) -> ModuleReport {
-    if report.verdict == "inconclusive" {
-        report.limitations.push(format!(
-            "CLI 原始状态为 {cli_state}；OhMyPi 结论为 inconclusive，最终不归因于模型能力"
-        ));
-        return report;
+/// 从样本编号或证据编号推导检测项分组键（如 C01、P03、A8、BC01）；无"字母+数字"组合时返回 None。
+fn item_group_key(id: &str) -> Option<String> {
+    let bytes = id.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
+                index += 1;
+            }
+            let digits_start = index;
+            while index < bytes.len() && bytes[index].is_ascii_digit() {
+                index += 1;
+            }
+            if index > digits_start {
+                return Some(id[start..index].to_string());
+            }
+        } else {
+            index += 1;
+        }
     }
-    if matches!(
-        cli_state,
-        "inconclusive" | "invalid_execution" | "unverified"
-    ) {
-        report.verdict = "inconclusive".into();
-        report.confidence = "none".into();
-        report.summary =
-            format!("CLI 原始状态为 {cli_state}，证据不足；OhMyPi 的结果不能扩大检测范围");
-        report.findings.clear();
-        report
-            .limitations
-            .push("CLI 执行证据不足，语义分析结果不作为模型能力结论".into());
+    None
+}
+
+/// 一个逻辑证据单元：group 为检测项分组键，entry 保持外层 evidence 条目形状。
+struct EvidenceUnit {
+    group: String,
+    entry: Value,
+}
+
+fn evidence_unit_size(unit: &EvidenceUnit) -> usize {
+    serde_json::to_string(&unit.entry)
+        .map(|text| text.len())
+        .unwrap_or(0)
+}
+
+/// 切批入口：小模块整包一批（保持原始 evidence 形状不变）；
+/// 超预算时把含逐条 sample_id 的大条目展开成单条单元再按检测项装箱。
+fn chunk_units(input: &Value, budget: usize) -> Vec<(String, Vec<Value>)> {
+    let Some(entries) = input.get("evidence").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut units: Vec<EvidenceUnit> = Vec::new();
+    for entry in entries {
+        let group = entry
+            .get("evidence_id")
+            .and_then(Value::as_str)
+            .and_then(item_group_key)
+            .unwrap_or_else(|| "misc".into());
+        units.push(EvidenceUnit {
+            group,
+            entry: entry.clone(),
+        });
     }
-    report
+    let total: usize = units.iter().map(evidence_unit_size).sum();
+    if total <= budget {
+        return vec![(
+            String::from("all"),
+            units.into_iter().map(|unit| unit.entry).collect(),
+        )];
+    }
+    let mut exploded: Vec<EvidenceUnit> = Vec::new();
+    for entry in entries {
+        explode_entry(entry, &mut exploded);
+    }
+    pack_units(exploded, budget)
+}
+
+/// 把一条 evidence 展开成逻辑单元：内含逐条 sample_id 的大条目按条目展开
+/// （并去掉只对整包有意义的样本计数），其余条目原样成单元。
+fn explode_entry(entry: &Value, units: &mut Vec<EvidenceUnit>) {
+    let blob_items = entry
+        .get("payload")
+        .and_then(|payload| payload.get("payload"))
+        .and_then(|payload| payload.get("evidence"))
+        .and_then(Value::as_array)
+        .filter(|items| {
+            !items.is_empty()
+                && items
+                    .iter()
+                    .all(|item| item.get("sample_id").is_some_and(Value::is_string))
+        })
+        .cloned();
+    let Some(items) = blob_items else {
+        let group = entry
+            .get("evidence_id")
+            .and_then(Value::as_str)
+            .and_then(item_group_key)
+            .unwrap_or_else(|| "misc".into());
+        units.push(EvidenceUnit {
+            group,
+            entry: entry.clone(),
+        });
+        return;
+    };
+    for item in items {
+        let group = item
+            .get("sample_id")
+            .and_then(Value::as_str)
+            .and_then(item_group_key)
+            .unwrap_or_else(|| "item".into());
+        let mut unit = entry.clone();
+        if let Some(inner) = unit
+            .get_mut("payload")
+            .and_then(|payload| payload.get_mut("payload"))
+            .and_then(Value::as_object_mut)
+        {
+            // 只保留该题证据与版本号；scorecard/样本计数等整包级字段
+            // 复制进每一批会让每批都超出预算（2026-09-23 实跑中 scorecard 约 400KB，
+            // 144 批退化为每批一题）。
+            let version = inner.get("version").cloned();
+            inner.clear();
+            inner.insert(String::from("evidence"), Value::Array(vec![item]));
+            if let Some(version) = version {
+                inner.insert(String::from("version"), version);
+            }
+        }
+        units.push(EvidenceUnit { group, entry: unit });
+    }
+}
+
+/// 按检测项分组（保留首次出现顺序），超预算的组按条目顺序装箱。
+fn pack_units(units: Vec<EvidenceUnit>, budget: usize) -> Vec<(String, Vec<Value>)> {
+    if units.is_empty() {
+        return Vec::new();
+    }
+    let mut groups: Vec<(String, Vec<EvidenceUnit>)> = Vec::new();
+    for unit in units {
+        match groups.iter_mut().find(|(name, _)| *name == unit.group) {
+            Some((_, members)) => members.push(unit),
+            None => groups.push((unit.group.clone(), vec![unit])),
+        }
+    }
+    let mut chunks = Vec::new();
+    for (name, members) in groups {
+        let group_size: usize = members.iter().map(evidence_unit_size).sum();
+        if group_size <= budget && members.len() <= OMP_MAX_ITEMS_PER_CHUNK {
+            chunks.push((
+                name,
+                members.into_iter().map(|unit| unit.entry).collect(),
+            ));
+            continue;
+        }
+        let mut current: Vec<Value> = Vec::new();
+        let mut current_size = 0;
+        for unit in members {
+            let size = evidence_unit_size(&unit);
+            if !current.is_empty()
+                && (current_size + size > budget || current.len() >= OMP_MAX_ITEMS_PER_CHUNK)
+            {
+                chunks.push((name.clone(), std::mem::take(&mut current)));
+                current_size = 0;
+            }
+            current_size += size;
+            current.push(unit.entry);
+        }
+        if !current.is_empty() {
+            chunks.push((name, current));
+        }
+    }
+    chunks
+}
+
+/// 把各批次报告合并为模块报告：结论取最严重批次（fail > limited > inconclusive > pass）。
+fn merge_chunk_reports(module: &str, chunks: Vec<ModuleReport>) -> ModuleReport {
+    let Some(_) = chunks.first() else {
+        return inconclusive_report(module, "没有任何批次产生分析结果");
+    };
+    if chunks.len() == 1 {
+        return chunks.into_iter().next().expect("chunks 非空");
+    }
+    let rank = |verdict: &str| match verdict {
+        "fail" => 3,
+        "limited" => 2,
+        "inconclusive" => 1,
+        _ => 0,
+    };
+    let worst = chunks
+        .iter()
+        .max_by_key(|chunk| rank(&chunk.verdict))
+        .expect("chunks 非空")
+        .verdict
+        .clone();
+    let counts = ["pass", "fail", "limited", "inconclusive"]
+        .map(|verdict| chunks.iter().filter(|chunk| chunk.verdict == verdict).count());
+    let mut findings = Vec::new();
+    let mut limitations = Vec::new();
+    let mut evidence_refs = BTreeSet::new();
+    let mut parsed = 0;
+    for chunk in &chunks {
+        // 旧格式兼容层会给缺说明的 finding 填"未提供说明"占位；
+        // 无说明的结论写进报告就是无依据结论，合并时直接丢弃。
+        for finding in &chunk.findings {
+            let rationale = finding.rationale.trim();
+            if rationale.is_empty() || rationale == "未提供说明" {
+                continue;
+            }
+            findings.push(finding.clone());
+        }
+        limitations.extend(chunk.limitations.iter().cloned());
+        evidence_refs.extend(chunk.evidence_refs.iter().cloned());
+        if chunk.analyzer.status != "unavailable_or_invalid_output" {
+            parsed += 1;
+        }
+    }
+    limitations.push(format!(
+        "模块证据超过单批上限，已按检测项分 {} 批分别分析后合并；批次分布 pass {}、fail {}、limited {}、inconclusive {}。",
+        chunks.len(),
+        counts[0],
+        counts[1],
+        counts[2],
+        counts[3]
+    ));
+    let confidence = match worst.as_str() {
+        "fail" | "pass" => "high",
+        "limited" => "medium",
+        _ => "none",
+    };
+    let summary = format!(
+        "模块分 {} 批分析合并；总体结论取最严重批次：{worst}。",
+        chunks.len()
+    );
+    ModuleReport {
+        schema_version: "module-eval-report/v1".into(),
+        evaluation_version: EVALUATION_VERSION.into(),
+        module: module.into(),
+        verdict: worst,
+        confidence: confidence.into(),
+        summary,
+        findings,
+        evidence_refs: evidence_refs.into_iter().collect(),
+        limitations,
+        items: Vec::new(),
+        analyzer: AnalyzerInfo {
+            name: "ohmypi".into(),
+            status: if parsed == chunks.len() {
+                "completed_normalized".into()
+            } else if parsed > 0 {
+                "partially_normalized".into()
+            } else {
+                "unavailable_or_invalid_output".into()
+            },
+        },
+    }
 }
 
 /// custom 报告模式：不调用 OhMyPi/AI，只把 CLI 实测结论填入模块报告模板。
@@ -1096,11 +1370,15 @@ fn extract_omp_text(stdout: &[u8]) -> String {
 }
 
 fn parse_module_report(stdout: &str, module: &str) -> Option<ModuleReport> {
-    let value = extract_json(stdout)?;
-    if let Ok(report) = serde_json::from_value::<ModuleReport>(value.clone()) {
-        return Some(report);
+    for value in extract_json_candidates(stdout) {
+        if let Ok(report) = serde_json::from_value::<ModuleReport>(value.clone()) {
+            return Some(report);
+        }
+        if let Some(report) = normalize_legacy_report(value, module) {
+            return Some(report);
+        }
     }
-    normalize_legacy_report(value, module)
+    None
 }
 
 fn normalize_legacy_report(value: Value, module: &str) -> Option<ModuleReport> {
@@ -1624,21 +1902,48 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<(), String> {
     fs::write(path, content).map_err(|e| format!("写入 {} 失败：{e}", path.display()))
 }
 
-fn extract_json(stdout: &str) -> Option<Value> {
+/// 从输出里按"从后往前"的顺序收集可解析的 JSON 候选。
+/// 模型的回答前面常带有附件回显（本身就是合法 JSON），只取第一个 `{`
+/// 会把回显当结论（2026-09-23 规格模块实测踩中）；回显里也常没有围栏标记，
+/// 因此从尾部向头部逐个 `{` 尝试，调用方再用 normalize 挑出真正的结论。
+fn extract_json_candidates(stdout: &str) -> Vec<Value> {
+    let mut candidates = Vec::new();
     let trimmed = stdout.trim();
     if let Ok(value) = serde_json::from_str(trimmed) {
-        return Some(value);
+        candidates.push(value);
+        return candidates;
     }
     for marker in ["```json", "```JSON", "```"] {
         if let Some(start) = trimmed.rfind(marker) {
             let block = &trimmed[start + marker.len()..];
             let block = block.split("```").next().unwrap_or(block);
             if let Some(value) = parse_json_prefix(block) {
-                return Some(value);
+                candidates.push(value);
+                break;
             }
         }
     }
-    parse_json_prefix(trimmed)
+    if let Some(first) = trimmed.find('{') {
+        let mut search_end = trimmed.len();
+        let mut attempts = 0_usize;
+        while attempts < 200 {
+            let Some(start) = trimmed[first..search_end].rfind('{') else {
+                break;
+            };
+            attempts += 1;
+            let absolute = first + start;
+            if let Some(value) = parse_json_prefix(&trimmed[absolute..]) {
+                if !candidates.contains(&value) {
+                    candidates.push(value);
+                }
+            }
+            if absolute == first {
+                break;
+            }
+            search_end = absolute;
+        }
+    }
+    candidates
 }
 
 fn parse_json_prefix(text: &str) -> Option<Value> {
@@ -1763,15 +2068,21 @@ mod tests {
 
     #[test]
     fn extracts_json_from_agent_output() {
-        let value = extract_json("说明\n{\"module\":\"agent\"}\n").unwrap();
+        let value = extract_json_candidates("说明\n{\"module\":\"agent\"}\n")
+            .into_iter()
+            .next()
+            .unwrap();
         assert_eq!(value["module"], "agent");
     }
 
     #[test]
     fn extracts_json_from_last_markdown_block() {
-        let value =
-            extract_json("思考中出现 {\"wrong\":true}\n```json\n{\"module\":\"agent\"}\n```")
-                .unwrap();
+        let value = extract_json_candidates(
+            "思考中出现 {\"wrong\":true}\n```json\n{\"module\":\"agent\"}\n```",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
         assert_eq!(value["module"], "agent");
     }
 
@@ -1867,43 +2178,6 @@ mod tests {
         assert_eq!(report.findings[0].evidence_refs, vec!["cli-ingress-0"]);
     }
 
-    #[test]
-    fn analyzer_inconclusive_cannot_become_model_failure() {
-        let report = inconclusive_report("capability", "OhMyPi 退出失败");
-        let merged = merge_cli_and_analyzer_result(report, "fail");
-        assert_eq!(merged.verdict, "inconclusive");
-        assert!(
-            merged
-                .limitations
-                .iter()
-                .any(|item| item.contains("不归因于模型能力"))
-        );
-    }
-
-    #[test]
-    fn insufficient_cli_evidence_overrides_analyzer_success() {
-        let report = ModuleReport {
-            schema_version: "module-eval-report/v1".into(),
-            evaluation_version: EVALUATION_VERSION.into(),
-            module: "capability".into(),
-            verdict: "pass".into(),
-            confidence: "high".into(),
-            summary: "分析通过".into(),
-            findings: Vec::new(),
-            evidence_refs: Vec::new(),
-            limitations: Vec::new(),
-            items: Vec::new(),
-            analyzer: AnalyzerInfo {
-                name: "ohmypi".into(),
-                status: "completed".into(),
-            },
-        };
-        let merged = merge_cli_and_analyzer_result(report, "inconclusive");
-        assert_eq!(merged.verdict, "inconclusive");
-        assert_eq!(merged.confidence, "none");
-        assert!(merged.findings.is_empty());
-    }
-
     /// 跨平台的"长时间运行"子进程：Unix 用 sleep，Windows 用 ping 延时。
     fn long_running_command() -> Command {
         if cfg!(windows) {
@@ -1957,6 +2231,208 @@ mod tests {
             started_at: "2026-09-21T00:00:00Z".into(),
         };
         crate::cli::run_with_executor(request, &mut crate::cli::UnavailableExecutor).unwrap()
+    }
+
+    #[test]
+    fn item_group_key_matches_check_item_prefixes() {
+        assert_eq!(item_group_key("C01-1-01").as_deref(), Some("C01"));
+        assert_eq!(
+            item_group_key("cli-performance-P01-waiting-stream-512-256-1-0001").as_deref(),
+            Some("P01")
+        );
+        assert_eq!(item_group_key("BC01-greeting").as_deref(), Some("BC01"));
+        assert_eq!(item_group_key("A8-x").as_deref(), Some("A8"));
+        assert_eq!(item_group_key("cli-capability-0"), None);
+    }
+
+    #[test]
+    fn small_modules_stay_in_one_batch() {
+        let input = json!({
+            "module": "ingress",
+            "evidence": [
+                {"evidence_id": "cli-ingress-0", "kind": "http", "payload": {"module": "ingress"}},
+                {"evidence_id": "cli-ingress-1", "kind": "http", "payload": {"module": "ingress"}}
+            ]
+        });
+        let chunks = chunk_units(&input, 256 * 1024);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "all");
+        assert_eq!(chunks[0].1.len(), 2);
+    }
+
+    #[test]
+    fn blob_evidence_splits_by_item_group() {
+        let item = |sample_id: &str, pad: &str| {
+            json!({"sample_id": sample_id, "payload": {"request": pad}})
+        };
+        let input = json!({
+            "module": "capability",
+            "evidence": [{
+                "evidence_id": "cli-capability-0",
+                "kind": "batch",
+                "payload": {"module": "capability", "payload": {
+                    "executed_samples": 3,
+                    "planned_samples": 3,
+                    "scorecard": {"items": [1, 2, 3]},
+                    "evidence": [
+                        item("C01-1-01", "a"), item("C01-2-01", "b"), item("C02-1-01", "c")
+                    ]
+                }}
+            }]
+        });
+        let merged = chunk_units(&input, 256 * 1024);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].0, "all");
+        assert_eq!(merged[0].1.len(), 1);
+        let split = chunk_units(&input, 1);
+        assert_eq!(
+            split.iter().map(|(group, _)| group.as_str()).collect::<Vec<_>>(),
+            vec!["C01", "C01", "C02"]
+        );
+        let inner = split[2].1[0]["payload"]["payload"]
+            .as_object()
+            .expect("blob 批次保留内层结构");
+        let evidence = inner["evidence"].as_array().expect("内层 evidence");
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0]["sample_id"], "C02-1-01");
+        assert!(inner.get("executed_samples").is_none());
+        assert!(inner.get("planned_samples").is_none());
+        assert!(inner.get("scorecard").is_none());
+    }
+
+    #[test]
+    fn oversized_groups_bin_pack_by_entry() {
+        let entry = |id: &str| json!({
+            "evidence_id": id,
+            "kind": "timing",
+            "payload": {"module": "performance", "request": {"prompt": "x".repeat(80)}}
+        });
+        let input = json!({
+            "module": "performance",
+            "evidence": [
+                entry("cli-performance-P01-waiting-stream-512-256-1-0001"),
+                entry("cli-performance-P01-waiting-stream-512-256-1-0002"),
+                entry("cli-performance-P01-waiting-stream-512-256-1-0003"),
+                entry("cli-performance-P01-waiting-stream-512-256-1-0004")
+            ]
+        });
+        let chunks = chunk_units(&input, 600);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks.iter().all(|(group, _)| group == "P01"));
+        assert_eq!(chunks[0].1.len(), 2);
+        assert_eq!(chunks[1].1.len(), 2);
+    }
+
+    #[test]
+    fn merged_verdict_takes_the_worst_batch() {
+        let report = |verdict: &str| ModuleReport {
+            schema_version: "module-eval-report/v1".into(),
+            evaluation_version: EVALUATION_VERSION.into(),
+            module: "capability".into(),
+            verdict: verdict.into(),
+            confidence: "high".into(),
+            summary: "batch".into(),
+            findings: Vec::new(),
+            evidence_refs: Vec::new(),
+            limitations: Vec::new(),
+            items: Vec::new(),
+            analyzer: AnalyzerInfo {
+                name: "ohmypi".into(),
+                status: "completed_normalized".into(),
+            },
+        };
+        let merged = merge_chunk_reports(
+            "capability",
+            vec![report("pass"), report("fail"), report("inconclusive")],
+        );
+        assert_eq!(merged.verdict, "fail");
+        assert_eq!(merged.confidence, "high");
+        let merged = merge_chunk_reports("capability", vec![report("pass"), report("limited")]);
+        assert_eq!(merged.verdict, "limited");
+        assert_eq!(merged.confidence, "medium");
+        let merged = merge_chunk_reports("capability", vec![report("pass"), report("inconclusive")]);
+        assert_eq!(merged.verdict, "inconclusive");
+        let merged = merge_chunk_reports("capability", vec![report("pass"), report("pass")]);
+        assert_eq!(merged.verdict, "pass");
+        assert_eq!(merged.analyzer.status, "completed_normalized");
+        assert!(merged.limitations.iter().any(|item| item.contains("分 2 批")));
+    }
+
+    #[test]
+    fn merge_drops_unexplained_findings() {
+        let report = |verdict: &str| ModuleReport {
+            schema_version: "module-eval-report/v1".into(),
+            evaluation_version: EVALUATION_VERSION.into(),
+            module: "performance".into(),
+            verdict: verdict.into(),
+            confidence: "high".into(),
+            summary: "batch".into(),
+            findings: Vec::new(),
+            evidence_refs: Vec::new(),
+            limitations: Vec::new(),
+            items: Vec::new(),
+            analyzer: AnalyzerInfo {
+                name: "ohmypi".into(),
+                status: "completed_normalized".into(),
+            },
+        };
+        let mut explained = report("fail");
+        explained.findings.push(Finding {
+            item_id: "P01".into(),
+            verdict: "fail".into(),
+            rationale: "全部样本 content 为空".into(),
+            evidence_refs: vec!["cli-performance-1".into()],
+        });
+        let mut placeholder = report("pass");
+        placeholder.findings.push(Finding {
+            item_id: "P02".into(),
+            verdict: "fail".into(),
+            rationale: "未提供说明".into(),
+            evidence_refs: vec!["cli-performance-3".into()],
+        });
+        let merged = merge_chunk_reports("performance", vec![explained, placeholder]);
+        assert_eq!(merged.verdict, "fail");
+        assert!(merged.findings.iter().any(|finding| finding.item_id == "P01"));
+        assert!(
+            merged
+                .findings
+                .iter()
+                .all(|finding| finding.item_id != "P02")
+        );
+    }
+
+    #[test]
+    fn chunk_timeout_scales_with_entries_and_clamps() {
+        assert_eq!(chunk_timeout_for(1), Duration::from_secs(600));
+        assert_eq!(chunk_timeout_for(10), Duration::from_secs(780));
+        assert_eq!(chunk_timeout_for(22), Duration::from_secs(1500));
+        assert_eq!(chunk_timeout_for(200), Duration::from_secs(1800));
+    }
+
+    #[test]
+    fn parses_answer_json_after_attachment_echo() {
+        let echo = r#"{"schema_version":"module-eval-input/v1","module":"specification","rules":{"title":"协议规格"}}"#;
+        let answer = r#"{"schema_version":"module-eval-report/v1","evaluation_version":"evaluation-pipeline/v1","module":"specification","verdict":"fail","confidence":"high","summary":"S05 失败","findings":[],"evidence_refs":[],"limitations":[],"items":[],"analyzer":{"name":"ohmypi","status":"completed_normalized"}}"#;
+        let text = format!("以下是分析：\n{echo}\n\n{answer}\n");
+        let report = parse_module_report(&text, "specification")
+            .expect("应解析出结论而不是把附件回显当结论");
+        assert_eq!(report.verdict, "fail");
+    }
+
+    #[test]
+    fn item_count_cap_splits_groups_even_within_byte_budget() {
+        let tiny = |i: usize| {
+            json!({"evidence_id": format!("cli-perf-P01-{i:04}"), "kind": "t", "payload": {"module": "performance"}})
+        };
+        let huge = json!({"evidence_id": "cli-perf-P02-big", "kind": "t", "payload": {"module": "performance", "blob": "z".repeat(2048)}});
+        let mut entries: Vec<Value> = (0..15).map(tiny).collect();
+        entries.push(huge);
+        let input = json!({"module": "performance", "evidence": entries});
+        let chunks = chunk_units(&input, 2500);
+        let p01: Vec<_> = chunks.iter().filter(|(group, _)| group == "P01").collect();
+        assert_eq!(p01.len(), 2);
+        assert_eq!(p01[0].1.len(), 12);
+        assert_eq!(p01[1].1.len(), 3);
     }
 
     #[test]

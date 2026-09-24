@@ -1502,7 +1502,8 @@ impl LiveExecutor {
             })
             .unwrap_or_default();
         ModuleRunResult {
-            state: if report.is_none() || failed {
+            // 0 个正式样本（如预热即被拒）没有任何测量证据，不能判 pass。
+            state: if report.is_none() || formal_count == 0 || failed {
                 ModuleResultState::Inconclusive
             } else {
                 ModuleResultState::Pass
@@ -1610,6 +1611,26 @@ impl LiveExecutor {
         let error_kind = sample.error_kind;
         samples.push(sample);
         error_kind
+    }
+
+    /// 会话日志中是否出现模型服务侧拒绝（欠费/认证/限流/模型未开通）。
+    /// 这些错误意味着场景没有获得真实模型行为，结论不能归因于模型能力。
+    fn session_has_model_access_rejection(session_log: &str) -> bool {
+        const REJECTIONS: &[&str] = &[
+            "AccountOverdueError",
+            "ModelNotOpen",
+            "InvalidEndpointOrModel",
+            "RateLimitExceeded",
+            "TooManyRequests",
+            "AuthenticationError",
+            "UnauthorizedError",
+            "invalid api key",
+            "incorrect api key",
+        ];
+        let lower = session_log.to_lowercase();
+        REJECTIONS
+            .iter()
+            .any(|signature| lower.contains(&signature.to_lowercase()))
     }
 
     fn execute_agent(&mut self, record: &mut DetectionRecord) -> ModuleRunResult {
@@ -1837,6 +1858,15 @@ impl LiveExecutor {
         if let Some(error) = spawn_error {
             return invalid(
                 &error,
+                json!({"sample_id": spec.workspace.task_id, "session": session_log}),
+            );
+        }
+        // 会话中出现模型服务侧拒绝（欠费/认证/限流/模型未开通）时，场景没有真实的
+        // 模型行为可评判，按无效执行处理；否则会把"产物缺失"误判成模型能力失败
+        // （2026-09-23 doubao 欠费实测：全场景 403 仍产出 A1 pass + 模块 fail）。
+        if Self::session_has_model_access_rejection(&session_log) {
+            return invalid(
+                "模型调用被服务拒绝（欠费/认证/限流等），未获得真实模型行为，不归因模型能力",
                 json!({"sample_id": spec.workspace.task_id, "session": session_log}),
             );
         }
@@ -3468,6 +3498,18 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
+    #[test]
+    fn detects_model_access_rejection_in_session_log() {
+        let overdue = r#"{"type":"message_end","message":{"content":[{"text":"{\"error\":{\"code\":\"AccountOverdueError\"}}"}]}}"#;
+        assert!(LiveExecutor::session_has_model_access_rejection(overdue));
+        assert!(LiveExecutor::session_has_model_access_rejection(
+            "HTTP 403 RateLimitExceeded: too many requests"
+        ));
+        assert!(!LiveExecutor::session_has_model_access_rejection(
+            "{\"type\":\"agent_start\"}\n{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"content\":\"OK\"}}"
+        ));
+    }
+
     #[derive(Debug)]
     struct TestExecutor {
         calls: Vec<String>,
@@ -3637,6 +3679,12 @@ mod tests {
                 weather(&weather_args("北京", 1, false, "[\"海淀\"]")),
                 air(r#"{"city":"上海","index":3}"#)
             ]})
+        } else if request.contains("我之前给你的暗号是什么") {
+            // M02 回引样本：正确回引历史暗号。
+            json!({"content": "蓝鲸-7392"})
+        } else if request.contains("暗号一号是什么") {
+            // M03 回引样本：回引目标暗号，不含干扰编号。
+            json!({"content": "青鸟-482"})
         } else if request.contains("\"tools\"") {
             json!({"tool_calls": [weather(&weather_args("北京", 3, true, "[\"海淀\",\"朝阳\"]"))]})
         } else if request.contains("json_schema") || request.contains("json_object") {

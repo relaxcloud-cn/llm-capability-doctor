@@ -307,6 +307,13 @@ fn validate_observations(observations: &[SpecificationObservation]) -> Result<()
 }
 
 fn category_status(observations: &[&SpecificationObservation]) -> SpecStatus {
+    // 失败优先：一个样本失败不能被另一样本的通过掩盖（2026-09-23 矩阵审计发现的 S07 误判根因）。
+    if observations
+        .iter()
+        .any(|observation| observation.status == SpecStatus::Failed)
+    {
+        return SpecStatus::Failed;
+    }
     if observations
         .iter()
         .any(|observation| observation.status == SpecStatus::VerifiedRange)
@@ -324,12 +331,6 @@ fn category_status(observations: &[&SpecificationObservation]) -> SpecStatus {
         .any(|observation| observation.status == SpecStatus::Unsupported)
     {
         return SpecStatus::Unsupported;
-    }
-    if observations
-        .iter()
-        .any(|observation| observation.status == SpecStatus::Failed)
-    {
-        return SpecStatus::Failed;
     }
     if observations
         .iter()
@@ -513,6 +514,29 @@ mod tests {
                 .any(|row| row.result == SpecStatus::Unsupported
                     && row.category == SpecCategory::ToolCalls)
         );
+    }
+
+    #[test]
+    fn failed_sample_is_not_masked_by_effective_sample() {
+        let report = build_report(
+            "run-a",
+            vec![
+                observation(
+                    SpecCategory::Streaming,
+                    "stream-tool",
+                    SpecStatus::Effective,
+                    EvidenceOrigin::RealExecution,
+                ),
+                observation(
+                    SpecCategory::Streaming,
+                    "stream-text",
+                    SpecStatus::Failed,
+                    EvidenceOrigin::RealExecution,
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(report.rows[4].result, SpecStatus::Failed);
     }
 
     #[test]
