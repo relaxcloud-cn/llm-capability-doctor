@@ -1388,6 +1388,9 @@ impl LiveExecutor {
             let next = AtomicUsize::new(0);
             let (tx, rx) =
                 mpsc::channel::<(usize, ChatCompletionsRequest, ChatCompletionsResponse)>();
+            let mut slots: Vec<Option<(ChatCompletionsRequest, ChatCompletionsResponse)>> =
+                vec![None; samples.len()];
+            let mut done = 0;
             thread::scope(|scope| {
                 for transport in workers {
                     let tx = tx.clone();
@@ -1404,21 +1407,21 @@ impl LiveExecutor {
                         let _ = tx.send((index, request, response));
                     });
                 }
+                // 外层发送端必须显式丢弃，否则通道不关闭、recv 永久阻塞。
+                // 消费循环必须留在 scope 内：scope 会等 worker 全部退出才返回，
+                // 放到外面会把全部进度事件攒到模块末尾一次性补发。
+                drop(tx);
+                while let Ok((index, request, response)) = rx.recv() {
+                    done += 1;
+                    progress(ProgressDetail {
+                        index: done,
+                        total: samples.len(),
+                        id: samples[index].id.clone(),
+                        message: format!("已完成能力样本 {done} / {}", samples.len()),
+                    });
+                    slots[index] = Some((request, response));
+                }
             });
-            drop(tx);
-            let mut slots: Vec<Option<(ChatCompletionsRequest, ChatCompletionsResponse)>> =
-                vec![None; samples.len()];
-            let mut done = 0;
-            while let Ok((index, request, response)) = rx.recv() {
-                done += 1;
-                progress(ProgressDetail {
-                    index: done - 1,
-                    total: samples.len(),
-                    id: samples[index].id.clone(),
-                    message: format!("已完成能力样本 {done} / {}", samples.len()),
-                });
-                slots[index] = Some((request, response));
-            }
             slots
                 .into_iter()
                 .map(|slot| slot.expect("并行收题时每个样本都有结果"))
@@ -2065,6 +2068,8 @@ impl LiveExecutor {
             let (tx, rx) =
                 mpsc::channel::<(usize, crate::agent::AgentExecution, Value)>();
             let scenarios = &scenarios;
+            let mut collected = Vec::with_capacity(scenarios.len());
+            let mut finished = 0_usize;
             thread::scope(|scope| {
                 for worker in 0..limit {
                     let tx = tx.clone();
@@ -2085,18 +2090,30 @@ impl LiveExecutor {
                         let _ = tx.send((index, execution, turn_evidence));
                     });
                 }
+                // 与能力收题同理：消费循环留在 scope 内边收边报进度，
+                // 外层发送端显式丢弃保证通道关闭。
+                drop(tx);
+                while let Ok((index, execution, turn_evidence)) = rx.recv() {
+                    finished += 1;
+                    progress(ProgressDetail {
+                        index: finished,
+                        total: total_scenarios,
+                        id: scenarios[index].scenario.id().into(),
+                        message: format!(
+                            "已完成智能体场景 {} / {}",
+                            finished, total_scenarios
+                        ),
+                    });
+                    collected.push((index, execution, turn_evidence));
+                }
             });
-            drop(tx);
-            let mut collected = Vec::with_capacity(scenarios.len());
-            while let Ok(item) = rx.recv() {
-                collected.push(item);
-            }
             collected.sort_by_key(|(index, _, _)| *index);
             collected
         } else {
             Vec::new()
         };
         if limit > 1 {
+            // 进度已在接收循环按完成序实时上报，这里只按原序落证据。
             for (index, execution, turn_evidence) in parallel {
                 let spec = &scenarios[index];
                 record_agent_outcome(
@@ -2107,13 +2124,6 @@ impl LiveExecutor {
                     &mut attempts,
                     &mut evidence,
                 );
-                executed += 1;
-                progress(ProgressDetail {
-                    index: executed,
-                    total: total_scenarios,
-                    id: spec.scenario.id().into(),
-                    message: format!("已完成智能体场景 {} / {}", executed, total_scenarios),
-                });
             }
         } else {
             for spec in scenarios {
@@ -4410,6 +4420,64 @@ mod tests {
         assert_eq!(samples, fixed_capability_catalog().len(), "并行收题不丢题");
         let requests = server.join().unwrap();
         assert!(requests.len() >= fixed_capability_catalog().len(), "mock 收到全部请求");
+    }
+
+    #[test]
+    fn parallel_capability_reports_progress_while_requests_still_in_flight() {
+        // 回归:并行收题的消费循环必须留在 scope 内边收边报进度;
+        // 若退化为 scope 结束后排空通道,144 条进度事件会在模块末尾
+        // 一次性补发,终端全程停在"准备中"帧(小项永远显示 ○)。
+        // 判定:mock 串行处理连接且每单记数,进度事件到来时必有请求未服务完。
+        let sample_count = fixed_capability_catalog().len();
+        let connections = 31 + sample_count;
+        let served = Arc::new(AtomicUsize::new(0));
+        let served_in_handler = Arc::clone(&served);
+        let (endpoint, server) = mock_server_with(200, connections, move |request| {
+            // 预检探针(“回复 ok”)必须快回:mock 串行处理连接,高并发下
+            // 排队会推高 P95、让阶梯提前判脏,导致并发掉回 1 走串行路径。
+            if !request.contains("回复 ok") {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            served_in_handler.fetch_add(1, Ordering::SeqCst);
+            r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#.into()
+        });
+        let mut executor = LiveExecutor::new_full(
+            endpoint,
+            "mock-model",
+            "secret".to_string(),
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        let mut request = request(Some(vec!["capability".into()]));
+        request.concurrency_preflight = true;
+        struct ObservingSink {
+            served: Arc<AtomicUsize>,
+            seen: Vec<usize>,
+        }
+        impl ProgressSink for ObservingSink {
+            fn emit(&mut self, event: ProgressEvent) {
+                if event.phase == ProgressPhase::ModuleProgress
+                    && event.module_id.as_deref() == Some("capability")
+                {
+                    self.seen.push(self.served.load(Ordering::SeqCst));
+                }
+            }
+        }
+        let mut sink = ObservingSink {
+            served,
+            seen: Vec::new(),
+        };
+        run_with_executor_reporting(request, &mut executor, &mut sink).unwrap();
+        assert_eq!(
+            sink.seen.len(),
+            sample_count,
+            "并行收题每个样本都要有一条进度事件"
+        );
+        assert!(
+            sink.seen.iter().any(|&served| served < connections),
+            "进度事件必须在收题过程中发出,不能等全部请求结束后补发"
+        );
+        server.join().unwrap();
     }
 
     #[test]
