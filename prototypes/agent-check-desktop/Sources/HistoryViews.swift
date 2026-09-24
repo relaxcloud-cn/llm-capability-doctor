@@ -93,28 +93,22 @@ private struct HistoryRow: View {
   let record: RunRecord
   @ObservedObject var store: Workbench
   @State private var hovered = false
+  // 模块失败统计在出现时算一次并缓存：检测进行中工作台每秒多次刷新，
+  // 之前每次刷新都对每条记录全量重算六模块证据管道，主线程直接卡死。
+  @State private var moduleFailures: [(title: String, fails: Int)]?
 
   private var selected: Bool { store.historySelection.contains(record.id) }
 
-  // 各模块未通过项：走结果页同一数据管道，演示记录与真实报告口径一致。
-  private var moduleFailures: [(title: String, fails: Int)] {
-    guard record.hasCurrentEvidence else { return [] }
-    return CheckModule.testModules
-      .filter { record.modules.contains($0) }
-      .map { (title: $0.title, fails: RealModuleView(module: $0, record: record).exportModule.failCount) }
-      .filter { $0.fails > 0 }
-      .sorted { $0.fails > $1.fails }
-  }
-  private var failedCount: Int { moduleFailures.reduce(0) { $0 + $1.fails } }
+  private var failedCount: Int { (moduleFailures ?? []).reduce(0) { $0 + $1.fails } }
 
   // 一句话点名问题在哪，替代原来那句人人适用的「限制摘要」：
   // 通过的记录没有可说的，就什么都不写。
   private var failureSummary: String? {
-    guard !moduleFailures.isEmpty else { return nil }
-    let head = moduleFailures.prefix(2)
+    guard let failures = moduleFailures, !failures.isEmpty else { return nil }
+    let head = failures.prefix(2)
       .map { "\($0.title) \($0.fails) 项" }
       .joined(separator: "、")
-    let rest = moduleFailures.count > 2 ? " 等 \(moduleFailures.count) 个模块" : ""
+    let rest = failures.count > 2 ? " 等 \(failures.count) 个模块" : ""
     return "主要问题：\(head)\(rest)"
   }
 
@@ -177,6 +171,20 @@ private struct HistoryRow: View {
         .stroke(cardBorder, lineWidth: 1)
     )
     .onHover { hovered = $0 }
+    .task(id: record.id) {
+      moduleFailures = Self.computeModuleFailures(record)
+    }
+  }
+
+  private static func computeModuleFailures(
+    _ record: RunRecord
+  ) -> [(title: String, fails: Int)] {
+    guard record.hasCurrentEvidence else { return [] }
+    return CheckModule.testModules
+      .filter { record.modules.contains($0) }
+      .map { (title: $0.title, fails: RealModuleView(module: $0, record: record).exportModule.failCount) }
+      .filter { $0.fails > 0 }
+      .sorted { $0.fails > $1.fails }
   }
 
   private var cardBackground: Color {
@@ -212,6 +220,8 @@ private struct HistoryRow: View {
     HStack(spacing: 6) {
       if !record.hasCurrentEvidence {
         statChip("旧版记录", color: Theme.muted, tint: Theme.canvas, bordered: true)
+      } else if moduleFailures == nil {
+        statChip("统计中", color: Theme.muted, tint: Theme.canvas, bordered: true)
       } else {
         if failedCount > 0 {
           statChip("\(failedCount) 项未通过", color: Theme.blocked, tint: Theme.blockedTint)
@@ -265,6 +275,9 @@ private struct HistoryRow: View {
 // 底部注明条件差异，不冒充同条件结论。
 struct HistoryComparison: View {
   @ObservedObject var store: Workbench
+  // 每侧每模块的摘要缓存：对比页一次渲染会读 20+ 次数据管道，
+  // 检测进行中每秒重渲染多次，不缓存同样会把主线程卡死。
+  @State private var sideCache: [String: SideModule] = [:]
 
   private var pair: [RunRecord] { store.comparedRecords }
   private var sameModel: Bool { pair.count == 2 && pair[0].service.model == pair[1].service.model }
@@ -283,7 +296,7 @@ struct HistoryComparison: View {
     }
   }
 
-  private func side(_ record: RunRecord, module: CheckModule) -> SideModule {
+  private static func computeSide(_ record: RunRecord, module: CheckModule) -> SideModule {
     guard record.modules.contains(module), record.hasCurrentEvidence else {
       return SideModule(headline: record.modules.contains(module) ? "缺少判定证据" : "本次未选",
         failCount: 0, dot: .none, tested: false)
@@ -291,6 +304,12 @@ struct HistoryComparison: View {
     let export = RealModuleView(module: module, record: record).exportModule
     return SideModule(headline: export.headline, failCount: export.failCount,
       dot: record.navDot(module), tested: true)
+  }
+
+  private func side(_ record: RunRecord, module: CheckModule) -> SideModule {
+    let key = "\(record.id)-\(module.id)"
+    return sideCache[key] ?? SideModule(
+      headline: "统计中…", failCount: 0, dot: .none, tested: false)
   }
 
   var body: some View {
@@ -323,6 +342,16 @@ struct HistoryComparison: View {
       }.frame(maxHeight: 560)
     }
     .padding(28).frame(width: 820).background(.white).foregroundStyle(Theme.ink)
+    .task {
+      for record in pair {
+        for module in CheckModule.testModules where record.modules.contains(module) {
+          let key = "\(record.id)-\(module.id)"
+          if sideCache[key] == nil {
+            sideCache[key] = Self.computeSide(record, module: module)
+          }
+        }
+      }
+    }
   }
 
   private var commonModules: [CheckModule] {

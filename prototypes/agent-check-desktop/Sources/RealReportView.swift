@@ -282,16 +282,33 @@ struct RealTaskReport: Identifiable {
   var displayName: String? = nil
 }
 
+// 报告 JSON 解析结果缓存：同一段报告只解析一次。
+// 之前 reportObject 每次访问都重新 JSONSerialization 整份多 MB 报告，
+// 检测进行中界面每秒重渲染多次，主线程反复全量解析直接把应用卡死。
+enum RealReportParseCache {
+  static let shared: NSCache<NSString, AnyObject> = {
+    let cache = NSCache<NSString, AnyObject>()
+    cache.countLimit = 64
+    return cache
+  }()
+}
+
 struct RealModuleView: View {
   var module: CheckModule
   var record: RunRecord
 
   private var backendID: String { module.backendID ?? "ingress" }
   private var reportObject: [String: Any]? {
-    guard let reportJSON = record.reportJSON,
-      let data = reportJSON.data(using: .utf8)
+    guard let reportJSON = record.reportJSON else { return nil }
+    let key = reportJSON as NSString
+    if let cached = RealReportParseCache.shared.object(forKey: key) {
+      return cached as? [String: Any]
+    }
+    guard let data = reportJSON.data(using: .utf8),
+      let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return nil }
-    return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    RealReportParseCache.shared.setObject(parsed as AnyObject, forKey: key)
+    return parsed
   }
   private var recordObject: [String: Any] {
     reportObject?["record"] as? [String: Any] ?? [:]
