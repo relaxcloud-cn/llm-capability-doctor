@@ -10,7 +10,7 @@ use std::{
 };
 
 fn binary() -> &'static str {
-    env!("CARGO_BIN_EXE_llm-capability-doctor")
+    env!("CARGO_BIN_EXE_agent-check")
 }
 
 #[test]
