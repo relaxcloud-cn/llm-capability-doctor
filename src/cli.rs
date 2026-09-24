@@ -1607,6 +1607,21 @@ impl LiveExecutor {
             .iter()
             .map(|plan| performance_dimensions(plan).len())
             .sum();
+        // 进度按请求计数而不是按维度：维度内可达数百个请求，
+        // 只在维度边界报进度会让终端长时间停在同一计数上。
+        let planned_requests: usize = plans
+            .iter()
+            .map(|plan| {
+                performance_dimensions(plan)
+                    .iter()
+                    .map(|&(_, _, _, target_concurrency)| {
+                        plan.warmup_count as usize * target_concurrency.max(1) as usize
+                            + plan.formal_request_limit as usize
+                    })
+                    .sum::<usize>()
+            })
+            .sum();
+        let mut done_requests = 0_usize;
         let mut completed_dimensions = 0_usize;
         let mut samples = Vec::new();
         let mut evidence = Vec::new();
@@ -1622,8 +1637,8 @@ impl LiveExecutor {
                     break 'plans;
                 }
                 progress(ProgressDetail {
-                    index: completed_dimensions,
-                    total: total_dimensions,
+                    index: done_requests,
+                    total: planned_requests,
                     id: plan.category.id().into(),
                     message: format!(
                         "正在检测性能项目 {} / {}",
@@ -1675,7 +1690,15 @@ impl LiveExecutor {
                             }
                         })
                         .collect();
-                    for observation in self.run_performance_batch(work) {
+                    let observations = self.run_performance_batch(work);
+                    done_requests += observations.len();
+                    progress(ProgressDetail {
+                        index: done_requests,
+                        total: planned_requests,
+                        id: plan.category.id().into(),
+                        message: format!("性能样本 {done_requests} / {planned_requests}"),
+                    });
+                    for observation in observations {
                         let (error_kind, action) = self.record_and_protect(
                             record,
                             observation,
@@ -1727,7 +1750,12 @@ impl LiveExecutor {
                     let (sender, receiver) = mpsc::channel::<PerformanceObservation>();
                     let workers = (0..target_concurrency.max(1))
                         .map(|_| {
-                            let transport = self.transport.clone();
+                            // 每个 worker 持独立传输层：共享 current_thread runtime
+                            // 会让所有 block_on 串行排队，并发实测退化成串行。
+                            let transport = self
+                                .transport
+                                .clone_independent()
+                                .unwrap_or_else(|_| self.transport.clone());
                             let next_index = Arc::clone(&next_index);
                             let in_flight = Arc::clone(&in_flight);
                             let stop_tier = Arc::clone(&stop_tier);
@@ -1816,6 +1844,13 @@ impl LiveExecutor {
                             &mut evidence,
                             &mut protection,
                         );
+                        done_requests += 1;
+                        progress(ProgressDetail {
+                            index: done_requests,
+                            total: planned_requests,
+                            id: plan.category.id().into(),
+                            message: format!("性能样本 {done_requests} / {planned_requests}"),
+                        });
                         if is_environment_error(error_kind) {
                             consecutive_environment_failures += 1;
                         } else {
@@ -1857,8 +1892,8 @@ impl LiveExecutor {
                 }
                 completed_dimensions += 1;
                 progress(ProgressDetail {
-                    index: completed_dimensions,
-                    total: total_dimensions,
+                    index: done_requests,
+                    total: planned_requests,
                     id: plan.category.id().into(),
                     message: format!(
                         "已完成性能项目 {} / {}",
@@ -1948,7 +1983,11 @@ impl LiveExecutor {
         let handles = work
             .into_iter()
             .map(|item| {
-                let transport = self.transport.clone();
+                // 与正式测量同理：预热并发也需要独立传输层才成立。
+                let transport = self
+                    .transport
+                    .clone_independent()
+                    .unwrap_or_else(|_| self.transport.clone());
                 let barrier = barrier.clone();
                 std::thread::spawn(move || {
                     barrier.wait();
