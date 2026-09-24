@@ -3665,17 +3665,19 @@ fn result_counts(record: &crate::records::DetectionRecord) -> String {
         .iter()
         .map(|(name, count)| format!("{count} {name}"))
         .collect::<Vec<_>>()
-        .join(" / ")
+        .join(" · ")
 }
 
 pub fn render_text(report: &CliRunReport) -> String {
-    let state_width = report
-        .record
-        .module_results
-        .iter()
-        .map(|result| display_width(module_state_label(module_result_label(result.state))))
-        .max()
-        .unwrap_or(0);
+    let status_of = |result: &ModuleResult| {
+        let label = module_state_label(module_result_label(result.state));
+        let symbol = match module_result_label(result.state) {
+            "pass" => "✓",
+            "fail" => "✗",
+            _ => "●",
+        };
+        format!("{symbol} {label}")
+    };
     let name_width = report
         .record
         .module_results
@@ -3683,30 +3685,79 @@ pub fn render_text(report: &CliRunReport) -> String {
         .map(|result| display_width(module_display_name(&result.module_id)))
         .max()
         .unwrap_or(0);
+    let status_width = report
+        .record
+        .module_results
+        .iter()
+        .map(|result| display_width(&status_of(result)))
+        .max()
+        .unwrap_or(0);
+    let tallies = module_item_tallies(report);
+    let count_text = |module_id: &str| {
+        tallies.get(module_id).map(|stats| {
+            format!(
+                "{} 通过 · {} 未通过 · {} 需人工确认",
+                stats.passed, stats.failed, stats.needs_manual
+            )
+        })
+    };
+    let counts_width = report
+        .record
+        .module_results
+        .iter()
+        .filter_map(|result| count_text(&result.module_id))
+        .map(|text| display_width(&text))
+        .max()
+        .unwrap_or(0);
     let mut lines = vec![
-        format!("检测结果  {}", report.record.id),
+        format!(
+            "检测结果  {} · {}{}",
+            report.record.id,
+            lifecycle_display(report.record.lifecycle),
+            run_duration_text(&report.record)
+        ),
         "─".repeat(40),
         format!("模型      {}", report.configuration.model),
         format!("地址      {}", report.configuration.redacted_endpoint),
-        format!(
-            "运行      {} · {}",
-            lifecycle_display(report.record.lifecycle),
-            result_counts(&report.record)
-        ),
+        String::new(),
+        result_counts(&report.record),
         format!("结论      {}", report.customer_conclusion.text),
         String::new(),
         "检测项目".to_string(),
     ];
     lines.extend(report.record.module_results.iter().map(|result| {
-        let state = module_state_label(module_result_label(result.state));
         let name = pad_display(module_display_name(&result.module_id), name_width);
-        let reason = result
-            .reason
-            .as_deref()
-            .map_or(String::new(), |reason| format!("  {reason}"));
-        format!("  {}  {}{}", pad_display(state, state_width), name, reason)
+        let status = pad_display(&status_of(result), status_width);
+        let counts = match count_text(&result.module_id) {
+            Some(text) => {
+                let padding = counts_width.saturating_sub(display_width(&text));
+                format!("{}{}", " ".repeat(padding), text)
+            }
+            None => " ".repeat(counts_width),
+        };
+        format!("  {name}  {status}  {counts}")
     }));
     lines.join("\n")
+}
+
+/// 用时文本：从记录的创建/更新时间戳差值算，取不到时为空。
+fn run_duration_text(record: &DetectionRecord) -> String {
+    let parse_unix = |value: &str| value.strip_prefix("unix:").and_then(|rest| rest.parse::<u64>().ok());
+    let Some(started) = parse_unix(&record.created_at) else {
+        return String::new();
+    };
+    let Some(ended) = parse_unix(&record.updated_at) else {
+        return String::new();
+    };
+    let seconds = ended.saturating_sub(started);
+    if seconds == 0 {
+        return String::new();
+    }
+    format!(
+        " · 用时 {}m{}s",
+        seconds / 60,
+        seconds % 60
+    )
 }
 
 pub fn render_report(
@@ -4481,7 +4532,8 @@ mod tests {
                 == crate::records::MODULE_IDS.len()
         );
         let text = render_text(&report);
-        assert!(text.contains("待确认"));
+        assert!(text.contains("需人工确认"));
+        assert!(!text.contains("待确认"));
         assert!(!text.contains("secret"));
     }
 
