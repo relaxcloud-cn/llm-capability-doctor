@@ -7,7 +7,7 @@
 //! 全部输出走调用方给的 writer（main 里接 stderr），不污染 stdout。
 
 use crate::cli::{
-    ProgressEvent, ProgressPhase, ProgressPlanItem, ProgressSink, ProgressItemStats,
+    ProgressEvent, ProgressItemStats, ProgressPhase, ProgressPlanItem, ProgressSink,
     module_display_name, module_state_label,
 };
 use std::collections::BTreeMap;
@@ -354,7 +354,11 @@ impl Inner {
                 let state = self.paint("33", &format!("进行中{counts}"));
                 format!("{marker} {name}  {state}")
             }
-            ModuleStatus::Done { state, stats, .. } => {
+            ModuleStatus::Done {
+                state,
+                reason,
+                stats,
+            } => {
                 // 统一口径：完成后显示"X通过 Y未通过 Z需人工确认"三段计数，
                 // 分段配色：通过绿、未通过红、需人工确认黄。
                 let (marker_color, marker, text) = match stats {
@@ -381,11 +385,25 @@ impl Inner {
                 };
                 let marker = self.paint(marker_color, marker);
                 let styled = text;
+                // 完成行附一句原因（并发阈值、语义分析摘要、失败原因等），
+                // 过长时截断，避免把动画区块撑换行。
+                let reason = Some(reason.as_str().trim())
+                    .filter(|reason| !reason.is_empty())
+                    .map(|reason| {
+                        let clipped: String = reason.chars().take(80).collect();
+                        if reason.chars().count() > 80 {
+                            format!("（{clipped}…）")
+                        } else {
+                            format!("（{clipped}）")
+                        }
+                    })
+                    .unwrap_or_default();
+                let reason = self.paint("2", &reason);
                 let elapsed = module
                     .elapsed
                     .map(|elapsed| format!(" {}", self.paint("2", &format_duration(elapsed))))
                     .unwrap_or_default();
-                format!("{marker} {name}  {styled}{elapsed}")
+                format!("{marker} {name}  {styled}{reason}{elapsed}")
             }
         }
     }
