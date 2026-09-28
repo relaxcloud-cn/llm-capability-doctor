@@ -61,6 +61,7 @@ pub struct ModuleReport {
     /// 进度与报告的三段计数（通过/未通过/需人工确认）从这里得出。
     #[serde(default)]
     pub item_verdicts: Vec<ItemVerdict>,
+    #[serde(default)]
     pub analyzer: AnalyzerInfo,
 }
 
@@ -103,15 +104,21 @@ pub struct ItemVerdict {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Finding {
+    #[serde(default)]
     pub item_id: String,
+    #[serde(default)]
     pub verdict: String,
+    #[serde(default)]
     pub rationale: String,
+    #[serde(default)]
     pub evidence_refs: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct AnalyzerInfo {
+    #[serde(default)]
     pub name: String,
+    #[serde(default)]
     pub status: String,
 }
 
@@ -376,7 +383,7 @@ fn analyze_chunk(
         return inconclusive_report(module, &format!("写入批次输入失败：{error}"));
     }
     let prompt = format!(
-        "你是 AgentCheck 评估器。附件是模块 {module} 检测输入的第 {batch}/{total} 批（同一模块按检测项分批分析，附件只包含本批条目）。只判定本批条目：不要因为附件不含其他批次而输出 inconclusive，也不要臆测未包含的条目。依据附件中的判定规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、item_verdicts、analyzer；verdict 是本批条目的总体结论，只能是 pass、fail、limited、inconclusive；本批内证据不足必须是 inconclusive；item_verdicts 是逐项判定数组，附件 evidence 中每个可判定的最小单元一条，字段为 item_id、verdict、note：item_id 取条目的 sample_id，没有 sample_id 时取 evidence_id 或检测项编号（如 S04、C03、T2-A、BC07），逐项 verdict 只能是 pass、fail、inconclusive，数量必须与附件中可判定单元一致、不得遗漏或合并；每个 finding 必须引用 evidence_id，rationale 用一两句话直接说明依据；不得虚构附件中没有的样本计数或统计数字；确保 JSON 完整闭合后输出结束，不要中途截断。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。不要输出 Markdown，不要输出 JSON 之外的内容。",
+        "你是 AgentCheck 评估器。附件是模块 {module} 检测输入的第 {batch}/{total} 批（同一模块按检测项分批分析，附件只包含本批条目）。只判定本批条目：不要因为附件不含其他批次而输出 inconclusive，也不要臆测未包含的条目。依据附件中的判定规则输出一个 JSON 对象，字段必须为 schema_version、evaluation_version、module、verdict、confidence、summary、findings、evidence_refs、limitations、item_verdicts、analyzer；schema_version 固定写 \"module-eval-report/v1\"，不要照抄附件里的版本号；verdict 是本批条目的总体结论，只能是 pass、fail、limited、inconclusive；本批内证据不足必须是 inconclusive；item_verdicts 是逐项判定数组，附件 evidence 中每个可判定的最小单元一条，每条是完整 JSON 对象 {{\"item_id\":\"...\",\"verdict\":\"...\",\"note\":\"...\"}}：item_id 取条目的 sample_id，没有 sample_id 时取 evidence_id 或检测项编号（如 S04、C03、T2-A、BC07），逐项 verdict 只能是 pass、fail、inconclusive，note 必须是字符串值、写法为 \"note\":\"一两句说明\"，严禁把说明文字直接写成键名；逐项裁决数量必须与附件中可判定单元一致、不得遗漏或合并；analyzer 必须是对象 {{\"name\":\"ohmypi\",\"status\":\"completed\"}}；每个 finding 必须引用 evidence_id，rationale 用一两句话直接说明依据；不得虚构附件中没有的样本计数或统计数字；不要在回复中复述或转贴附件内容；确保 JSON 语法严格合法且完整闭合后输出结束，不要中途截断。只分析附件内容，不要调用工具，不要重新请求客户模型，不要补造证据。不要输出 Markdown，不要输出 JSON 之外的内容。",
         module = module,
         batch = batch,
         total = total_chunks,
@@ -1719,18 +1726,206 @@ fn extract_omp_text(stdout: &[u8]) -> String {
 }
 
 fn parse_module_report(stdout: &str, module: &str) -> Option<ModuleReport> {
-    for value in extract_json_candidates(stdout) {
-        if let Ok(report) = serde_json::from_value::<ModuleReport>(value.clone()) {
+    let try_parse = |value: Value| -> Option<ModuleReport> {
+        let value = sanitize_report_value(value);
+        if let Ok(mut report) = serde_json::from_value::<ModuleReport>(value.clone()) {
+            normalize_report_findings(&mut report);
             return Some(report);
         }
-        if let Some(report) = normalize_legacy_report(value, module) {
+        normalize_legacy_report(value, module)
+    };
+    for value in extract_json_candidates(stdout) {
+        if let Some(report) = try_parse(value) {
             return Some(report);
+        }
+    }
+    // 弱模型会把 item_verdicts 的 note 写成裸字符串键等非法语法，整份报告
+    // 因此无法解析；对原文做定点修复后再扫一遍候选。
+    let repaired = repair_report_json(stdout);
+    if repaired != stdout {
+        for value in extract_json_candidates(&repaired) {
+            if let Some(report) = try_parse(value) {
+                return Some(report);
+            }
         }
     }
     None
 }
 
+/// 严格解析成功后的兜底规整：模型常把 finding 写成 {evidence_id, rationale}
+/// 而没有 item_id——用首个证据引用补上，避免展示端出现空白项。
+fn normalize_report_findings(report: &mut ModuleReport) {
+    for (index, finding) in report.findings.iter_mut().enumerate() {
+        if finding.item_id.is_empty() {
+            finding.item_id = finding
+                .evidence_refs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| format!("finding-{}", index + 1));
+        }
+    }
+}
+
+/// 规整候选对象里分析器写法：弱模型常把 analyzer 输出成字符串而非对象。
+fn sanitize_report_value(mut value: Value) -> Value {
+    let Some(object) = value.as_object_mut() else {
+        return value;
+    };
+    if let Some(analyzer) = object.get_mut("analyzer")
+        && !analyzer.is_object()
+    {
+        let name = analyzer
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("ohmypi")
+            .to_owned();
+        *analyzer = json!({"name": name, "status": "completed"});
+    }
+    value
+}
+
+/// 字符串/转义感知的 JSON 容器配对：返回 text[start] 起的 {} 或 [] 的
+/// 结束下标（含），语法语义错误不影响配对（只看括号与字符串边界）。
+fn json_container_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if !matches!(bytes.get(start), Some(b'{') | Some(b'[')) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// 在 text 的 from 位置解析一个 JSON 字符串值，返回内容与消耗的字节数。
+fn string_value_at(text: &str, from: usize) -> Option<(String, usize)> {
+    let mut stream =
+        serde_json::Deserializer::from_str(&text[from..]).into_iter::<Value>();
+    match stream.next() {
+        Some(Ok(Value::String(value))) => Some((value, from + stream.byte_offset())),
+        _ => None,
+    }
+}
+
+/// 定位 `"key"` 后的字符串值：`"key" : "value"`。
+fn keyed_string(text: &str, key: &str) -> Option<(String, usize)> {
+    let key_pos = text.find(&format!("\"{key}\""))?;
+    let colon = text[key_pos + key.len() + 2..].find(':')? + key_pos + key.len() + 2;
+    string_value_at(text, colon + 1 + text[colon + 1..].len() - text[colon + 1..].trim_start().len())
+}
+
+/// 从语法损坏的 item_verdicts 条目里抢救 item_id / verdict；
+/// verdict 之后若还有裸字符串（模型把 note 写成了孤立键），把它当 note 回收。
+fn salvage_item_verdict(text: &str) -> Option<String> {
+    let (item_id, _) = keyed_string(text, "item_id")?;
+    let (verdict, verdict_end) = keyed_string(text, "verdict")?;
+    let mut cursor = verdict_end;
+    while cursor < text.len() && matches!(text.as_bytes()[cursor], b',' | b' ') {
+        cursor += 1;
+    }
+    let note = if text.as_bytes().get(cursor) == Some(&b'"') {
+        string_value_at(text, cursor).map(|(value, _)| value)
+    } else {
+        None
+    }
+    .unwrap_or_default();
+    Some(
+        json!({"item_id": item_id, "verdict": verdict, "note": note}).to_string(),
+    )
+}
+
+/// 定点修复 item_verdicts 数组：逐条提取顶层对象，能解析的保留，
+/// 损坏的按 item_id/verdict/note 重建，救不回来的丢弃。
+fn repair_report_json(text: &str) -> String {
+    let mut out = text.to_owned();
+    let mut search_from = 0;
+    while let Some(relative) = out[search_from..].find("\"item_verdicts\"") {
+        let key_pos = search_from + relative;
+        let Some(bracket) = out[key_pos..]
+            .find('[')
+            .map(|position| key_pos + position)
+            .filter(|position| json_container_end(&out, *position).is_some())
+        else {
+            search_from = key_pos + "\"item_verdicts\"".len();
+            continue;
+        };
+        let array_end = json_container_end(&out, bracket).unwrap();
+        let mut entries = Vec::new();
+        let mut cursor = bracket + 1;
+        while cursor < array_end {
+            if out.as_bytes()[cursor] == b'{'
+                && let Some(end) = json_container_end(&out, cursor)
+            {
+                let span = &out[cursor..=end];
+                let entry = if serde_json::from_str::<Value>(span).is_ok() {
+                    span.to_owned()
+                } else {
+                    match salvage_item_verdict(span) {
+                        Some(fixed) => fixed,
+                        None => {
+                            cursor = end + 1;
+                            continue;
+                        }
+                    }
+                };
+                entries.push(entry);
+                cursor = end + 1;
+                continue;
+            }
+            cursor += 1;
+        }
+        let replacement = format!("[{}]", entries.join(","));
+        out.replace_range(bracket..=array_end, &replacement);
+        search_from = bracket + replacement.len();
+    }
+    out
+}
+
 fn normalize_legacy_report(value: Value, module: &str) -> Option<ModuleReport> {
+    // 只接受"报告级"对象：除 verdict 外至少还带一个报告级字段。
+    // 报告 JSON 语法损坏时，候选扫描会先命中 findings/item_verdicts 里的
+    // 内嵌小对象（{"item_id":..,"verdict":..}），误认成整份报告会让
+    // 内嵌条目的 verdict 冒充模块结论。
+    const REPORT_KEYS: &[&str] = &[
+        "module",
+        "summary",
+        "confidence",
+        "findings",
+        "item_verdicts",
+        "evidence_refs",
+        "limitations",
+        "evaluation_result",
+        "rule_results",
+        "rules_verdict",
+        "analyzer",
+        "schema_version",
+    ];
+    if !REPORT_KEYS.iter().any(|key| value.get(key).is_some()) {
+        return None;
+    }
     let evaluation = value.get("evaluation_result");
     let verdict = normalize_verdict(
         evaluation
@@ -1833,6 +2028,7 @@ fn normalize_legacy_report(value: Value, module: &str) -> Option<ModuleReport> {
                 .get("rule")
                 .or_else(|| item.get("item_id"))
                 .or_else(|| item.get("id"))
+                .or_else(|| item.get("evidence_id"))
                 .and_then(Value::as_str)
             else {
                 continue;
@@ -2796,6 +2992,38 @@ mod tests {
         let report = parse_module_report(&text, "specification")
             .expect("应解析出结论而不是把附件回显当结论");
         assert_eq!(report.verdict, "fail");
+    }
+
+    #[test]
+    fn repairs_malformed_item_verdicts_and_rejects_inner_objects() {
+        // 真实弱模型输出：item_verdicts 里 note 被写成裸字符串键（非法 JSON），
+        // analyzer 是字符串而非对象；附件回显在前。修复后必须拿到 verdict=fail
+        // 与抢救出的逐项裁决，而不是退化成某个内嵌 {"verdict":"pass"} 对象。
+        let echo = r#"<file name="/tmp/ingress.chunk-01.input.json">
+{"evaluation_version":"evaluation-pipeline/v1","evidence":[{"evidence_id":"cli-ingress-0"}]}
+</file>"#;
+        let answer = concat!(
+            r#"{"schema_version":"module-eval-input/v1","evaluation_version":"evaluation-pipeline/v1","module":"ingress","verdict":"fail","confidence":"high","summary":"模型身份不匹配","findings":[{"finding_id":"F01","item_id":"S04","verdict":"pass","rationale":"HTTP 200"}],"evidence_refs":["cli-ingress-0"],"limitations":[],"item_verdicts":[{"item_id":"S04","verdict":"pass","note":"HTTP 200 鉴权通过"},{"item_id":"C03","verdict":"pass","无重试触发，error=null，status=200。"},{"item_id":"BC07","verdict":"fail","模型身份不匹配。"}],"analyzer":"agentcheck-evaluator"}"#
+        );
+        let text = format!("{echo}\n{answer}\n");
+        let report =
+            parse_module_report(&text, "ingress").expect("修复后应解析出完整报告");
+        assert_eq!(report.verdict, "fail");
+        assert_eq!(report.summary, "模型身份不匹配");
+        assert_eq!(report.item_verdicts.len(), 3);
+        assert_eq!(report.item_verdicts[1].verdict, "pass");
+        assert_eq!(
+            report.item_verdicts[1].note,
+            "无重试触发，error=null，status=200。"
+        );
+        assert_eq!(report.analyzer.name, "agentcheck-evaluator");
+    }
+
+    #[test]
+    fn stray_inner_object_is_not_a_report() {
+        // 裸的逐项裁决对象不得被当成整份报告（否则内嵌 verdict 会冒充模块结论）。
+        let text = r#"前言 {"item_id":"S04","verdict":"pass","note":"ok"} 结尾"#;
+        assert!(parse_module_report(text, "ingress").is_none());
     }
 
     #[test]
