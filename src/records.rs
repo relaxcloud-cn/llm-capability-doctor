@@ -37,6 +37,8 @@ pub enum ModuleSelectionState {
 pub enum ModuleResultState {
     Pass,
     Fail,
+    /// 语义分析判定"有限制"：部分能力可用但不完整，区别于判不出的 inconclusive。
+    Limited,
     Unsupported,
     Inconclusive,
     InvalidExecution,
@@ -146,12 +148,25 @@ pub struct EvidenceRecord {
     pub redacted: bool,
 }
 
+/// 模块内检测小项的三段判定计数：通过 / 未通过 / 需人工确认。
+/// custom 模式来自规则判定；dynamic 模式来自 OhMyPi 逐项语义判定，
+/// 需人工确认 = 分析也未能判定的条目。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProgressItemStats {
+    pub passed: usize,
+    pub failed: usize,
+    pub needs_manual: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ModuleResult {
     pub module_id: String,
     pub state: ModuleResultState,
     pub reason: Option<String>,
+    /// 模块小项判定计数，随运行记录持久化，供 GUI/报告直接取用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_stats: Option<ProgressItemStats>,
     pub attempt_refs: Vec<String>,
     pub evidence_refs: Vec<String>,
     pub incident_refs: Vec<String>,
@@ -303,6 +318,7 @@ pub fn create_run(input: CreateRunInput) -> DetectionRecord {
                     ModuleResultState::NotSelected
                 },
                 reason: None,
+                item_stats: None,
                 attempt_refs: Vec::new(),
                 evidence_refs: Vec::new(),
                 incident_refs: Vec::new(),
@@ -827,6 +843,7 @@ mod tests {
                 module_id: "capability".into(),
                 state: ModuleResultState::InvalidExecution,
                 reason: Some("invalid response".into()),
+                item_stats: None,
                 attempt_refs: vec!["attempt-1".into()],
                 evidence_refs: vec![evidence.id.clone()],
                 incident_refs: vec![event.incident_id.clone().unwrap()],
@@ -840,6 +857,7 @@ mod tests {
                 module_id: "agent".into(),
                 state: ModuleResultState::Inconclusive,
                 reason: None,
+                item_stats: None,
                 attempt_refs: Vec::new(),
                 evidence_refs: vec![evidence.id],
                 incident_refs: vec!["incident-1".into()],

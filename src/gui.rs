@@ -309,7 +309,7 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
     .row {{ display: grid; grid-template-columns: minmax(130px, 1fr) 120px 1.6fr; gap: 10px; align-items: center; border-bottom: 1px solid #edf0f2; padding: 9px 0; }}
     .row:last-child {{ border-bottom: 0; }}
     .state {{ font-weight: 700; }}
-    .state.pass {{ color: #087f5b; }} .state.fail {{ color: #c92a2a; }} .state.inconclusive {{ color: #a15c00; }} .state.unverified, .state.not_selected {{ color: #687684; }}
+    .state.pass {{ color: #087f5b; }} .state.fail {{ color: #c92a2a; }} .state.inconclusive, .state.limited {{ color: #a15c00; }} .state.unverified, .state.not_selected {{ color: #687684; }}
     .source {{ color: #687684; font-size: 13px; }}
     .empty {{ color: #687684; margin: 0; }}
     @media (max-width: 640px) {{ main {{ width: min(100% - 20px, 1180px); margin-top: 12px; }} section {{ padding: 15px; }} .row {{ grid-template-columns: 1fr; gap: 4px; }} header {{ padding: 20px; }} }}
@@ -357,7 +357,7 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
   <script>
     const report = {report_json};
     const labels = {{ ingress: "服务接入", specification: "模型规格", capability: "能力跑分", performance: "性能实测", agent: "智能体实测", baseline: "模型基线" }};
-    const statusLabel = state => ({{ pass: "通过", fail: "失败", unsupported: "不支持", inconclusive: "需人工确认", invalid_execution: "执行无效", not_applicable: "不适用", not_selected: "未选择", unverified: "未验证" }}[state] || state);
+    const statusLabel = state => ({{ pass: "通过", fail: "失败", unsupported: "不支持", limited: "有限制", inconclusive: "需人工确认", invalid_execution: "执行无效", not_applicable: "不适用", not_selected: "未选择", unverified: "未验证" }}[state] || state);
     const tallies = {tallies_json};
     const tallyLabel = moduleId => {{
       const tally = tallies[moduleId];
@@ -387,10 +387,11 @@ pub fn render_workbench_html(report: &CliRunReport) -> Result<String, serde_json
       document.querySelector("#run-state").textContent = chosen.length ? `已记录选择：${{chosen.map(id => labels[id]).join("、")}}；请用同一 CLI 进程执行检测` : "至少选择一个检测项目";
     }});
     const progress = document.querySelector("#progress");
-    report.record.module_results.forEach(result => {{
+    // DetectionRecord 序列化为 camelCase：moduleResults / moduleId。
+    (report.record.moduleResults || []).forEach(result => {{
       const row = document.createElement("div"); row.className = "row";
-      const name = document.createElement("strong"); name.textContent = labels[result.module_id] || result.module_id;
-      const state = document.createElement("span"); state.className = `state ${{result.state}}`; state.textContent = tallyLabel(result.module_id) || statusLabel(result.state);
+      const name = document.createElement("strong"); name.textContent = labels[result.moduleId] || result.moduleId;
+      const state = document.createElement("span"); state.className = `state ${{result.state}}`; state.textContent = tallyLabel(result.moduleId) || statusLabel(result.state);
       const reason = document.createElement("span"); reason.className = "source"; reason.textContent = result.reason || "已记录当前状态和证据入口";
       row.append(name, state, reason); progress.append(row);
     }});
@@ -484,6 +485,7 @@ mod tests {
             run_id: "run-gui".into(),
             started_at: "2026-09-11T00:00:00Z".into(),
             concurrency_preflight: false,
+            analysis_dir: None,
         };
         run_with_executor(request, &mut UnavailableExecutor).unwrap()
     }
@@ -535,4 +537,3 @@ mod tests {
         assert_eq!(launcher.paths.len(), 1);
     }
 }
-

@@ -15,7 +15,10 @@ pub fn render_rich_html(run: &Value) -> String {
         .into_iter()
         .filter(|id| selected_modules(run).contains(&id.to_string()))
         .collect::<Vec<_>>();
-    let sections = modules.iter().map(|id| export_module(run, id)).collect::<Vec<_>>();
+    let sections = modules
+        .iter()
+        .map(|id| export_module(run, id))
+        .collect::<Vec<_>>();
 
     let mut body = String::new();
     body.push_str(&hero_html(run));
@@ -97,7 +100,7 @@ impl ExportModule<'_> {
         }
         match self.state.as_str() {
             "pass" => "v-pass",
-            "unsupported" | "inconclusive" | "invalid_execution" => "v-fail",
+            "unsupported" | "inconclusive" | "invalid_execution" | "limited" => "v-fail",
             _ => "v-unknown",
         }
     }
@@ -105,16 +108,25 @@ impl ExportModule<'_> {
 
 impl Grouped<'_> {
     fn fail_count(&self) -> usize {
-        self.samples.iter().filter(|s| s.verdict == Verdict::Fail).count()
+        self.samples
+            .iter()
+            .filter(|s| s.verdict == Verdict::Fail)
+            .count()
     }
     fn unverified_count(&self) -> usize {
-        self.samples.iter().filter(|s| s.verdict == Verdict::Unverified).count()
+        self.samples
+            .iter()
+            .filter(|s| s.verdict == Verdict::Unverified)
+            .count()
     }
     fn all_pass(&self) -> bool {
         self.samples.iter().all(|s| s.verdict == Verdict::Pass)
     }
     fn correct(&self) -> usize {
-        self.samples.iter().filter(|s| s.verdict == Verdict::Pass).count()
+        self.samples
+            .iter()
+            .filter(|s| s.verdict == Verdict::Pass)
+            .count()
     }
     fn group_verdict(&self) -> Verdict {
         if self.fail_count() > 0 {
@@ -164,12 +176,24 @@ fn record_object(run: &Value) -> &Value {
 fn selected_modules(run: &Value) -> Vec<String> {
     run.get("selected_modules")
         .and_then(Value::as_array)
-        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 fn test_module_ids() -> [&'static str; 5] {
-    ["specification", "capability", "performance", "agent", "baseline"]
+    [
+        "specification",
+        "capability",
+        "performance",
+        "agent",
+        "baseline",
+    ]
 }
 
 fn module_title(backend: &str) -> &'static str {
@@ -219,7 +243,10 @@ fn record_evidence(run: &Value) -> Vec<&Value> {
 
 fn module_states(run: &Value) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
-    if let Some(results) = record_object(run).get("moduleResults").and_then(Value::as_array) {
+    if let Some(results) = record_object(run)
+        .get("moduleResults")
+        .and_then(Value::as_array)
+    {
         for result in results {
             if let (Some(id), Some(state)) = (
                 result.get("moduleId").and_then(Value::as_str),
@@ -273,10 +300,12 @@ fn evidence_by_sample<'a>(run: &'a Value, backend: &str) -> BTreeMap<String, &'a
                     resolved = real;
                 }
             }
-            let sample_id = item
-                .get("sample_id")
-                .and_then(Value::as_str)
-                .or_else(|| resolved.get("payload").and_then(|p| p.get("sample_id")).and_then(Value::as_str));
+            let sample_id = item.get("sample_id").and_then(Value::as_str).or_else(|| {
+                resolved
+                    .get("payload")
+                    .and_then(|p| p.get("sample_id"))
+                    .and_then(Value::as_str)
+            });
             if let Some(sample_id) = sample_id {
                 map.insert(sample_id.to_owned(), resolved);
             }
@@ -379,8 +408,70 @@ fn agent_check_title(id: Option<&str>) -> &'static str {
     }
 }
 
+/// dynamic 模式：run.json 中持久化的 OhMyPi 逐项裁决（item_id -> (verdict, note)）。
+/// 小项行优先采用语义裁决；custom 模式没有 module_reports，天然为空。
+fn semantic_verdicts<'a>(run: &'a Value, backend: &str) -> BTreeMap<&'a str, (&'a str, &'a str)> {
+    let mut map = BTreeMap::new();
+    let Some(reports) = run.get("module_reports").and_then(Value::as_array) else {
+        return map;
+    };
+    for report in reports {
+        if report.get("module").and_then(Value::as_str) != Some(backend) {
+            continue;
+        }
+        let Some(items) = report.get("item_verdicts").and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let (Some(id), Some(verdict)) = (
+                item.get("item_id").and_then(Value::as_str),
+                item.get("verdict").and_then(Value::as_str),
+            ) {
+                map.insert(
+                    id,
+                    (
+                        verdict,
+                        item.get("note").and_then(Value::as_str).unwrap_or_default(),
+                    ),
+                );
+            }
+        }
+    }
+    map
+}
+
+/// 用语义裁决覆盖规则标签得出的小项判定：item_id 精确匹配优先，
+/// 其次按检测项分组键匹配（如 S04-3 → S04）。
+fn apply_semantic_verdicts(run: &Value, backend: &str, tasks: &mut [Task]) {
+    let verdicts = semantic_verdicts(run, backend);
+    if verdicts.is_empty() {
+        return;
+    }
+    for task in tasks.iter_mut() {
+        let hit = verdicts.get(task.id.as_str()).or_else(|| {
+            crate::evaluation::item_group_key(&task.id)
+                .and_then(|group| verdicts.get(group.as_str()))
+        });
+        let Some(&(verdict, note)) = hit else {
+            continue;
+        };
+        let (v, text) = match verdict {
+            "pass" => (Verdict::Pass, "通过"),
+            "fail" => (Verdict::Fail, "未通过"),
+            "limited" => (Verdict::Unverified, "有限制"),
+            _ => (Verdict::Unverified, "无法判定"),
+        };
+        task.verdict = v;
+        task.verdict_text = text.to_owned();
+        if !note.is_empty() {
+            task.note = note.to_owned();
+        }
+    }
+}
+
 /// 逐条判定以报告权威字段为准：spec.observations / scorecard.observations /
 /// perf.samples / agent.samples / baseline.comparisons。
+/// dynamic 模式下最终由 OhMyPi 逐项裁决覆盖（semantic_verdicts）。
 fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
     let payload = module_payload(run, backend);
     let report = payload.and_then(|p| p.get("report"));
@@ -395,7 +486,8 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 .cloned()
                 .unwrap_or_default();
             for observation in &observations {
-                let (verdict, text) = spec_verdict(observation.get("status").and_then(Value::as_str));
+                let (verdict, text) =
+                    spec_verdict(observation.get("status").and_then(Value::as_str));
                 let mut note = observation
                     .get("limitation")
                     .and_then(Value::as_str)
@@ -409,7 +501,10 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                         format!("复核：{note}")
                     };
                 }
-                let id = observation.get("sample_id").and_then(Value::as_str).unwrap_or_default();
+                let id = observation
+                    .get("sample_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 tasks.push(Task {
                     id: id.to_owned(),
                     verdict,
@@ -426,13 +521,21 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 .cloned()
                 .unwrap_or_default();
             for observation in &observations {
-                let (verdict, text) = capability_verdict(observation.get("label").and_then(Value::as_str));
-                let id = observation.get("sample_id").and_then(Value::as_str).unwrap_or_default();
+                let (verdict, text) =
+                    capability_verdict(observation.get("label").and_then(Value::as_str));
+                let id = observation
+                    .get("sample_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 tasks.push(Task {
                     id: id.to_owned(),
                     verdict,
                     verdict_text: text,
-                    note: observation.get("reason").and_then(Value::as_str).unwrap_or_default().to_owned(),
+                    note: observation
+                        .get("reason")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
                     item: by_sample.get(id).copied(),
                 });
             }
@@ -457,7 +560,8 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 if let Some(limitation) = sample.get("limitation").and_then(Value::as_str) {
                     parts.push(limitation.to_owned());
                 }
-                if let Some(concurrency) = sample.get("target_concurrency").and_then(Value::as_i64) {
+                if let Some(concurrency) = sample.get("target_concurrency").and_then(Value::as_i64)
+                {
                     if concurrency > 1 {
                         parts.push(format!("并发档位 {concurrency}"));
                     }
@@ -484,15 +588,18 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                     .get("check_results")
                     .and_then(Value::as_array)
                     .and_then(|checks| {
-                        checks
-                            .iter()
-                            .find(|check| check.get("status").and_then(Value::as_str) == Some("fail"))
+                        checks.iter().find(|check| {
+                            check.get("status").and_then(Value::as_str) == Some("fail")
+                        })
                     })
                     .map(|check| {
                         format!(
                             "「{}」{}",
                             agent_check_title(check.get("check").and_then(Value::as_str)),
-                            check.get("rationale").and_then(Value::as_str).unwrap_or_default()
+                            check
+                                .get("rationale")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
                         )
                     });
                 let mut note = failed_check
@@ -508,7 +615,10 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 if note.is_empty() && verdict == Verdict::Pass {
                     note = "各检查项均通过".to_owned();
                 }
-                let id = sample.get("sample_id").and_then(Value::as_str).unwrap_or_default();
+                let id = sample
+                    .get("sample_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 tasks.push(Task {
                     id: id.to_owned(),
                     verdict,
@@ -525,7 +635,8 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 .cloned()
                 .unwrap_or_default();
             for comparison in &comparisons {
-                let (verdict, text) = baseline_verdict(comparison.get("status").and_then(Value::as_str));
+                let (verdict, text) =
+                    baseline_verdict(comparison.get("status").and_then(Value::as_str));
                 let diffs = comparison
                     .get("differences")
                     .and_then(Value::as_array)
@@ -534,7 +645,8 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                             .iter()
                             .filter_map(|d| {
                                 let detail = d.get("detail").and_then(Value::as_str)?;
-                                let path = d.get("path").and_then(Value::as_str).unwrap_or_default();
+                                let path =
+                                    d.get("path").and_then(Value::as_str).unwrap_or_default();
                                 Some(if path.is_empty() {
                                     detail.to_owned()
                                 } else {
@@ -547,12 +659,26 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
                 let notes = comparison
                     .get("notes")
                     .and_then(Value::as_array)
-                    .map(|items| items.iter().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
                     .unwrap_or_default();
                 let mut merged = diffs;
                 merged.extend(notes);
-                let note = merged.iter().take(2).cloned().collect::<Vec<_>>().join("；");
-                let id = comparison.get("scenario").and_then(Value::as_str).unwrap_or_default();
+                let note = merged
+                    .iter()
+                    .take(2)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("；");
+                let id = comparison
+                    .get("scenario")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
                 tasks.push(Task {
                     id: id.to_owned(),
                     verdict,
@@ -564,6 +690,7 @@ fn task_specs<'a>(run: &'a Value, backend: &str) -> Vec<Task<'a>> {
         }
         _ => {}
     }
+    apply_semantic_verdicts(run, backend, &mut tasks);
     tasks
 }
 
@@ -573,31 +700,46 @@ fn catalog(backend: &str) -> Option<Catalog> {
     match backend {
         "specification" => Some(Catalog {
             groups: vec![
-                group("S01", "协议可接受上限",
+                group(
+                    "S01",
+                    "协议可接受上限",
                     "不同长度的请求都能被服务接受并正常回答",
                     "服务拒绝了部分长度的请求；超长业务内容需要先拆分或截断",
                     "向服务发送多个真实长度的输入（约 64K–512K token），观察每个档位是否被接受并完整返回。",
-                    "全部档位被接受且回复完整 → 通过；任一档位被拒绝或回复截断 → 未通过；未取得有效回复 → 未判定。"),
-                group("S04", "工具调用",
+                    "全部档位被接受且回复完整 → 通过；任一档位被拒绝或回复截断 → 未通过；未取得有效回复 → 未判定。",
+                ),
+                group(
+                    "S04",
+                    "工具调用",
                     "都能按格式返回工具调用",
                     "有请求没有按格式返回工具调用；业务依赖工具调用的话需要先处理",
                     "构造五种工具调用场景（填齐各类参数、禁止调用、同一工具连调两次、两个不同工具、强制指定），检查返回的 tool_calls。",
-                    "tool_calls 结构完整、参数可解析 → 通过；未按协议格式返回 → 未通过；服务不支持工具调用 → 未判定。"),
-                group("S05", "结构化输出",
+                    "tool_calls 结构完整、参数可解析 → 通过；未按协议格式返回 → 未通过；服务不支持工具调用 → 未判定。",
+                ),
+                group(
+                    "S05",
+                    "结构化输出",
                     "JSON、按字段模板两种都能按格式输出",
                     "部分格式要求没有满足；程序直接解析返回值的场景需要适配",
                     "分别要求按 JSON 和按字段模板输出，验证返回是否严格符合声明格式。",
-                    "返回可被对应格式解析 → 通过；格式不符或混入多余内容 → 未通过。"),
-                group("S06", "消息与多轮输入",
+                    "返回可被对应格式解析 → 通过；格式不符或混入多余内容 → 未通过。",
+                ),
+                group(
+                    "S06",
+                    "消息与多轮输入",
                     "单轮、多轮、系统提示都能正确处理",
                     "部分消息形态处理不正确；多轮对话业务建议验证",
                     "发送四种消息组合（system+user、带历史回引、多标记区分、含 tool 角色），检查多轮消息形态是否被正确处理。",
-                    "各消息形态均被正确处理 → 通过；报错或语义错乱 → 未通过。"),
-                group("S07", "流式输出",
+                    "各消息形态均被正确处理 → 通过；报错或语义错乱 → 未通过。",
+                ),
+                group(
+                    "S07",
+                    "流式输出",
                     "流式返回能正常开始和正常结束",
                     "流式返回未能正常开始或结束；流式场景需要先排查",
                     "以 stream 模式请求文本与工具调用输出，观察分块流能否正常开始、正常结束。",
-                    "流式正常开始且正常结束 → 通过；中途断流或协议错误 → 未通过；不支持流式 → 未判定。"),
+                    "流式正常开始且正常结束 → 通过；中途断流或协议错误 → 未通过；不支持流式 → 未判定。",
+                ),
             ],
             unit_name: "项",
             desc: "检查接口的基本收发能力：不同长度的请求能否被接受、工具调用能否按格式返回、JSON 和字段模板能否按格式输出、单轮与多轮消息能否正确处理、流式返回能否正常开始和结束。",
@@ -605,15 +747,35 @@ fn catalog(backend: &str) -> Option<Catalog> {
         }),
         "capability" => {
             let judge = "回答与参考答案一致 → 答对；不一致 → 答错；未作答或无法判分 → 未判定。";
-            let category = |id: &str, name: &str, fail: &str| group(id, name, "这类题做得稳", fail,
-                &format!("围绕{name}出固定题目，收集模型回答。"), judge);
+            let category = |id: &str, name: &str, fail: &str| {
+                group(
+                    id,
+                    name,
+                    "这类题做得稳",
+                    fail,
+                    &format!("围绕{name}出固定题目，收集模型回答。"),
+                    judge,
+                )
+            };
             Some(Catalog {
                 groups: vec![
                     category("C01", "文本理解与指令执行", "错得较多，重要指令建议复核"),
                     category("C02", "信息提取与结构化填写", "错得较多，提取结果建议复核"),
-                    category("C03", "工具选择与参数填写", "近半数选择或参数出错，重点复核"),
-                    category("C04", "多轮对话与条件承接", "错得较多，条件变化场景建议复核"),
-                    category("C05", "长材料理解与信息利用", "错得较多，长材料结论建议复核"),
+                    category(
+                        "C03",
+                        "工具选择与参数填写",
+                        "近半数选择或参数出错，重点复核",
+                    ),
+                    category(
+                        "C04",
+                        "多轮对话与条件承接",
+                        "错得较多，条件变化场景建议复核",
+                    ),
+                    category(
+                        "C05",
+                        "长材料理解与信息利用",
+                        "错得较多，长材料结论建议复核",
+                    ),
                     category("C06", "逻辑推理与计算", "错得最多；重要计算务必人工复核"),
                 ],
                 unit_name: "题",
@@ -625,21 +787,46 @@ fn catalog(backend: &str) -> Option<Catalog> {
             let judge = "测量值在正常范围且无错误 → 通过；出现超时、错误或明显异常 → 未通过；预热样本仅标注，不计入结论。";
             Some(Catalog {
                 groups: vec![
-                    group("P01", "首字响应时间",
-                        "从发出请求到第一个字返回的等待正常", "部分请求的首字等待异常",
-                        "实测从发出请求到收到第一个字的等待时间。", judge),
-                    group("P02", "完整响应时间",
-                        "完整生成一段回答的耗时正常", "部分请求耗时异常",
-                        "实测从发出请求到回答完整生成的总耗时。", judge),
-                    group("P03", "并发处理能力",
-                        "不同并发档位下请求都能完成", "部分并发档位出现失败",
-                        "在多个并发档位下同时发起请求，观察各档位完成情况。", judge),
-                    group("P04", "持续运行稳定性",
-                        "持续运行期间没有出现失败或明显变慢", "持续运行期间出现失败或明显变慢",
-                        "持续发起一段时间的请求，观察是否出现失败或明显变慢。", judge),
-                    group("P05", "长文本负载",
-                        "不同长度的输入材料下表现正常", "长输入场景下表现异常",
-                        "在不同长度的输入材料下实测响应表现。", judge),
+                    group(
+                        "P01",
+                        "首字响应时间",
+                        "从发出请求到第一个字返回的等待正常",
+                        "部分请求的首字等待异常",
+                        "实测从发出请求到收到第一个字的等待时间。",
+                        judge,
+                    ),
+                    group(
+                        "P02",
+                        "完整响应时间",
+                        "完整生成一段回答的耗时正常",
+                        "部分请求耗时异常",
+                        "实测从发出请求到回答完整生成的总耗时。",
+                        judge,
+                    ),
+                    group(
+                        "P03",
+                        "并发处理能力",
+                        "不同并发档位下请求都能完成",
+                        "部分并发档位出现失败",
+                        "在多个并发档位下同时发起请求，观察各档位完成情况。",
+                        judge,
+                    ),
+                    group(
+                        "P04",
+                        "持续运行稳定性",
+                        "持续运行期间没有出现失败或明显变慢",
+                        "持续运行期间出现失败或明显变慢",
+                        "持续发起一段时间的请求，观察是否出现失败或明显变慢。",
+                        judge,
+                    ),
+                    group(
+                        "P05",
+                        "长文本负载",
+                        "不同长度的输入材料下表现正常",
+                        "长输入场景下表现异常",
+                        "在不同长度的输入材料下实测响应表现。",
+                        judge,
+                    ),
                 ],
                 unit_name: "批",
                 desc: "在不同负载下实测响应表现：首字等待时间、完整响应耗时、并发处理能力、持续运行稳定性、长文本输入。",
@@ -648,11 +835,16 @@ fn catalog(backend: &str) -> Option<Catalog> {
         }
         "agent" => {
             let scenarios: [(&str, &str); 10] = [
-                ("T1-A", "遵守任务规则"), ("T1-B", "处理外部注入"),
-                ("T2-A", "选择正确工具"), ("T2-B", "校验路径与参数"),
-                ("T3-A", "使用工具返回驱动下一步"), ("T3-B", "处理工具返回的信息缺失"),
-                ("T4-A", "跨轮次保留状态"), ("T4-B", "跨轮次响应条件变化"),
-                ("T5-A", "处理可恢复工具失败"), ("T5-B", "处理信息不足与提前结束"),
+                ("T1-A", "遵守任务规则"),
+                ("T1-B", "处理外部注入"),
+                ("T2-A", "选择正确工具"),
+                ("T2-B", "校验路径与参数"),
+                ("T3-A", "使用工具返回驱动下一步"),
+                ("T3-B", "处理工具返回的信息缺失"),
+                ("T4-A", "跨轮次保留状态"),
+                ("T4-B", "跨轮次响应条件变化"),
+                ("T5-A", "处理可恢复工具失败"),
+                ("T5-B", "处理信息不足与提前结束"),
             ];
             Some(Catalog {
                 groups: scenarios
@@ -669,19 +861,36 @@ fn catalog(backend: &str) -> Option<Catalog> {
         }
         "baseline" => {
             let items: [(&str, &str); 14] = [
-                ("BC01", "响应外层"), ("BC02", "候选回复"), ("BC03", "回复消息"),
-                ("BC04", "用量统计"), ("BC05", "细分用量"), ("BC06", "附加信息"),
-                ("BC07", "工具调用结构"), ("BC08", "函数名称与参数"), ("BC09", "分块外层"),
-                ("BC10", "增量候选"), ("BC11", "消息增量"), ("BC12", "工具调用增量"),
-                ("BC13", "流式用量返回"), ("BC14", "错误对象"),
+                ("BC01", "响应外层"),
+                ("BC02", "候选回复"),
+                ("BC03", "回复消息"),
+                ("BC04", "用量统计"),
+                ("BC05", "细分用量"),
+                ("BC06", "附加信息"),
+                ("BC07", "工具调用结构"),
+                ("BC08", "函数名称与参数"),
+                ("BC09", "分块外层"),
+                ("BC10", "增量候选"),
+                ("BC11", "消息增量"),
+                ("BC12", "工具调用增量"),
+                ("BC13", "流式用量返回"),
+                ("BC14", "错误对象"),
             ];
             Some(Catalog {
                 groups: items
                     .iter()
-                    .map(|(id, title)| group(id, title,
-                        "返回结构与通用规范一致", "结构与通用规范不一致，展开可看差异",
-                        &format!("发起真实请求，将返回中「{title}」相关字段与通用规范逐项对照。"),
-                        "结构与规范一致 → 一致；存在差异 → 有差异；本次未观测到 → 未判定。"))
+                    .map(|(id, title)| {
+                        group(
+                            id,
+                            title,
+                            "返回结构与通用规范一致",
+                            "结构与通用规范不一致，展开可看差异",
+                            &format!(
+                                "发起真实请求，将返回中「{title}」相关字段与通用规范逐项对照。"
+                            ),
+                            "结构与规范一致 → 一致；存在差异 → 有差异；本次未观测到 → 未判定。",
+                        )
+                    })
                     .collect(),
                 unit_name: "项",
                 desc: "把服务的实际返回与通用规范逐项对照：消息字段、结束原因、用量统计、工具调用结构、流式分块等——只看格式，不评内容质量。",
@@ -692,9 +901,7 @@ fn catalog(backend: &str) -> Option<Catalog> {
     }
 }
 
-fn group(
-    id: &str, name: &str, pass_note: &str, fail_note: &str, how: &str, judge: &str,
-) -> Group {
+fn group(id: &str, name: &str, pass_note: &str, fail_note: &str, how: &str, judge: &str) -> Group {
     Group {
         id: id.to_owned(),
         name: name.to_owned(),
@@ -709,12 +916,23 @@ fn group(
 fn sample_group(backend: &str, sample_id: &str) -> Option<String> {
     match backend {
         "specification" => [
-            ("context-64k", "S01"), ("context-128k", "S01"), ("context-256k", "S01"), ("context-512k", "S01"),
-            ("tools-all-types", "S04"), ("tools-none", "S04"), ("tools-same-twice", "S04"),
-            ("tools-two-distinct", "S04"), ("tools-forced", "S04"),
-            ("json", "S05"), ("schema", "S05"),
-            ("M01", "S06"), ("M02", "S06"), ("M03", "S06"), ("M04", "S06"),
-            ("stream-text", "S07"), ("stream-tool", "S07"),
+            ("context-64k", "S01"),
+            ("context-128k", "S01"),
+            ("context-256k", "S01"),
+            ("context-512k", "S01"),
+            ("tools-all-types", "S04"),
+            ("tools-none", "S04"),
+            ("tools-same-twice", "S04"),
+            ("tools-two-distinct", "S04"),
+            ("tools-forced", "S04"),
+            ("json", "S05"),
+            ("schema", "S05"),
+            ("M01", "S06"),
+            ("M02", "S06"),
+            ("M03", "S06"),
+            ("M04", "S06"),
+            ("stream-text", "S07"),
+            ("stream-tool", "S07"),
         ]
         .iter()
         .find(|(known, _)| *known == sample_id)
@@ -831,15 +1049,24 @@ fn export_module<'a>(run: &'a Value, backend: &'static str) -> ExportModule<'a> 
         .unwrap_or_else(|| "unverified".to_owned());
 
     let fail_count = tasks.iter().filter(|t| t.verdict == Verdict::Fail).count();
-    let unverified_count = tasks.iter().filter(|t| t.verdict == Verdict::Unverified).count();
+    let unverified_count = tasks
+        .iter()
+        .filter(|t| t.verdict == Verdict::Unverified)
+        .count();
 
     let headline = if fail_count > 0 {
         "有问题".to_owned()
     } else {
         match state.as_str() {
-            "pass" => if unverified_count > 0 { "通过，部分项未判定" } else { "通过" }.to_owned(),
+            "pass" => if unverified_count > 0 {
+                "通过，部分项未判定"
+            } else {
+                "通过"
+            }
+            .to_owned(),
             "fail" => "有问题".to_owned(),
             "unsupported" => "不支持".to_owned(),
+            "limited" => "有限制".to_owned(),
             "invalid_execution" => "本次检测未完成".to_owned(),
             "inconclusive" => "证据不足，暂不能判断".to_owned(),
             "not_applicable" => "不适用".to_owned(),
@@ -853,7 +1080,10 @@ fn export_module<'a>(run: &'a Value, backend: &'static str) -> ExportModule<'a> 
     let banner_meta = if tasks.is_empty() {
         None
     } else if fail_count == 0 && unverified_count == 0 {
-        Some(format!("{} {unit_name}全部正常 · 每项都是真实调用", tasks.len()))
+        Some(format!(
+            "{} {unit_name}全部正常 · 每项都是真实调用",
+            tasks.len()
+        ))
     } else {
         let pass_count = tasks.len() - fail_count - unverified_count;
         let mut parts = vec![format!("{pass_count} 项正常")];
@@ -875,14 +1105,23 @@ fn export_module<'a>(run: &'a Value, backend: &'static str) -> ExportModule<'a> 
         }
         for group in &catalog.groups {
             if let Some(samples) = buckets.get(&group.id) {
-                grouped.push(Grouped { group: group.clone(), samples: samples.to_vec() });
+                grouped.push(Grouped {
+                    group: group.clone(),
+                    samples: samples.to_vec(),
+                });
             }
         }
         if let Some(others) = buckets.get("_other") {
             if !others.is_empty() {
                 grouped.push(Grouped {
-                    group: group("_other", "其他检查", "全部正常", "有未通过的检查",
-                        "该检查项在本次检测中产生了记录。", "按返回状态判定。"),
+                    group: group(
+                        "_other",
+                        "其他检查",
+                        "全部正常",
+                        "有未通过的检查",
+                        "该检查项在本次检测中产生了记录。",
+                        "按返回状态判定。",
+                    ),
                     samples: others.to_vec(),
                 });
             }
@@ -893,17 +1132,22 @@ fn export_module<'a>(run: &'a Value, backend: &'static str) -> ExportModule<'a> 
         backend,
         title: module_title(backend),
         headline,
-        detail: catalog.as_ref().map(|c| c.desc.to_owned()).unwrap_or_else(|| {
-            record_object(run)
-                .get("moduleResults")
-                .and_then(Value::as_array)
-                .and_then(|results| {
-                    results.iter().find(|result| result.get("moduleId").and_then(Value::as_str) == Some(backend))
-                })
-                .and_then(|result| result.get("reason").and_then(Value::as_str))
-                .map(str::to_owned)
-                .unwrap_or_else(|| "该模块已完成真实执行；详细任务证据见下方。".to_owned())
-        }),
+        detail: catalog
+            .as_ref()
+            .map(|c| c.desc.to_owned())
+            .unwrap_or_else(|| {
+                record_object(run)
+                    .get("moduleResults")
+                    .and_then(Value::as_array)
+                    .and_then(|results| {
+                        results.iter().find(|result| {
+                            result.get("moduleId").and_then(Value::as_str) == Some(backend)
+                        })
+                    })
+                    .and_then(|result| result.get("reason").and_then(Value::as_str))
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "该模块已完成真实执行；详细任务证据见下方。".to_owned())
+            }),
         meta: banner_meta,
         state,
         scope: catalog.as_ref().map(|c| c.scope),
@@ -929,7 +1173,9 @@ fn hero_html(run: &Value) -> String {
     let explanation = run
         .pointer("/customer_conclusion/text")
         .and_then(Value::as_str)
-        .unwrap_or("本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。")
+        .unwrap_or(
+            "本页展示检测程序产生的状态摘要；完整请求、事件、模块状态和限制保存在导出报告中。",
+        )
         .to_owned();
     let selected = selected_modules(run).len();
     let completed = record_object(run)
@@ -989,7 +1235,10 @@ fn module_html(run: &Value, section: &ExportModule<'_>) -> String {
         .as_ref()
         .map(|m| format!("<span class=\"banner-meta\">{}</span>", escape(m)))
         .unwrap_or_default();
-    let scope = section.scope.map(|s| format!("<p class=\"scope\">{}</p>", escape(s))).unwrap_or_default();
+    let scope = section
+        .scope
+        .map(|s| format!("<p class=\"scope\">{}</p>", escape(s)))
+        .unwrap_or_default();
     format!(
         "<section class=\"module\" id=\"mod-{title}\">\n  <div class=\"banner {klass}\">\n    <div class=\"banner-head\">\n      <span class=\"banner-ico\">{icon}</span>\n      <h2>{title}：{headline}</h2>\n      {meta}\n    </div>\n    <p class=\"banner-desc\">{detail}</p>\n  </div>\n  <div class=\"card\">\n{groups}  </div>\n{scope}</section>\n",
         title = escape(section.title),
@@ -1001,7 +1250,11 @@ fn module_html(run: &Value, section: &ExportModule<'_>) -> String {
 }
 
 fn sample_html(
-    run: &Value, section: &ExportModule<'_>, grouped: &Grouped<'_>, index: usize, sample: &Task<'_>,
+    run: &Value,
+    section: &ExportModule<'_>,
+    grouped: &Grouped<'_>,
+    index: usize,
+    sample: &Task<'_>,
 ) -> String {
     let name = sample_name(section.backend, index + 1, &sample.id);
     let judge = if sample.note.is_empty() {
@@ -1019,10 +1272,22 @@ fn sample_html(
         .map(pretty_json)
         .unwrap_or_default();
     let is_task_style = curl.is_empty();
-    let request_title = if is_task_style { "查看原始请求" } else { "查看原始 curl 请求" };
-    let response_title = if is_task_style { "任务执行记录（JSON）" } else { "原始返回（JSON）" };
+    let request_title = if is_task_style {
+        "查看原始请求"
+    } else {
+        "查看原始 curl 请求"
+    };
+    let response_title = if is_task_style {
+        "任务执行记录（JSON）"
+    } else {
+        "原始返回（JSON）"
+    };
     let response_value = if raw_response.is_empty() {
-        if is_task_style { "本次没有取得任务执行记录" } else { "本次没有取得响应体" }
+        if is_task_style {
+            "本次没有取得任务执行记录"
+        } else {
+            "本次没有取得响应体"
+        }
     } else {
         &raw_response
     };
@@ -1048,7 +1313,9 @@ fn sample_html(
 // 任务式（智能体）行的「原始请求」：证据里的任务书文本。
 impl Task<'_> {
     fn request_text(&self) -> String {
-        let Some(item) = &self.item else { return String::new() };
+        let Some(item) = &self.item else {
+            return String::new();
+        };
         let payload = item.get("payload").unwrap_or(item);
         let nested = payload.get("payload").unwrap_or(payload);
         let request = nested.get("request").or_else(|| payload.get("request"));
@@ -1255,7 +1522,10 @@ mod tests {
         let html = render_rich_html(&fixture_run());
         assert!(html.contains("可以正常使用"), "含大结论");
         assert!(html.contains("这次检测的结论一览"), "含模块一览");
-        assert!(html.contains("检测方式") && html.contains("判定方式"), "含明细口径");
+        assert!(
+            html.contains("检测方式") && html.contains("判定方式"),
+            "含明细口径"
+        );
     }
 
     #[test]
@@ -1273,12 +1543,16 @@ mod tests {
     fn rich_report_is_self_contained() {
         let html = render_rich_html(&fixture_run());
         assert!(!html.contains("<script"), "自包含且无脚本");
-        assert!(html.contains("约 64K token 的真实长度输入"), "内部编号翻译成人话");
+        assert!(
+            html.contains("约 64K token 的真实长度输入"),
+            "内部编号翻译成人话"
+        );
     }
 
     #[test]
     fn renders_preview_from_real_run_json() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentcheck-report/run.json");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("agentcheck-report/run.json");
         let Ok(content) = std::fs::read_to_string(&path) else {
             return; // 本地没有样本 run.json 时跳过
         };

@@ -3,10 +3,7 @@ use llm_capability_doctor::cli::{
     CliRunRequest, JsonlProgressSink, LiveExecutor, OutputFormat, ReportMode, generated_run_id,
     generated_timestamp, render_report, run_with_executor_reporting, write_report,
 };
-use llm_capability_doctor::evaluation::{
-    AnalyzerConfig, analyze_modules, attach_report_items, build_module_reports,
-    write_bundled_module_inputs,
-};
+use llm_capability_doctor::evaluation::{build_module_reports, write_bundled_module_inputs};
 use llm_capability_doctor::gui::{
     NativeGuiLauncher, NativeGuiRequest, SystemNativeGuiLauncher, current_platform,
 };
@@ -183,6 +180,15 @@ fn main() {
     } else {
         eprintln!("· 启动方式  CLI（当前环境不自动启动原生 GUI）");
     }
+    let report_dir = cli.report_dir.clone().unwrap_or_else(|| {
+        cli.html
+            .as_deref()
+            .map(std::path::Path::new)
+            .and_then(std::path::Path::parent)
+            .filter(|path| !path.as_os_str().is_empty())
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "agentcheck-report".into())
+    });
     let request = CliRunRequest {
         endpoint: endpoint.clone(),
         model: model.clone(),
@@ -192,6 +198,12 @@ fn main() {
         run_id: generated_run_id(),
         started_at: generated_timestamp(),
         concurrency_preflight: true,
+        // dynamic 模式：模块检测完立即在运行期内做 OhMyPi 语义分析，
+        // 产物落在 report_dir/module-input 与 module-report 下。
+        analysis_dir: match cli.mode {
+            ReportMode::Dynamic => Some(report_dir.clone().into()),
+            ReportMode::Custom => None,
+        },
     };
     let mut executor = match LiveExecutor::new_full(
         request.endpoint.clone(),
@@ -240,15 +252,6 @@ fn main() {
     };
 
     {
-        let report_dir = cli.report_dir.clone().unwrap_or_else(|| {
-            cli.html
-                .as_deref()
-                .map(std::path::Path::new)
-                .and_then(std::path::Path::parent)
-                .filter(|path| !path.as_os_str().is_empty())
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "agentcheck-report".into())
-        });
         let root = std::path::Path::new(&report_dir);
         std::fs::create_dir_all(root).unwrap_or_else(|error| {
             eprintln!("创建报告目录失败：{report_dir}：{error}");
@@ -273,29 +276,23 @@ fn main() {
         let module_report_paths = match cli.mode {
             ReportMode::Custom => {
                 eprintln!("[报告] 模式：custom（模板填充检测结论，不调用 AI/OhMyPi）");
-                build_module_reports(&report, &input_paths, &analysis_dir)
-            }
-            ReportMode::Dynamic => {
-                eprintln!("[报告] 模式：dynamic（OhMyPi+模型语义分析）");
-                analyze_modules(
-                    &input_paths,
-                    &analysis_dir,
-                    &AnalyzerConfig {
-                        endpoint: endpoint.clone(),
-                        model: model.clone(),
-                        api_key: api_key.clone(),
-                    },
-                )
-                .and_then(|paths| {
-                    attach_report_items(&input_paths, &paths)?;
-                    Ok(paths)
+                build_module_reports(&report, &input_paths, &analysis_dir).unwrap_or_else(|error| {
+                    eprintln!("生成模块报告失败：{error}");
+                    std::process::exit(1);
                 })
             }
-        }
-        .unwrap_or_else(|error| {
-            eprintln!("生成模块报告失败：{error}");
-            std::process::exit(1);
-        });
+            // dynamic 模式的语义分析已在运行期内逐模块完成（检测与分析分阶段），
+            // 这里只汇总已落盘的模块报告路径。
+            ReportMode::Dynamic => {
+                eprintln!("[报告] 模式：dynamic（运行期内已完成 OhMyPi 语义分析）");
+                report
+                    .selected_modules
+                    .iter()
+                    .map(|module| analysis_dir.join(format!("{module}.report.json")))
+                    .filter(|path| path.exists())
+                    .collect()
+            }
+        };
         // 富 HTML 报告：与 GUI 导出同源同构（report_rich 模块），读同一份 run.json。
         // module_report_paths 仍会生成（分析产物落盘），只是不再用于 HTML 模板。
         let _ = &module_report_paths;

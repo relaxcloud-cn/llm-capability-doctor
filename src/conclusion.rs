@@ -132,9 +132,10 @@ pub fn build_run_customer_report(
             module_id: result.module_id.clone(),
             title: format!("{}未通过", module_display_name(&result.module_id)),
             impact: FindingImpact::Limitation,
-            summary: result.reason.clone().unwrap_or_else(|| {
-                "该模块存在未通过的检测项，详见模块明细".to_string()
-            }),
+            summary: result
+                .reason
+                .clone()
+                .unwrap_or_else(|| "该模块存在未通过的检测项，详见模块明细".to_string()),
             scope: "本次实测覆盖的项目".into(),
             evidence_refs: result.evidence_refs.clone(),
         })
@@ -205,6 +206,7 @@ fn build_scope(record: &DetectionRecord) -> Vec<ScopeItem> {
                     state,
                     ModuleResultState::Pass
                         | ModuleResultState::Fail
+                        | ModuleResultState::Limited
                         | ModuleResultState::NotApplicable
                 ),
                 description: result
@@ -273,6 +275,9 @@ fn choose_conclusion(
     } else if findings
         .iter()
         .any(|finding| finding.impact == FindingImpact::Limitation)
+        || scope
+            .iter()
+            .any(|item| matches!(item.state, ModuleResultState::Limited))
     {
         CustomerConclusionKind::LimitedUse
     } else {
@@ -467,6 +472,7 @@ mod tests {
                 module_id: "capability".into(),
                 state: ModuleResultState::Pass,
                 reason: Some("fixed capability checks passed".into()),
+                item_stats: None,
                 attempt_refs: vec!["attempt-capability".into()],
                 evidence_refs: vec![evidence.id],
                 incident_refs: Vec::new(),
@@ -544,32 +550,30 @@ mod tests {
         // 回归护栏：choose_conclusion 原本无视模块 Fail，失败模块会被当成"正常使用"。
         let mut record = record(vec!["capability", "agent"]);
         start_run(&mut record, "2026-09-11T00:01:00Z").unwrap();
-        let mut finish = |record: &mut DetectionRecord,
-                          module: &str,
-                          state,
-                          reason: &str,
-                          evidence_id: &str| {
-            let evidence = add_evidence(
-                record,
-                evidence_id,
-                "module_result",
-                "2026-09-11T00:01:01Z",
-                serde_json::json!({"status": "recorded"}),
-            );
-            set_module_result(
-                record,
-                ModuleResult {
-                    module_id: module.into(),
-                    state,
-                    reason: Some(reason.into()),
-                    attempt_refs: Vec::new(),
-                    evidence_refs: vec![evidence.id],
-                    incident_refs: Vec::new(),
-                },
-                "2026-09-11T00:01:02Z",
-            )
-            .unwrap();
-        };
+        let finish =
+            |record: &mut DetectionRecord, module: &str, state, reason: &str, evidence_id: &str| {
+                let evidence = add_evidence(
+                    record,
+                    evidence_id,
+                    "module_result",
+                    "2026-09-11T00:01:01Z",
+                    serde_json::json!({"status": "recorded"}),
+                );
+                set_module_result(
+                    record,
+                    ModuleResult {
+                        module_id: module.into(),
+                        state,
+                        reason: Some(reason.into()),
+                        item_stats: None,
+                        attempt_refs: Vec::new(),
+                        evidence_refs: vec![evidence.id],
+                        incident_refs: Vec::new(),
+                    },
+                    "2026-09-11T00:01:02Z",
+                )
+                .unwrap();
+            };
         finish(
             &mut record,
             "capability",
@@ -577,7 +581,13 @@ mod tests {
             "5 个有效样本答案未通过预先定义的判定规则",
             "ev-capability",
         );
-        finish(&mut record, "agent", ModuleResultState::Pass, "10 个场景全部通过", "ev-agent");
+        finish(
+            &mut record,
+            "agent",
+            ModuleResultState::Pass,
+            "10 个场景全部通过",
+            "ev-agent",
+        );
         let report = build_run_customer_report(&record).unwrap();
         assert_eq!(report.kind, CustomerConclusionKind::LimitedUse);
         assert_eq!(report.text, "这套模型服务可以使用，但存在限制");
