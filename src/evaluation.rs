@@ -521,7 +521,31 @@ pub(crate) fn analyze_module(
         }
         reports
     });
-    Ok(merge_chunk_reports(module, reports))
+    let mut merged = merge_chunk_reports(module, reports);
+    reconcile_verdict(&mut merged);
+    Ok(merged)
+}
+
+/// 逐项裁决与模块级结论对齐：弱模型偶发自相矛盾（实测出现逐项判 fail、
+/// 总体却写 pass）。有明确 fail 的单元时，模块结论不得是 pass 或
+/// inconclusive；所有单元都判 pass 时，inconclusive 升级为 pass。
+fn reconcile_verdict(report: &mut ModuleReport) {
+    if report.item_verdicts.is_empty() {
+        return;
+    }
+    let has_fail = report
+        .item_verdicts
+        .iter()
+        .any(|item| item.verdict == "fail");
+    let all_pass = report
+        .item_verdicts
+        .iter()
+        .all(|item| item.verdict == "pass");
+    if has_fail && matches!(report.verdict.as_str(), "pass" | "inconclusive") {
+        report.verdict = "fail".into();
+    } else if all_pass && report.verdict == "inconclusive" {
+        report.verdict = "pass".into();
+    }
 }
 
 /// 模块输入中可判定的最小单元数：与分批口径一致——内含逐条 sample_id 的
@@ -1822,8 +1846,7 @@ fn json_container_end(text: &str, start: usize) -> Option<usize> {
 
 /// 在 text 的 from 位置解析一个 JSON 字符串值，返回内容与消耗的字节数。
 fn string_value_at(text: &str, from: usize) -> Option<(String, usize)> {
-    let mut stream =
-        serde_json::Deserializer::from_str(&text[from..]).into_iter::<Value>();
+    let mut stream = serde_json::Deserializer::from_str(&text[from..]).into_iter::<Value>();
     match stream.next() {
         Some(Ok(Value::String(value))) => Some((value, from + stream.byte_offset())),
         _ => None,
@@ -1834,7 +1857,10 @@ fn string_value_at(text: &str, from: usize) -> Option<(String, usize)> {
 fn keyed_string(text: &str, key: &str) -> Option<(String, usize)> {
     let key_pos = text.find(&format!("\"{key}\""))?;
     let colon = text[key_pos + key.len() + 2..].find(':')? + key_pos + key.len() + 2;
-    string_value_at(text, colon + 1 + text[colon + 1..].len() - text[colon + 1..].trim_start().len())
+    string_value_at(
+        text,
+        colon + 1 + text[colon + 1..].len() - text[colon + 1..].trim_start().len(),
+    )
 }
 
 /// 从语法损坏的 item_verdicts 条目里抢救 item_id / verdict；
@@ -1852,9 +1878,7 @@ fn salvage_item_verdict(text: &str) -> Option<String> {
         None
     }
     .unwrap_or_default();
-    Some(
-        json!({"item_id": item_id, "verdict": verdict, "note": note}).to_string(),
-    )
+    Some(json!({"item_id": item_id, "verdict": verdict, "note": note}).to_string())
 }
 
 /// 定点修复 item_verdicts 数组：逐条提取顶层对象，能解析的保留，
@@ -3006,8 +3030,7 @@ mod tests {
             r#"{"schema_version":"module-eval-input/v1","evaluation_version":"evaluation-pipeline/v1","module":"ingress","verdict":"fail","confidence":"high","summary":"模型身份不匹配","findings":[{"finding_id":"F01","item_id":"S04","verdict":"pass","rationale":"HTTP 200"}],"evidence_refs":["cli-ingress-0"],"limitations":[],"item_verdicts":[{"item_id":"S04","verdict":"pass","note":"HTTP 200 鉴权通过"},{"item_id":"C03","verdict":"pass","无重试触发，error=null，status=200。"},{"item_id":"BC07","verdict":"fail","模型身份不匹配。"}],"analyzer":"agentcheck-evaluator"}"#
         );
         let text = format!("{echo}\n{answer}\n");
-        let report =
-            parse_module_report(&text, "ingress").expect("修复后应解析出完整报告");
+        let report = parse_module_report(&text, "ingress").expect("修复后应解析出完整报告");
         assert_eq!(report.verdict, "fail");
         assert_eq!(report.summary, "模型身份不匹配");
         assert_eq!(report.item_verdicts.len(), 3);
@@ -3017,6 +3040,49 @@ mod tests {
             "无重试触发，error=null，status=200。"
         );
         assert_eq!(report.analyzer.name, "agentcheck-evaluator");
+    }
+
+    #[test]
+    fn reconcile_verdict_overrides_self_contradicting_module_verdict() {
+        // 实测案例：逐项裁决 fail、summary 写明须判不通过，顶层 verdict 却写 pass。
+        let mut report = ModuleReport {
+            schema_version: "module-eval-report/v1".into(),
+            evaluation_version: EVALUATION_VERSION.into(),
+            module: "ingress".into(),
+            verdict: "pass".into(),
+            confidence: "high".into(),
+            summary: "模型身份不符".into(),
+            findings: vec![],
+            evidence_refs: vec![],
+            limitations: vec![],
+            items: vec![],
+            item_verdicts: vec![ItemVerdict {
+                item_id: "cli-ingress-0".into(),
+                verdict: "fail".into(),
+                note: "模型身份不符".into(),
+            }],
+            analyzer: AnalyzerInfo::default(),
+        };
+        reconcile_verdict(&mut report);
+        assert_eq!(report.verdict, "fail");
+
+        // inconclusive + 有 fail → fail；全 pass + inconclusive → pass
+        report.verdict = "inconclusive".into();
+        reconcile_verdict(&mut report);
+        assert_eq!(report.verdict, "fail");
+        report.item_verdicts[0].verdict = "pass".into();
+        report.verdict = "inconclusive".into();
+        reconcile_verdict(&mut report);
+        assert_eq!(report.verdict, "pass");
+        // limited 是分析器的有判断结论，不被逐项裁决改写
+        report.verdict = "limited".into();
+        reconcile_verdict(&mut report);
+        assert_eq!(report.verdict, "limited");
+        // 没有逐项裁决时不动模块结论
+        report.item_verdicts.clear();
+        report.verdict = "pass".into();
+        reconcile_verdict(&mut report);
+        assert_eq!(report.verdict, "pass");
     }
 
     #[test]
