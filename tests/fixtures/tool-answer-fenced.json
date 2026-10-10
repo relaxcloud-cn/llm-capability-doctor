@@ -1,0 +1,129 @@
+{
+  "id": "http-f944034caa1244518b999e03c7f39637",
+  "endpoint": "https://ai.gov110.cn/llm_v2/v1/chat/completions",
+  "protocol": "chat-completions",
+  "request": {
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "content": "请使用适合的工具查询这些记录的负责人和版本，并把查询到的原始记录以 {\"records\":[...]} JSON 输出，不新增其他字段：R-01、R-07、R-12。",
+        "role": "user"
+      },
+      {
+        "content": "",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{\"query\": {\"ids\": [\"R-01\", \"R-07\", \"R-12\"], \"kind\": \"records\"}}",
+              "name": "get_records"
+            },
+            "id": "chatcmpl-tool-9e2c8665e234b0ab",
+            "type": "function"
+          }
+        ]
+      },
+      {
+        "content": "{\"records\":[{\"id\":\"R-01\",\"owner\":\"沈安\",\"version\":2},{\"id\":\"R-07\",\"owner\":\"陈晨\",\"version\":2},{\"id\":\"R-12\",\"owner\":\"李川\",\"version\":2}]}",
+        "role": "tool",
+        "tool_call_id": "chatcmpl-tool-9e2c8665e234b0ab"
+      }
+    ],
+    "model": "cybersec-1.0",
+    "stream": false,
+    "tools": [
+      {
+        "function": {
+          "description": "根据记录 ID 查询负责人和版本，返回 records 数组",
+          "name": "get_records",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "query": {
+                "additionalProperties": false,
+                "properties": {
+                  "ids": {
+                    "items": {
+                      "enum": [
+                        "R-01",
+                        "R-02",
+                        "R-03",
+                        "R-04",
+                        "R-05",
+                        "R-06",
+                        "R-07",
+                        "R-08",
+                        "R-09",
+                        "R-10",
+                        "R-11",
+                        "R-12"
+                      ],
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "kind": {
+                    "enum": [
+                      "records"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "ids",
+                  "kind"
+                ],
+                "type": "object"
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "type": "object"
+          },
+          "strict": true
+        },
+        "type": "function"
+      },
+      {
+        "function": {
+          "description": "查询服务当前时间，不能查询记录",
+          "name": "get_service_time",
+          "parameters": {
+            "additionalProperties": false,
+            "properties": {
+              "timezone": {
+                "enum": [
+                  "UTC"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "timezone"
+            ],
+            "type": "object"
+          },
+          "strict": true
+        },
+        "type": "function"
+      }
+    ]
+  },
+  "stream": false,
+  "elapsed_ms": 365,
+  "attempts": [
+    {
+      "number": 1,
+      "elapsed_ms": 365,
+      "http_status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "date": "Sat, 10 Oct 2026 01:26:45 GMT"
+      },
+      "response_body": "{\"id\":\"chatcmpl-8b818dcaaf6272e7\",\"object\":\"chat.completion\",\"created\":1791595605,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"```json\\n{\\\"records\\\":[{\\\"id\\\":\\\"R-01\\\",\\\"owner\\\":\\\"沈安\\\",\\\"version\\\":2},{\\\"id\\\":\\\"R-07\\\",\\\"owner\\\":\\\"陈晨\\\",\\\"version\\\":2},{\\\"id\\\":\\\"R-12\\\",\\\"owner\\\":\\\"李川\\\",\\\"version\\\":2}]}\\n```\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"reasoning\":null},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":null,\"token_ids\":null,\"routed_experts\":null}],\"service_tier\":null,\"system_fingerprint\":\"vllm-0.26.0-tp2-8ee9be83\",\"usage\":{\"prompt_tokens\":646,\"total_tokens\":702,\"completion_tokens\":56,\"prompt_tokens_details\":{\"cached_tokens\":256,\"created_cache_tokens\":256,\"multimodal_tokens\":null}},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"prompt_text\":null,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"metrics\":null}",
+      "error": null
+    }
+  ],
+  "parse_error": null
+}

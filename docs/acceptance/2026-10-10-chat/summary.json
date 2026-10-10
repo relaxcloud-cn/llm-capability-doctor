@@ -1,0 +1,59 @@
+{
+  "requested_model": "cybersec-1.0",
+  "protocol": "chat-completions",
+  "omp_version": "18.1.13",
+  "scope": "standalone task acceptance; full pipeline, baseline and platform release not yet accepted",
+  "tasks": [
+    {
+      "task": "continuous-1",
+      "record_count": 12,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": false,
+      "elapsed_ms": 8924
+    },
+    {
+      "task": "continuous-2",
+      "record_count": 12,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": false,
+      "elapsed_ms": 8425
+    },
+    {
+      "task": "recovery-1",
+      "record_count": 12,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": true,
+      "elapsed_ms": 9861
+    },
+    {
+      "task": "recovery-2",
+      "record_count": 12,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": true,
+      "elapsed_ms": 9215
+    },
+    {
+      "task": "multiturn-1",
+      "record_count": 13,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": false,
+      "elapsed_ms": 15210
+    },
+    {
+      "task": "multiturn-2",
+      "record_count": 13,
+      "independent_file_comparison": true,
+      "normal_end": true,
+      "fault_delivered": false,
+      "elapsed_ms": 13412
+    }
+  ],
+  "tool_presentation_regression": "fenced JSON fixed; real response replay passes",
+  "native_schema_observation": "malformed JSON received; retained as failure fixture",
+  "causal_recovery_recheck": "passed with strengthened observer; private working evidence retained in .cache"
+}

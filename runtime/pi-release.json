@@ -1,0 +1,16 @@
+{
+  "version": "18.1.13",
+  "repository": "can1357/oh-my-pi",
+  "licenseSha256": "16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63",
+  "noticesSha256": "104142244b8781b7828e64aa79a61b03fdf16e8a3464278647c3d84ad22cbce0",
+  "assets": {
+    "aarch64-apple-darwin": { "name": "omp-darwin-arm64", "sha256": "a4c5c9cc5b8222184d0d7429b0bb6ac2a92bbe45dd11bf68e4b1360050791909" },
+    "x86_64-apple-darwin": { "name": "omp-darwin-x64", "sha256": "224ee40faaff907359504749942d0df47860b96ba8098ca5127384554707f48a" },
+    "aarch64-unknown-linux-gnu": { "name": "omp-linux-arm64", "sha256": "06fc72183ca0c5b3add7d1dcc1a3005e17b9b67b679f04b5c646b08bfe763cb6" },
+    "x86_64-unknown-linux-gnu": { "name": "omp-linux-x64", "sha256": "3be5a308cc91e6f6bba148175fbe651d3583ff6d32ae221cb931dc08a64e1f39" },
+    "aarch64-unknown-linux-musl": { "name": "omp-linux-musl-arm64", "sha256": "4871442fc6f5a8fcb39da394c07a02a52af5176d511ce56c99ec717a87ecee85" },
+    "x86_64-unknown-linux-musl": { "name": "omp-linux-musl-x64", "sha256": "fd3b00efa2f219787ce3b2f65a8bd8a34edf298f6e2be745cd8ce9afe4ebd2b9" },
+    "aarch64-pc-windows-msvc": { "name": "omp-windows-arm64.exe", "sha256": "2671ea8a34f8e270eb4ee0dc5a5b159dbe304236476781c1af14e58b470d5a0f" },
+    "x86_64-pc-windows-msvc": { "name": "omp-windows-x64.exe", "sha256": "5d75a584acd1d8775d2ea6a14c3ea0dbdf8eb71a54bdab6ae7f38ab971aef877" }
+  }
+}

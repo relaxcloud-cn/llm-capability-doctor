@@ -1,0 +1,9 @@
+/target/
+/dist/
+/.cache/
+/desktop/node_modules/
+/desktop/out/
+*.part
+.env
+.env.*
+*.secret.json

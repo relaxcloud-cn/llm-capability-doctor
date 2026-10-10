@@ -1,0 +1,253 @@
+{
+  "id": "recovery-2",
+  "kind": "recovery",
+  "repetition": 2,
+  "status": "passed",
+  "title": "工具出错后恢复，任务结果正确",
+  "elapsed_ms": 9215,
+  "normal_end": true,
+  "fault_delivered": true,
+  "recovery_observed": true,
+  "tool_events": [
+    {
+      "call_id": "chatcmpl-tool-916088d0f99ec2c5",
+      "name": "glob",
+      "arguments": {
+        "path": "inputs/*.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "# inputs/\nsource-2.json\nsource-3.json\nsource-1.json",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "cwd": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/chat/task-06f8d475d5a44d62b8dc7bfd1d1cb7ca/workspace",
+          "fileCount": 3,
+          "files": [
+            "inputs/source-2.json",
+            "inputs/source-3.json",
+            "inputs/source-1.json"
+          ],
+          "scopePath": "inputs",
+          "truncated": false
+        }
+      },
+      "is_error": false
+    },
+    {
+      "call_id": "chatcmpl-tool-b19bbee1b26c367a",
+      "name": "read",
+      "arguments": {
+        "path": "inputs/source-1.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "AGENTCHECK_RECOVERABLE_READ_614c266d10e140d8a1edcfb123101e71: temporary file read failure. Retry the same read; the file is available on the next attempt.",
+            "type": "text"
+          }
+        ],
+        "details": {}
+      },
+      "is_error": true
+    },
+    {
+      "call_id": "chatcmpl-tool-9946a16e32426d72",
+      "name": "read",
+      "arguments": {
+        "path": "inputs/source-2.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "[inputs/source-2.json#28A8]\n1:{\n2:  \"records\": [\n3:    {\n4:      \"id\": \"R-05\",\n5:      \"owner\": \"陆雨\",\n6:      \"version\": 4\n7:    },\n8:    {\n9:      \"id\": \"R-06\",\n10:      \"owner\": \"许舟\",\n11:      \"version\": 4\n12:    },\n13:    {\n14:      \"id\": \"R-07\",\n15:      \"owner\": \"陈晨\",\n16:      \"version\": 2\n17:    },\n18:    {\n19:      \"id\": \"R-08\",\n20:      \"owner\": \"李川\",\n21:      \"version\": 1\n22:    }\n23:  ]\n24:}",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "displayContent": {
+            "lineNumbers": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ],
+            "startLine": 1,
+            "text": "{\n  \"records\": [\n    {\n      \"id\": \"R-05\",\n      \"owner\": \"陆雨\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-06\",\n      \"owner\": \"许舟\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-07\",\n      \"owner\": \"陈晨\",\n      \"version\": 2\n    },\n    {\n      \"id\": \"R-08\",\n      \"owner\": \"李川\",\n      \"version\": 1\n    }\n  ]\n}"
+          },
+          "fileSize": 329,
+          "meta": {
+            "source": {
+              "type": "path",
+              "value": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/chat/task-06f8d475d5a44d62b8dc7bfd1d1cb7ca/workspace/inputs/source-2.json"
+            }
+          },
+          "totalLines": 24
+        }
+      },
+      "is_error": false
+    },
+    {
+      "call_id": "chatcmpl-tool-89eeee7cb3414c0e",
+      "name": "read",
+      "arguments": {
+        "path": "inputs/source-3.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "[inputs/source-3.json#AF4E]\n1:{\n2:  \"records\": [\n3:    {\n4:      \"id\": \"R-09\",\n5:      \"owner\": \"沈安\",\n6:      \"version\": 1\n7:    },\n8:    {\n9:      \"id\": \"R-10\",\n10:      \"owner\": \"陈晨\",\n11:      \"version\": 1\n12:    },\n13:    {\n14:      \"id\": \"R-11\",\n15:      \"owner\": \"陈晨\",\n16:      \"version\": 4\n17:    },\n18:    {\n19:      \"id\": \"R-12\",\n20:      \"owner\": \"李川\",\n21:      \"version\": 2\n22:    }\n23:  ]\n24:}",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "displayContent": {
+            "lineNumbers": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ],
+            "startLine": 1,
+            "text": "{\n  \"records\": [\n    {\n      \"id\": \"R-09\",\n      \"owner\": \"沈安\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-10\",\n      \"owner\": \"陈晨\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-11\",\n      \"owner\": \"陈晨\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-12\",\n      \"owner\": \"李川\",\n      \"version\": 2\n    }\n  ]\n}"
+          },
+          "fileSize": 329,
+          "meta": {
+            "source": {
+              "type": "path",
+              "value": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/chat/task-06f8d475d5a44d62b8dc7bfd1d1cb7ca/workspace/inputs/source-3.json"
+            }
+          },
+          "totalLines": 24
+        }
+      },
+      "is_error": false
+    },
+    {
+      "call_id": "chatcmpl-tool-be6f3316e3e04642",
+      "name": "read",
+      "arguments": {
+        "path": "inputs/source-1.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "[inputs/source-1.json#881F]\n1:{\n2:  \"records\": [\n3:    {\n4:      \"id\": \"R-01\",\n5:      \"owner\": \"沈安\",\n6:      \"version\": 2\n7:    },\n8:    {\n9:      \"id\": \"R-02\",\n10:      \"owner\": \"许舟\",\n11:      \"version\": 1\n12:    },\n13:    {\n14:      \"id\": \"R-03\",\n15:      \"owner\": \"张禾\",\n16:      \"version\": 3\n17:    },\n18:    {\n19:      \"id\": \"R-04\",\n20:      \"owner\": \"李川\",\n21:      \"version\": 3\n22:    }\n23:  ]\n24:}",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "displayContent": {
+            "lineNumbers": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24
+            ],
+            "startLine": 1,
+            "text": "{\n  \"records\": [\n    {\n      \"id\": \"R-01\",\n      \"owner\": \"沈安\",\n      \"version\": 2\n    },\n    {\n      \"id\": \"R-02\",\n      \"owner\": \"许舟\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-03\",\n      \"owner\": \"张禾\",\n      \"version\": 3\n    },\n    {\n      \"id\": \"R-04\",\n      \"owner\": \"李川\",\n      \"version\": 3\n    }\n  ]\n}"
+          },
+          "fileSize": 329,
+          "meta": {
+            "source": {
+              "type": "path",
+              "value": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/chat/task-06f8d475d5a44d62b8dc7bfd1d1cb7ca/workspace/inputs/source-1.json"
+            }
+          },
+          "totalLines": 24
+        }
+      },
+      "is_error": false
+    },
+    {
+      "call_id": "chatcmpl-tool-96435b8e3b3d861d",
+      "name": "write",
+      "arguments": {
+        "content": "{\n  \"records\": [\n    {\n      \"id\": \"R-01\",\n      \"owner\": \"沈安\",\n      \"version\": 2\n    },\n    {\n      \"id\": \"R-02\",\n      \"owner\": \"许舟\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-03\",\n      \"owner\": \"张禾\",\n      \"version\": 3\n    },\n    {\n      \"id\": \"R-04\",\n      \"owner\": \"李川\",\n      \"version\": 3\n    },\n    {\n      \"id\": \"R-05\",\n      \"owner\": \"陆雨\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-06\",\n      \"owner\": \"许舟\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-07\",\n      \"owner\": \"陈晨\",\n      \"version\": 2\n    },\n    {\n      \"id\": \"R-08\",\n      \"owner\": \"李川\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-09\",\n      \"owner\": \"沈安\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-10\",\n      \"owner\": \"陈晨\",\n      \"version\": 1\n    },\n    {\n      \"id\": \"R-11\",\n      \"owner\": \"陈晨\",\n      \"version\": 4\n    },\n    {\n      \"id\": \"R-12\",\n      \"owner\": \"李川\",\n      \"version\": 2\n    }\n  ]\n}\n",
+        "path": "result.json"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "[result.json#E013]\nSuccessfully wrote 898 bytes to result.json",
+            "type": "text"
+          }
+        ],
+        "details": {
+          "resolvedPath": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/chat/task-06f8d475d5a44d62b8dc7bfd1d1cb7ca/workspace/result.json"
+        }
+      },
+      "is_error": false
+    }
+  ],
+  "evidence_ids": [
+    "http-31187026826348c2a8ee32603a3d6233",
+    "http-4d7bac5d9eea4124a786fedc7a9f1bfb",
+    "http-7c3f9191f67c463b939bf32ea17ab529",
+    "http-59bcb635d38b4453885c09d9d464345f",
+    "http-6f40d6274e544bc0a5b82b32abf0fe18"
+  ],
+  "findings": []
+}

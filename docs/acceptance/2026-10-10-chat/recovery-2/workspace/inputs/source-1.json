@@ -1,0 +1,24 @@
+{
+  "records": [
+    {
+      "id": "R-01",
+      "owner": "沈安",
+      "version": 2
+    },
+    {
+      "id": "R-02",
+      "owner": "许舟",
+      "version": 1
+    },
+    {
+      "id": "R-03",
+      "owner": "张禾",
+      "version": 3
+    },
+    {
+      "id": "R-04",
+      "owner": "李川",
+      "version": 3
+    }
+  ]
+}

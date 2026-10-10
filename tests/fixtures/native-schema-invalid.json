@@ -1,0 +1,93 @@
+{
+  "id": "http-819585d3656145118eb449628612fc1d",
+  "endpoint": "https://ai.gov110.cn/llm_v2/v1/chat/completions",
+  "protocol": "chat-completions",
+  "request": {
+    "max_tokens": 4096,
+    "messages": [
+      {
+        "content": "请按接口指定的原生 JSON 格式约束返回这份记录，保持每个 ID 对应的负责人和版本，不新增字段：{\"records\":[{\"id\":\"R-01\",\"owner\":\"沈安\",\"version\":2},{\"id\":\"R-02\",\"owner\":\"许舟\",\"version\":1},{\"id\":\"R-03\",\"owner\":\"张禾\",\"version\":3},{\"id\":\"R-04\",\"owner\":\"李川\",\"version\":3},{\"id\":\"R-05\",\"owner\":\"陆雨\",\"version\":4},{\"id\":\"R-06\",\"owner\":\"许舟\",\"version\":4},{\"id\":\"R-07\",\"owner\":\"陈晨\",\"version\":2},{\"id\":\"R-08\",\"owner\":\"李川\",\"version\":1},{\"id\":\"R-09\",\"owner\":\"沈安\",\"version\":1},{\"id\":\"R-10\",\"owner\":\"陈晨\",\"version\":1},{\"id\":\"R-11\",\"owner\":\"陈晨\",\"version\":4},{\"id\":\"R-12\",\"owner\":\"李川\",\"version\":2}]}",
+        "role": "user"
+      }
+    ],
+    "model": "cybersec-1.0",
+    "response_format": {
+      "json_schema": {
+        "name": "records",
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "records": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "id": {
+                    "enum": [
+                      "R-01",
+                      "R-02",
+                      "R-03",
+                      "R-04",
+                      "R-05",
+                      "R-06",
+                      "R-07",
+                      "R-08",
+                      "R-09",
+                      "R-10",
+                      "R-11",
+                      "R-12"
+                    ],
+                    "type": "string"
+                  },
+                  "owner": {
+                    "enum": [
+                      "张禾",
+                      "李川",
+                      "沈安",
+                      "许舟",
+                      "陆雨",
+                      "陈晨"
+                    ],
+                    "type": "string"
+                  },
+                  "version": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "owner",
+                  "version"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "records"
+          ],
+          "type": "object"
+        },
+        "strict": true
+      },
+      "type": "json_schema"
+    },
+    "stream": false
+  },
+  "stream": false,
+  "elapsed_ms": 629,
+  "attempts": [
+    {
+      "number": 1,
+      "elapsed_ms": 629,
+      "http_status": 200,
+      "headers": {
+        "content-type": "application/json",
+        "date": "Sat, 10 Oct 2026 01:26:46 GMT"
+      },
+      "response_body": "{\"id\":\"chatcmpl-8cf236c3caef178b\",\"object\":\"chat.completion\",\"created\":1791595605,\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"records\\\":[{\\\"id{\\\"records\\\":[{\\\"id\\\":\\\"R-01\\\",\\\"owner\\\":\\\"沈安\\\",\\\"version\\\":2},{\\\"id\\\":\\\"R-02\\\",\\\"owner\\\":\\\"许舟\\\",\\\"version\\\":1},{\\\"id\\\":\\\"R-03\\\",\\\"owner\\\":\\\"张禾\\\",\\\"version\\\":3},{\\\"id\\\":\\\"R-04\\\",\\\"owner\\\":\\\"李川\\\",\\\"version\\\":3},{\\\"id\\\":\\\"R-05\\\",\\\"owner\\\":\\\"陆雨\\\",\\\"version\\\":4},{\\\"id\\\":\\\"R-06\\\",\\\"owner\\\":\\\"许舟\\\",\\\"version\\\":4},{\\\"id\\\":\\\"R-07\\\",\\\"owner\\\":\\\"陈晨\\\",\\\"version\\\":2},{\\\"id\\\":\\\"R-08\\\",\\\"owner\\\":\\\"李川\\\",\\\"version\\\":1},{\\\"id\\\":\\\"R-09\\\",\\\"owner\\\":\\\"沈安\\\",\\\"version\\\":1},{\\\"id\\\":\\\"R-10\\\",\\\"owner\\\":\\\"陈晨\\\",\\\"version\\\":1},{\\\"id\\\":\\\"R-11\\\",\\\"owner\\\":\\\"陈晨\\\",\\\"version\\\":4},{\\\"id\\\":\\\"R-12\\\",\\\"owner\\\":\\\"李川\\\",\\\"version\\\":2}]}\",\"refusal\":null,\"annotations\":null,\"audio\":null,\"function_call\":null,\"reasoning\":\"我们只需要返回相同的JSON，不新增字段。按原样输出。\"},\"logprobs\":null,\"finish_reason\":\"stop\",\"stop_reason\":null,\"token_ids\":null,\"routed_experts\":null}],\"service_tier\":null,\"system_fingerprint\":\"vllm-0.26.0-tp2-8ee9be83\",\"usage\":{\"prompt_tokens\":215,\"total_tokens\":422,\"completion_tokens\":207,\"prompt_tokens_details\":{\"cached_tokens\":0,\"created_cache_tokens\":0,\"multimodal_tokens\":null}},\"prompt_logprobs\":null,\"prompt_token_ids\":null,\"prompt_text\":null,\"kv_transfer_params\":null,\"ec_transfer_params\":null,\"metrics\":null}",
+      "error": null
+    }
+  ],
+  "parse_error": null
+}

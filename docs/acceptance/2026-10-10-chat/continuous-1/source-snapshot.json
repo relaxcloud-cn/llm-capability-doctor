@@ -1,0 +1,78 @@
+{
+  "seed": "agentcheck/1",
+  "files": {
+    "source-1.json": {
+      "records": [
+        {
+          "id": "R-01",
+          "owner": "沈安",
+          "version": 2
+        },
+        {
+          "id": "R-02",
+          "owner": "许舟",
+          "version": 1
+        },
+        {
+          "id": "R-03",
+          "owner": "张禾",
+          "version": 3
+        },
+        {
+          "id": "R-04",
+          "owner": "李川",
+          "version": 3
+        }
+      ]
+    },
+    "source-2.json": {
+      "records": [
+        {
+          "id": "R-05",
+          "owner": "陆雨",
+          "version": 4
+        },
+        {
+          "id": "R-06",
+          "owner": "许舟",
+          "version": 4
+        },
+        {
+          "id": "R-07",
+          "owner": "陈晨",
+          "version": 2
+        },
+        {
+          "id": "R-08",
+          "owner": "李川",
+          "version": 1
+        }
+      ]
+    },
+    "source-3.json": {
+      "records": [
+        {
+          "id": "R-09",
+          "owner": "沈安",
+          "version": 1
+        },
+        {
+          "id": "R-10",
+          "owner": "陈晨",
+          "version": 1
+        },
+        {
+          "id": "R-11",
+          "owner": "陈晨",
+          "version": 4
+        },
+        {
+          "id": "R-12",
+          "owner": "李川",
+          "version": 2
+        }
+      ]
+    }
+  },
+  "sha256": "36d59e7996b0a8329d97e29538e881868b4bbba157bcbc71c5ee6e393ae08e66"
+}
