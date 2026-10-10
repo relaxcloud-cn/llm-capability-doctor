@@ -310,6 +310,9 @@ impl Drop for ProxyGuard {
 }
 
 pub fn development_runtime() -> Result<PathBuf> {
+    if let Some(path) = crate::runtime::component("omp")? {
+        return Ok(path);
+    }
     let target = env!("AGENTCHECK_TARGET");
     let binary = if cfg!(windows) { "omp.exe" } else { "omp" };
     let path = std::env::var_os("AGENTCHECK_OMP_PATH")

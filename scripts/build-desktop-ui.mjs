@@ -1,0 +1,9 @@
+import {readFile,writeFile} from 'node:fs/promises';
+const source=await readFile(new URL('../docs/gui-reference/agentcheck-gui-prototype.html',import.meta.url),'utf8');
+let html=source.slice(0,source.indexOf('<script>'))+'<script src="renderer.js"></script>\n</body>\n</html>\n';
+html=html.replace(/<header class="preview-bar">[\s\S]*?<\/header>/,'').replace(/<p class="review-note">[\s\S]*?<\/p>/,'').replace(/<div class="windowbar">[\s\S]*?<\/div>AgentCheck<\/div>/,'').replace(/<aside class="form-demo"[\s\S]*?<\/aside>/,'').replace(/<p class="dialog-note">[\s\S]*?<\/p>/,'');
+html=html.replace('<title>AgentCheck · GUI 原型</title>','<title>AgentCheck</title>');
+html=html.replace(/<a class="action-button primary" id="view-complete-report"[^>]*>([\s\S]*?)<\/a>/,'<button type="button" class="action-button primary" id="view-complete-report">$1</button>');
+html=html.replace('</style>',`.app{margin:0!important;max-width:none;border:0;border-radius:0;box-shadow:none}.layout{min-height:100vh}body{background:white}.failure-text{color:#b44657!important}.unknown-text{color:#8791a1!important}.report-link{background:none;border:0;cursor:pointer}.passed-overview{border-color:#cbe5d7;border-left-color:var(--green);background:#f8fcfa}.passed-overview h2{color:var(--green)}.passed-overview .completion-mark{background:var(--green-tint);color:var(--green)}.incomplete-overview{border-color:#dce3ed;border-left-color:#8791a1;background:#fafbfd}.incomplete-overview h2{color:#657184}.incomplete-overview .completion-mark{background:#edf1f6;color:#8791a1}</style>`);
+html=html.replace(/[ \t]+$/gm,'');
+await writeFile(new URL('../desktop/index.html',import.meta.url),html);

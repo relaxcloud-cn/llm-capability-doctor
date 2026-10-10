@@ -52,6 +52,10 @@ fn files(root: &Path, base: &Path, output: &mut Vec<std::path::PathBuf>) -> Resu
     Ok(())
 }
 pub fn archive(directory: &Path, run: &RunResult) -> Result<Vec<u8>> {
+    build_archive(directory, &mut run.clone(), false)
+}
+fn build_archive(directory: &Path, run: &mut RunResult, finalize: bool) -> Result<Vec<u8>> {
+    let started = std::time::Instant::now();
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
@@ -64,8 +68,6 @@ pub fn archive(directory: &Path, run: &RunResult) -> Result<Vec<u8>> {
         }
     }
     paths.sort();
-    zip.start_file("result.json", options)?;
-    zip.write_all(&serde_json::to_vec_pretty(run)?)?;
     for path in paths {
         let relative = path
             .strip_prefix(directory)?
@@ -97,6 +99,15 @@ pub fn archive(directory: &Path, run: &RunResult) -> Result<Vec<u8>> {
             }
         }
     }
+    if finalize {
+        run.elapsed_ms = run
+            .elapsed_ms
+            .saturating_add(started.elapsed().as_millis() as u64);
+        run.finished_at = Some(chrono::Utc::now());
+        run.report_path = Some(directory.join("report.html").to_string_lossy().into_owned());
+    }
+    zip.start_file("result.json", options)?;
+    zip.write_all(&serde_json::to_vec_pretty(run)?)?;
     zip.start_file("README.txt", options)?;
     zip.write_all("本包来自对应检测编号的实际记录。请求、原始响应、工具过程、来源快照和最终文件均按目录保留。密钥已脱敏；重放时从 MODEL_API_KEY 环境变量提供密钥。地址中脱敏的查询参数需要由技术人员按原配置补足。报告生成阶段没有调用任何模型。\n".as_bytes())?;
     Ok(zip.finish()?.into_inner())
@@ -340,6 +351,7 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
     document = document.replace("1 项需要处理", &format!("{attention} 项需关注"));
     document = document
         .replace("ZIP · 示例记录", "ZIP · 本次完整记录")
+        .replace("已下载示例记录", "已发起检测记录下载")
         .replace(
             "AgentCheck · 示例报告 · 不是真实检测结果",
             "AgentCheck · 本次实际检测报告",
@@ -394,8 +406,6 @@ byId('reference-badge').textContent='暂无实测记录';
 byId('source-copy').innerHTML='<dl class="record-kv"><div><dt>对照模型</dt><dd>gpt-6-astra</dd></div><div><dt>资料状态</dt><dd>尚未提供匹配的官方实测结果</dd></div></dl>';
 byId('source-rule').textContent='OpenAI 对照资料缺失不改变客户模型本次自身的验收结论。';
 byId('comparison-note').textContent='本页客户模型结论来自本次实际记录；官方对照列等待匹配的实测资料。';
-window.addEventListener('beforeprint',()=>{window.reportPreviousFilter=showFailedOnly;showFailedOnly=false;renderRows();});
-window.addEventListener('afterprint',()=>{showFailedOnly=Boolean(window.reportPreviousFilter);renderRows();});
 "#.to_owned();
     document = document.replace("</script>", &format!("{binding}</script>"));
     document=document.replace("</style>",".hero.passed{border-color:#cae4d8;border-left-color:var(--green)}.hero.passed h3{color:var(--green)}.hero.passed .verdict-symbol{background:#e5f4eb;color:var(--green)}.hero.incomplete{border-color:#dbe2ec;border-left-color:#8b99ae}.hero.incomplete h3{color:#61718a}.hero.incomplete .verdict-symbol{background:#edf1f6;color:#7b8798}.error-block+.error-block{margin-top:14px}.error-block.incomplete{border-color:#dbe2ec}.error-block.incomplete .error-icon{background:#edf1f6;color:#7b8798}</style>");
@@ -405,11 +415,18 @@ window.addEventListener('afterprint',()=>{showFailedOnly=Boolean(window.reportPr
     );
     Ok(document)
 }
+fn atomic_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut temp = tempfile::NamedTempFile::new_in(path.parent().context("产物路径没有目录")?)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
 pub fn write(run: &mut RunResult, directory: &Path) -> Result<()> {
-    let zip = archive(directory, run)?;
+    let zip = build_archive(directory, run, true)?;
     let document = render(run, &zip)?;
-    fs::write(directory.join("records.zip"), &zip)?;
-    fs::write(directory.join("report.html"), document)?;
+    atomic_file(&directory.join("records.zip"), &zip)?;
+    atomic_file(&directory.join("report.html"), document.as_bytes())?;
     run.report_path = Some(directory.join("report.html").to_string_lossy().into_owned());
     atomic_json(&directory.join("result.json"), run)?;
     Ok(())

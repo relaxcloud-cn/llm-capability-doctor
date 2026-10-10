@@ -138,6 +138,16 @@ pub async fn run(
     cancel: CancellationToken,
     sender: Option<UnboundedSender<EventEnvelope>>,
 ) -> Result<EngineOutput> {
+    std::fs::create_dir_all(root)?;
+    let lease = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(root.join(".active.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&lease)
+        .map_err(|_| anyhow::anyhow!("本机已有检测正在执行，请等待当前检测结束"))?;
+    let _lease = lease;
     let started = Instant::now();
     let overall_deadline = started + Duration::from_secs(1020);
     let bus = EventBus { started, sender };
@@ -159,6 +169,17 @@ pub async fn run(
             break;
         }
         bus.emit(RunEvent::CheckStarted { id });
+        bus.emit(RunEvent::Step {
+            id,
+            message: match id {
+                CheckId::Response => "检查普通响应、流式响应和结束状态",
+                CheckId::Tools => "检查工具选择与参数，回传结果并核对使用情况",
+                CheckId::Schema => "发送指定格式要求，核对结构与字段",
+                CheckId::Context => "探测上下文边界和实际 token 计量",
+                _ => "校准规定输入输出负载，准备四并发测量",
+            }
+            .into(),
+        });
         let outcome = match id {
             CheckId::Response => checks::response(&transport, direct_deadline).await,
             CheckId::Tools => checks::tools(&transport, direct_deadline).await,
@@ -262,6 +283,40 @@ pub async fn run(
     run.elapsed_ms = started.elapsed().as_millis() as u64;
     run.finished_at = Some(chrono::Utc::now());
     run.verdict = run.compute_verdict();
+    atomic_json(&directory.join("result.json"), &run)?;
+    bus.emit(RunEvent::ReportStarted);
+    let mut report = tokio::process::Command::new(std::env::current_exe()?);
+    report
+        .arg("--render-result")
+        .arg(directory.join("result.json"))
+        .env_remove("MODEL_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let mut child = report.spawn()?;
+    let rendered = tokio::time::timeout(Duration::from_secs(30), child.wait()).await;
+    match rendered {
+        Ok(Ok(status)) if status.success() => {
+            run = serde_json::from_slice(&std::fs::read(directory.join("result.json"))?)?;
+            if !directory.join("report.html").is_file() || !directory.join("records.zip").is_file()
+            {
+                run.report_path = None;
+                bus.emit(RunEvent::Error {
+                    message: "报告生成未产生完整文件".into(),
+                });
+            }
+        }
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            run.report_path = None;
+            bus.emit(RunEvent::Error {
+                message: "报告生成失败或超过 30 秒，已有结果已保留".into(),
+            });
+        }
+    }
     atomic_json(&directory.join("result.json"), &run)?;
     bus.emit(RunEvent::Finished { run: run.clone() });
     Ok(EngineOutput { run, directory })

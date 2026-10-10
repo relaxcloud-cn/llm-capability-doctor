@@ -1,0 +1,8 @@
+{
+  "bundled": true,
+  "gui": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/single-file-cache/70ca5258816f1c296205b65b34c163b88154d7ea7f73abb0905b98699e3c41e9/gui/AgentCheck.app/Contents/MacOS/AgentCheck",
+  "gui_opened": true,
+  "model_requests": 0,
+  "omp": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/single-file-cache/10341c8b90a7c97e6c0462bfccf8d1ef8e517acdab4072cd82b59be7b7d55b61/omp/omp",
+  "omp_version": "omp/18.1.13"
+}

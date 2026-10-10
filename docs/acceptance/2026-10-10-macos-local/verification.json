@@ -1,0 +1,293 @@
+{
+  "host": {
+    "os": "macOS",
+    "version": "26.5.2",
+    "build": "25F84",
+    "arch": "arm64"
+  },
+  "runs": [
+    {
+      "kind": "gui",
+      "id": "AC-20261010T065839Z-41162f70dfd04850826196761c4b0f5d",
+      "cancelled": false,
+      "elapsed_ms": 152955,
+      "verdict": "failed",
+      "completed_checks": 8,
+      "checks": [
+        {
+          "id": "response",
+          "status": "passed",
+          "title": "普通响应、流式响应均正常",
+          "finished": true
+        },
+        {
+          "id": "tools",
+          "status": "passed",
+          "title": "工具选择、参数和结果使用均正确",
+          "finished": true
+        },
+        {
+          "id": "schema",
+          "status": "failed",
+          "title": "返回结果格式错误，平台无法直接读取",
+          "finished": true
+        },
+        {
+          "id": "context",
+          "status": "passed",
+          "title": "已支持至少 393216 tokens，最大上限待确认",
+          "finished": true
+        },
+        {
+          "id": "performance",
+          "status": "incomplete",
+          "title": "并发性能尚未确认，缺少有效输出长度记录",
+          "finished": true
+        },
+        {
+          "id": "continuous",
+          "status": "passed",
+          "title": "连续执行多个工具，任务结果正确",
+          "finished": true
+        },
+        {
+          "id": "recovery",
+          "status": "passed",
+          "title": "工具出错后恢复，任务结果正确",
+          "finished": true
+        },
+        {
+          "id": "multiturn",
+          "status": "passed",
+          "title": "新增和修改要求均已落实",
+          "finished": true
+        }
+      ],
+      "zip_entries": 308,
+      "result_matches_zip": true,
+      "secret_scan_passed": true,
+      "task_audits": [
+        {
+          "task": "recovery-2",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "continuous-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "multiturn-2",
+          "record_count": 13,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "recovery-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "continuous-2",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "multiturn-1",
+          "record_count": 13,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        }
+      ]
+    },
+    {
+      "kind": "gui",
+      "id": "AC-20261010T070534Z-364437fa702648749b3a33da878f6db3",
+      "cancelled": true,
+      "elapsed_ms": 86647,
+      "verdict": "failed",
+      "completed_checks": 6,
+      "checks": [
+        {
+          "id": "response",
+          "status": "passed",
+          "title": "普通响应、流式响应均正常",
+          "finished": true
+        },
+        {
+          "id": "tools",
+          "status": "passed",
+          "title": "工具选择、参数和结果使用均正确",
+          "finished": true
+        },
+        {
+          "id": "schema",
+          "status": "failed",
+          "title": "返回结果格式错误，平台无法直接读取",
+          "finished": true
+        },
+        {
+          "id": "context",
+          "status": "passed",
+          "title": "已支持至少 393216 tokens，最大上限待确认",
+          "finished": true
+        },
+        {
+          "id": "performance",
+          "status": "incomplete",
+          "title": "并发性能尚未确认，缺少有效输出长度记录",
+          "finished": true
+        },
+        {
+          "id": "continuous",
+          "status": "passed",
+          "title": "连续执行多个工具，任务结果正确",
+          "finished": true
+        },
+        {
+          "id": "recovery",
+          "status": "incomplete",
+          "title": "任务未全部完成",
+          "finished": false
+        },
+        {
+          "id": "multiturn",
+          "status": "incomplete",
+          "title": "任务未全部完成",
+          "finished": false
+        }
+      ],
+      "zip_entries": 234,
+      "result_matches_zip": true,
+      "secret_scan_passed": true,
+      "task_audits": [
+        {
+          "task": "continuous-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "recovery-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "continuous-2",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        }
+      ]
+    },
+    {
+      "kind": "cli",
+      "id": "AC-20261010T070146Z-2360aa7a44ec42a788d7b387ac786eaf",
+      "cancelled": false,
+      "elapsed_ms": 128604,
+      "verdict": "failed",
+      "completed_checks": 8,
+      "checks": [
+        {
+          "id": "response",
+          "status": "passed",
+          "title": "普通响应、流式响应均正常",
+          "finished": true
+        },
+        {
+          "id": "tools",
+          "status": "passed",
+          "title": "工具选择、参数和结果使用均正确",
+          "finished": true
+        },
+        {
+          "id": "schema",
+          "status": "failed",
+          "title": "返回结果格式错误，平台无法直接读取",
+          "finished": true
+        },
+        {
+          "id": "context",
+          "status": "passed",
+          "title": "已支持至少 393216 tokens，最大上限待确认",
+          "finished": true
+        },
+        {
+          "id": "performance",
+          "status": "incomplete",
+          "title": "并发性能尚未确认，缺少有效输出长度记录",
+          "finished": true
+        },
+        {
+          "id": "continuous",
+          "status": "passed",
+          "title": "连续执行多个工具，任务结果正确",
+          "finished": true
+        },
+        {
+          "id": "recovery",
+          "status": "passed",
+          "title": "工具出错后恢复，任务结果正确",
+          "finished": true
+        },
+        {
+          "id": "multiturn",
+          "status": "passed",
+          "title": "新增和修改要求均已落实",
+          "finished": true
+        }
+      ],
+      "zip_entries": 342,
+      "result_matches_zip": true,
+      "secret_scan_passed": true,
+      "task_audits": [
+        {
+          "task": "recovery-2",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "continuous-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "multiturn-2",
+          "record_count": 13,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "recovery-1",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "continuous-2",
+          "record_count": 12,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        },
+        {
+          "task": "multiturn-1",
+          "record_count": 13,
+          "independent_data_comparison": "passed",
+          "normal_end": true
+        }
+      ]
+    }
+  ],
+  "cli_stdout_matches_result": true,
+  "cli_plain_log_has_ansi": false,
+  "cancelled_run_preserves_failure": true,
+  "no_task_processes_after_gui_close": true
+}

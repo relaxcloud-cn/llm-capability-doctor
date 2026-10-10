@@ -1,0 +1,37 @@
+{
+  "binary": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/dist/agent-check-macos-arm64",
+  "sha256": "c9e5b9bd214edb050889106a2f24d2e83ece6a327a63488aa43c0633690f3803",
+  "size_bytes": 206001520,
+  "omp_version": "omp/18.1.13",
+  "model_requests": 0,
+  "restricted_path": "/usr/bin:/bin:/usr/sbin:/sbin",
+  "checks": [
+    {
+      "check": "first_extraction_chinese_and_space_path",
+      "passed": true,
+      "elapsed_seconds": 5.96
+    },
+    {
+      "check": "cached_restart",
+      "passed": true,
+      "elapsed_seconds": 0.961
+    },
+    {
+      "check": "missing_execute_permission_repaired",
+      "passed": true,
+      "elapsed_seconds": 2.314
+    },
+    {
+      "check": "modified_binary_repaired",
+      "passed": true,
+      "elapsed_seconds": 2.558
+    },
+    {
+      "check": "gui_execute_permission_repaired",
+      "passed": true,
+      "elapsed_seconds": 2.526
+    }
+  ],
+  "cache_directory": "/Users/libolun/.codex/worktrees/agent-check-remake/llm-capability-doctor/.cache/acceptance/resume-macos/中文 cache verification p7w9ipip",
+  "scope": "Local macOS host with development tools excluded from PATH; not a clean-machine or firewall isolation test."
+}

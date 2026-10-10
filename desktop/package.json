@@ -5,9 +5,13 @@
   "main": "main.cjs",
   "description": "AgentCheck desktop interface with bundled Chromium",
   "scripts": {
-    "start": "electron .",
-    "package:mac": "electron-packager . AgentCheck --platform=darwin --arch=arm64 --out=out --overwrite --asar",
-    "package:windows": "electron-packager . AgentCheck --platform=win32 --arch=x64 --out=out --overwrite --asar"
+    "start": "npm run prepare:ui && electron .",
+    "package:mac": "npm run prepare:ui && electron-packager . AgentCheck --platform=darwin --arch=arm64 --out=out --overwrite --asar",
+    "package:windows": "npm run prepare:ui && electron-packager . AgentCheck --platform=win32 --arch=x64 --out=out --overwrite --asar",
+    "prepare:ui": "node ../scripts/build-desktop-ui.mjs"
   },
-  "devDependencies": {"electron": "44.7.0", "@electron/packager": "20.3.0"}
+  "devDependencies": {
+    "electron": "44.7.0",
+    "@electron/packager": "20.3.0"
+  }
 }
