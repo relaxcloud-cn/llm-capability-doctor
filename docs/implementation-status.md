@@ -18,7 +18,7 @@
 | 检测准确性 | 两种协议解析、流拼接、真实文件比较、故障确实送达、同会话多轮；Chat Completions 两轮完整单文件执行共 12 次 OMP，独立比较数据均一致 | Responses 真实完整正反样本；规定输出负载的实际四并发；更多上下文边界和 HTTP 生命周期/预算正反例 |
 | 报告与证据 | 规则报告、HTML 内嵌真实 ZIP、每次编号绑定、取消不覆盖已确认失败；JSON 与 ZIP 结果一致，密钥扫描通过 | 所有结果状态及 3 种视口的完整 1:1、实际浏览器下载/打印、官方基线版本匹配 |
 
-最终候选文件为 206,001,520 字节（约 196.46 MiB），SHA-256 为 `c9e5b9bd214edb050889106a2f24d2e83ece6a327a63488aa43c0633690f3803`。最终文件的[缓存验证](acceptance/2026-10-10-macos-local/final-runtime-verification.json)通过：首次释放 5.960 秒、重复启动 0.961 秒、内容与 OMP/GUI 执行权限损坏均修复。`--offline-self-test --gui` 已收到界面就绪确认，记录 [0 次模型请求](acceptance/2026-10-10-macos-local/offline-gui-self-test.json)。随后原生 UI 工具报告 Mac 锁屏；最终构建的历史页操作和清理后的错误提示需解锁后继续复核。
+最终候选文件为 206,001,520 字节（约 196.46 MiB），SHA-256 为 `c9e5b9bd214edb050889106a2f24d2e83ece6a327a63488aa43c0633690f3803`。最终文件的[缓存验证](acceptance/2026-10-10-macos-local/final-runtime-verification.json)通过：首次释放 5.960 秒、重复启动 0.961 秒、内容与 OMP/GUI 执行权限损坏均修复。`--offline-self-test --gui` 已收到界面就绪确认，记录 [0 次模型请求](acceptance/2026-10-10-macos-local/offline-gui-self-test.json)。解锁后已完成[最终原生界面复核](acceptance/2026-10-10-macos-local/final-gui-verification.json)：重启恢复两条历史记录、停止结果展开/收起、搜索空态、清除筛选和取消表单均通过；本机无效地址的连接失败仅显示“模型连通性失败：无法连接模型服务”，无 Electron IPC 前缀，失败后按钮与输入框恢复，没有新增能力检测记录。本次跟进没有请求真实模型服务。
 
 ## 真实单文件验收
 
@@ -41,6 +41,8 @@
 - [GUI 完成页](acceptance/gui-bundled-completed.png)、[并行任务页](acceptance/gui-bundled-parallel.png)、[关闭确认](acceptance/gui-close-confirm.png)。
 
 GUI 内报告打开、需关注项筛选、官方资料展开已实际操作。后续浏览器工具明确拒绝 `file://` 导航；没有绕过限制，也没有将下载按钮点击升级为文件下载成功证据。下载/打印继续保留未验收状态。
+
+最终构建原生截图：[重启历史与停止结果](acceptance/gui-final-history-restored.png)、[连接失败提示](acceptance/gui-final-connection-error.png)。先前锁屏阻碍已解除；下载/打印和完整 1:1 验收仍保持下方列明的范围。
 
 ## 本轮修复
 

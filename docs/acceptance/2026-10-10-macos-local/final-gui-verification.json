@@ -1,0 +1,29 @@
+{
+  "verified_at": "2026-10-10T15:23:11+08:00",
+  "binary_sha256": "c9e5b9bd214edb050889106a2f24d2e83ece6a327a63488aa43c0633690f3803",
+  "method": "Native macOS accessibility actions and screenshots using cua_repl",
+  "checks": {
+    "offline_gui_restored_two_saved_runs": true,
+    "history_latest_first_and_counts_match_result_json": true,
+    "cancelled_run_expands_same_id_and_preserves_failure": true,
+    "unmatched_search_shows_zero_of_two": true,
+    "clear_filter_restores_two_records": true,
+    "connection_failure_restores_editable_fields_and_start_button": true,
+    "connection_error_without_electron_ipc_prefix": true,
+    "failed_connection_does_not_create_capability_run": true,
+    "cancel_form_returns_to_existing_history": true,
+    "history_expand_and_collapse_work": true
+  },
+  "connection_failure_probe": {
+    "address": "http://127.0.0.1:9/v1",
+    "model": "local-invalid-test",
+    "credentials": "disposable test value; not retained",
+    "observed_error": "模型连通性失败：无法连接模型服务"
+  },
+  "model_endpoint_requests_this_followup": 0,
+  "screenshots": [
+    "../gui-final-history-restored.png",
+    "../gui-final-connection-error.png"
+  ],
+  "remaining_scope": "Does not certify all viewport/state 1:1 comparisons, browser download/print, clean-machine dependencies, signing, Responses or other OS platforms."
+}
