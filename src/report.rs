@@ -128,9 +128,9 @@ fn note(id: CheckId) -> &'static str {
     match id {
         CheckId::Response => "检查接口兼容性、普通响应和流式响应",
         CheckId::Tools => "检查工具选择、参数和结果使用",
-        CheckId::Schema => "检查输出是否符合指定格式和字段要求",
+        CheckId::Schema => "分别核对内容正确性与原生 JSON 格式；单一代码块可兼容解析",
         CheckId::Context => "探测模型支持的最大上下文长度",
-        CheckId::Performance => "检查并发请求能否完成，以及最长和平均用时",
+        CheckId::Performance => "逐级探测当前服务的并发请求能力，保留成功数、限流和耗时",
         CheckId::Continuous => "检查多个工具步骤能否衔接并完成任务",
         CheckId::Recovery => "检查工具临时出错后能否恢复并完成任务",
         CheckId::Multiturn => "检查新增要求后的任务继续与结果更新",
@@ -138,6 +138,11 @@ fn note(id: CheckId) -> &'static str {
 }
 fn observation(check: &crate::model::CheckResult) -> Value {
     let mut value = json!({"title":check.title,"status":match check.status{Status::Passed=>"passed",Status::Failed=>"failed",_=>"incomplete"}});
+    value["probeMode"] = check
+        .facts
+        .get("probe_mode")
+        .cloned()
+        .unwrap_or(Value::Null);
     if check.id == CheckId::Context && check.status == Status::Passed {
         value["maxContextTokens"] = check
             .facts
@@ -213,7 +218,11 @@ fn human_fact(fact: &str) -> String {
 }
 fn issues(run: &RunResult) -> String {
     let mut cards = String::new();
-    for check in run.checks.iter().filter(|c| c.status != Status::Passed) {
+    for check in run
+        .checks
+        .iter()
+        .filter(|c| c.status != Status::Passed || !c.findings.is_empty())
+    {
         let findings = if check.findings.is_empty() {
             vec![(
                 check.title.clone(),
@@ -256,6 +265,23 @@ fn issues(run: &RunResult) -> String {
     if cards.is_empty() {
         cards="<article class=\"error-block\"><div class=\"error-head\"><h3>本次检测未发现阻止接入的问题</h3></div><p>建议按本次验证的协议、版本和负载接入，并保留本次检测记录。</p></article>".into();
     }
+    if let Some(rounds) = run
+        .checks
+        .iter()
+        .find(|c| c.id == CheckId::Performance)
+        .and_then(|c| c.facts.get("rounds"))
+        .and_then(Value::as_array)
+    {
+        cards.push_str("<article class=\"error-block incomplete\"><h3>并发逐级探测记录</h3><p>短 JSON 回显负载，每个请求仅尝试一次，超时 180 秒。显示本次最高成功档位；不代表模型内部并行推理数，也不代表已确认唯一最大并发数。</p><table style=\"width:100%;text-align:left\"><thead><tr><th>并发</th><th>成功</th><th>失败</th><th>限流</th><th>最长用时</th><th>平均用时</th></tr></thead><tbody>");
+        for round in rounds {
+            cards.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2} 秒</td><td>{:.2} 秒</td></tr>",
+                round["concurrency"].as_u64().unwrap_or(0),round["successful"].as_u64().unwrap_or(0),
+                round["failed"].as_u64().unwrap_or(0),round["rate_limited"].as_u64().unwrap_or(0),
+                round["longest_elapsed_ms"].as_f64().unwrap_or(0.0)/1000.0,
+                round["mean_elapsed_ms"].as_f64().unwrap_or(0.0)/1000.0));
+        }
+        cards.push_str("</tbody></table></article>");
+    }
     cards
 }
 fn replace_between(source: &mut String, start: &str, end: &str, replacement: &str) -> Result<()> {
@@ -291,7 +317,8 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
         .checks
         .iter()
         .find(|c| c.status == Status::Failed)
-        .or_else(|| run.checks.iter().find(|c| c.status != Status::Passed));
+        .or_else(|| run.checks.iter().find(|c| c.status != Status::Passed))
+        .or_else(|| run.checks.iter().find(|c| !c.findings.is_empty()));
     let reason = major
         .map(|c| format!("{}：{}", c.id.name(), c.title))
         .unwrap_or_else(|| "本次全部必测项目均达到接入要求。".into());
@@ -332,7 +359,7 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
     let attention = run
         .checks
         .iter()
-        .filter(|c| c.status != Status::Passed)
+        .filter(|c| c.status != Status::Passed || !c.findings.is_empty())
         .count();
     replace_between(
         &mut document,
@@ -379,6 +406,7 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
         &format!("const checks={};", script_json(&json!(data))),
     );
     document = document.replace("status:'incomplete'};", "status:observation.status};");
+    document = document.replace("function observationConclusion(item,observation){", "function observationConclusion(item,observation){\n if(item.id==='performance'&&observation.probeMode==='concurrent_requests')return observation;");
     let start = document
         .find("const recordArchive = ")
         .or_else(|| document.find("const recordArchive="))
@@ -455,4 +483,36 @@ mod tests {
         let mut archive = zip::ZipArchive::new(Cursor::new(zip)).unwrap();
         assert!(archive.by_name("result.json").is_ok());
     }
+}
+#[test]
+fn report_preserves_compatibility_notes_and_concurrency_probe_boundaries() {
+    let mut run = RunResult::new(crate::config::Target {
+        model: "test".into(),
+        endpoint: "https://example.org/v1/chat/completions".into(),
+        protocol: crate::config::Protocol::ChatCompletions,
+    });
+    let expected = crate::dataset::SourceSnapshot::generate(crate::model::CHECK_VERSION)
+        .expected(None)
+        .unwrap();
+    run.update(crate::checks::evaluate_schema(
+        &format!(
+            "```json\n{}\n```",
+            serde_json::to_string(&expected).unwrap()
+        ),
+        &expected,
+        std::time::Instant::now(),
+        vec![],
+    ));
+    let check = &mut run.checks[4];
+    check.status = Status::Passed;
+    check.title = "已实测至少支持 32 并发（已达本次探测上限，最大值未确认）".into();
+    check
+        .facts
+        .insert("probe_mode".into(), json!("concurrent_requests"));
+    check.facts.insert("rounds".into(),json!([{"concurrency":32,"successful":32,"failed":0,"rate_limited":0,"longest_elapsed_ms":100,"mean_elapsed_ms":90}]));
+    let html = render(&run, &[]).unwrap();
+    assert!(html.contains("本项兼容通过不代表服务支持原生严格 JSON Schema"));
+    assert!(html.contains("并发逐级探测记录"));
+    assert!(html.contains("已达本次探测上限，最大值未确认"));
+    assert!(html.contains("observation.probeMode==='concurrent_requests')return observation"));
 }

@@ -1,7 +1,7 @@
 'use strict';
 const api=window.agentcheck,$=id=>document.getElementById(id);
 const ids=['response','tools','schema','context','performance','continuous','recovery','multiturn'];
-const names=['接口与响应','工具调用','结构化输出','长上下文','并发性能测试','连续工具执行','工具故障恢复','多轮继续执行'];
+const names=['接口与响应','工具调用','结构化输出','长上下文','并发能力探测','连续工具执行','工具故障恢复','多轮继续执行'];
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const clock=ms=>{const total=Math.max(0,Math.floor(ms/1000));return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;};
 const date=value=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).format(new Date(value));
@@ -16,7 +16,7 @@ function passedCount(r){return r.checks.filter(check=>check.status==='passed').l
 function failedCount(r){return r.checks.filter(check=>check.status==='failed').length;}
 function completedCount(r){return r?.checks?.filter(check=>check.finished).length||0;}
 function verdict(r){return r.verdict==='passed'?'本次通过接入验收':r.verdict==='failed'?'暂不建议接入平台':'检测未完成';}
-function mainReason(r){const check=r.checks.find(check=>check.status==='failed')||r.checks.find(check=>check.status!=='passed');return check?`${names[ids.indexOf(check.id)]}：${check.title}`:'本次全部必测项目均满足要求。';}
+function mainReason(r){const check=r.checks.find(check=>check.status==='failed')||r.checks.find(check=>check.status!=='passed')||r.checks.find(check=>check.findings?.length);return check?`${names[ids.indexOf(check.id)]}：${check.title}`:'本次全部必测项目均满足要求。';}
 function isRunning(){return busy&&run&&!run.finished_at;}
 function readOnlyButtons(){document.querySelectorAll('[data-new]').forEach(button=>{button.disabled=busy;button.title=busy?'本次检测和报告生成结束后可新建':'新建检测';});$('retest').disabled=busy;}
 function page(){const history=location.hash==='#history'||!run;$('workbench-page').hidden=history;$('history-page').hidden=!history;

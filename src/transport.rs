@@ -12,7 +12,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub const REQUEST_BUDGET: Duration = Duration::from_secs(60);
+pub const REQUEST_BUDGET: Duration = Duration::from_secs(180);
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct TokenUsage {
@@ -118,11 +118,29 @@ impl Transport {
     pub fn config(&self) -> &ModelConfig {
         &self.config
     }
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
     pub async fn send(
         &self,
         body: Value,
         stream: bool,
         stage_deadline: Instant,
+    ) -> Result<RequestOutcome> {
+        self.send_with_attempts(body, stream, stage_deadline, 3)
+            .await
+    }
+    /// Capacity probes retain the first rejection; retrying would hide concurrency limits.
+    pub async fn send_once(&self, body: Value, stage_deadline: Instant) -> Result<RequestOutcome> {
+        self.send_with_attempts(body, false, stage_deadline, 1)
+            .await
+    }
+    async fn send_with_attempts(
+        &self,
+        body: Value,
+        stream: bool,
+        stage_deadline: Instant,
+        attempts: u8,
     ) -> Result<RequestOutcome> {
         let started = Instant::now();
         let deadline = stage_deadline.min(started + REQUEST_BUDGET);
@@ -140,7 +158,7 @@ impl Transport {
         };
         let mut response = None;
         let mut failure = None;
-        for number in 1..=3 {
+        for number in 1..=attempts {
             if self.cancel.is_cancelled() {
                 failure = Some(RequestFailure::Cancelled);
                 break;
@@ -243,7 +261,7 @@ impl Transport {
                 }
             };
             evidence.attempts.push(attempt);
-            if !retry || number == 3 {
+            if !retry || number == attempts {
                 break;
             }
             let delay = retry_after

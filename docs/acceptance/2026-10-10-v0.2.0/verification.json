@@ -1,0 +1,99 @@
+{
+  "run_id": "AC-20261010T081423Z-5a530eb978fc4e78add1d832eb7ec7f8",
+  "check_version": "agentcheck/2",
+  "elapsed_seconds": 68.468,
+  "exit_code": 1,
+  "verdict": "failed",
+  "concurrency_rounds": [
+    {
+      "concurrency": 1,
+      "successful": 1,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 199,
+      "mean_elapsed_ms": 199.0
+    },
+    {
+      "concurrency": 2,
+      "successful": 2,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 298,
+      "mean_elapsed_ms": 258.0
+    },
+    {
+      "concurrency": 4,
+      "successful": 4,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 460,
+      "mean_elapsed_ms": 399.25
+    },
+    {
+      "concurrency": 8,
+      "successful": 8,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 933,
+      "mean_elapsed_ms": 693.0
+    },
+    {
+      "concurrency": 16,
+      "successful": 16,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 2177,
+      "mean_elapsed_ms": 1254.875
+    },
+    {
+      "concurrency": 32,
+      "successful": 32,
+      "failed": 0,
+      "rate_limited": 0,
+      "longest_elapsed_ms": 4388,
+      "mean_elapsed_ms": 2447.21875
+    }
+  ],
+  "concurrency_requests_verified": 63,
+  "independent_task_comparisons": [
+    {
+      "task": "continuous-1",
+      "records": 12,
+      "independent_comparison": true
+    },
+    {
+      "task": "continuous-2",
+      "records": 12,
+      "independent_comparison": true
+    },
+    {
+      "task": "multiturn-1",
+      "records": 13,
+      "independent_comparison": true
+    },
+    {
+      "task": "multiturn-2",
+      "records": 13,
+      "independent_comparison": true
+    },
+    {
+      "task": "recovery-1",
+      "records": 12,
+      "independent_comparison": true
+    },
+    {
+      "task": "recovery-2",
+      "records": 12,
+      "independent_comparison": true
+    }
+  ],
+  "zip_entries": 576,
+  "zip_result_stdout_equal": true,
+  "known_credential_scan_passed": true,
+  "unit_and_integration_tests": 40,
+  "notes": [
+    "Original customer fenced JSON fixture now passes compatibility validation, native_format_satisfied remains false.",
+    "New live schema response has duplicated records opening and is invalid JSON; failure retained.",
+    "Request timeout 180 seconds verified using controlled transport clock; this live run did not need the full timeout."
+  ]
+}

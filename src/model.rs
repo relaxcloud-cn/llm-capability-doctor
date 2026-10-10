@@ -5,12 +5,10 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub const CHECK_VERSION: &str = "agentcheck/1";
+pub const CHECK_VERSION: &str = "agentcheck/2";
 pub const RESULT_SCHEMA_VERSION: u32 = 1;
 pub const MIN_CONTEXT_TOKENS: u64 = 131_072;
-pub const CONCURRENT_REQUESTS: usize = 4;
-pub const INPUT_LOAD_TOKENS: u64 = 32_768;
-pub const OUTPUT_LOAD_TOKENS: u64 = 1_024;
+pub const CONCURRENCY_LEVELS: [usize; 6] = [1, 2, 4, 8, 16, 32];
 pub const OMP_VERSION: &str = env!("AGENTCHECK_OMP_VERSION");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -42,7 +40,7 @@ impl CheckId {
             Self::Tools => "工具调用",
             Self::Schema => "结构化输出",
             Self::Context => "长上下文",
-            Self::Performance => "并发性能测试",
+            Self::Performance => "并发能力探测",
             Self::Continuous => "连续工具执行",
             Self::Recovery => "工具故障恢复",
             Self::Multiturn => "多轮继续执行",

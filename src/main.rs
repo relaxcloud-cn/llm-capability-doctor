@@ -7,11 +7,7 @@ use agent_check::{
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde_json::json;
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 #[derive(Parser)]
 #[command(name = "agent-check", version, about = "模型接入检测工具")]
@@ -175,7 +171,7 @@ async fn run() -> Result<()> {
     if cli.dev_interfaces {
         let folder = root.join(format!("interfaces-{}", uuid::Uuid::new_v4().simple()));
         let transport = Transport::new(config.clone(), &folder, cancel)?;
-        let deadline = Instant::now() + Duration::from_secs(240);
+        let deadline = Instant::now() + agent_check::engine::DIRECT_BUDGET;
         let mut checks = vec![];
         for id in [
             CheckId::Response,
@@ -185,6 +181,7 @@ async fn run() -> Result<()> {
             CheckId::Performance,
         ] {
             eprintln!("正在检查 {}", id.name());
+            let deadline = agent_check::engine::interface_deadline(id, deadline);
             let check = match id {
                 CheckId::Response => agent_check::checks::response(&transport, deadline).await?,
                 CheckId::Tools => agent_check::checks::tools(&transport, deadline).await?,

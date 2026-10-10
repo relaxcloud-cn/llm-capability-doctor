@@ -1,6 +1,6 @@
 use crate::{
     config::Protocol,
-    dataset::{RecordFile, SourceSnapshot, compare_records},
+    dataset::{RecordFile, SourceSnapshot, compare_records, parse_record_payload},
     model::{CheckId, CheckResult, FailureOrigin, Finding, Status},
     transport::{RequestFailure, RequestOutcome, Transport, add_schema, add_tools, messages_body},
 };
@@ -451,36 +451,75 @@ pub async fn schema(transport: &Transport, deadline: Instant) -> Result<CheckRes
         return Ok(result);
     }
     let response = outcome.response.as_ref().unwrap();
-    let actual = serde_json::from_str::<Value>(&response.text).ok();
+    Ok(evaluate_schema(
+        &response.text,
+        &expected,
+        started,
+        evidence,
+    ))
+}
+
+pub fn evaluate_schema(
+    text: &str,
+    expected: &RecordFile,
+    started: Instant,
+    evidence: Vec<String>,
+) -> CheckResult {
+    let id = CheckId::Schema;
+    let native = serde_json::from_str::<Value>(text).is_ok();
+    let actual = parse_record_payload(text, true).ok();
     if let Some(actual) = actual {
-        let validation = compare_records(&expected, &actual);
+        let validation = compare_records(expected, &actual);
         if validation.passed {
-            return Ok(result(
+            let findings = if native {
+                vec![]
+            } else {
+                vec![Finding {
+                code: "schema_compatibility".into(),
+                title: "内容正确，需兼容解析代码块；原生 JSON 约束未满足".into(),
+                fact: "返回正文包含 Markdown JSON 代码块；提取唯一代码块后，全部字段与预期一致。当前证据不能区分包装来自模型还是网关。".into(),
+                impact: "兼容解析后可读取；直接把完整正文当 JSON 的调用方仍会解析失败。本项兼容通过不代表服务支持原生严格 JSON Schema。".into(),
+                suggestion: "接入时使用经过校验的代码块提取；需要原生严格 JSON 时，请服务方检查网关透传和格式约束。".into(),
+                origin: FailureOrigin::Service,
+                evidence_ids: evidence.clone(),
+            }]
+            };
+            return result(
                 id,
                 started,
                 Status::Passed,
-                "输出格式和字段内容符合要求",
+                if native {
+                    "输出格式和字段内容符合要求"
+                } else {
+                    "内容正确，兼容解析通过；原生 JSON 格式未满足"
+                },
                 evidence,
                 BTreeMap::from([
                     ("native_schema_request".into(), json!(true)),
+                    ("native_format_satisfied".into(), json!(native)),
+                    ("compatibility_extraction".into(), json!(!native)),
                     ("record_count".into(), json!(expected.records.len())),
                 ]),
-                vec![],
-            ));
+                findings,
+            );
         }
-        return Ok(semantic_failure(
+        return semantic_failure(
             id,
             started,
             "输出字段或内容不符合约束",
-            serde_json::to_string(&validation)?,
+            serde_json::to_string(&validation).unwrap_or_default(),
             evidence,
-        ));
+        );
     }
-    Ok(semantic_failure(
+    let mut check = semantic_failure(
         id,
         started,
         "返回结果格式错误，平台无法直接读取",
-        "接口已接受指定格式的要求，但实际返回的正文不是有效 JSON。".into(),
+        "请求包含原生 JSON 格式约束，但正文和可独立提取的唯一 JSON 代码块均无法解析；需排查模型服务及网关，不能仅凭此定位到模型本体。".into(),
         evidence,
-    ))
+    );
+    for finding in &mut check.findings {
+        finding.origin = FailureOrigin::Service;
+    }
+    check
 }

@@ -132,6 +132,17 @@ pub struct EngineOutput {
     pub run: RunResult,
     pub directory: PathBuf,
 }
+pub const DIRECT_BUDGET: Duration = Duration::from_secs(2880);
+pub fn interface_deadline(id: CheckId, stage_deadline: Instant) -> Instant {
+    let seconds = match id {
+        CheckId::Response | CheckId::Tools => 360,
+        CheckId::Schema => 180,
+        CheckId::Context => 900,
+        CheckId::Performance => 1080,
+        _ => 180,
+    };
+    stage_deadline.min(Instant::now() + Duration::from_secs(seconds))
+}
 pub async fn run(
     config: ModelConfig,
     root: &Path,
@@ -149,7 +160,7 @@ pub async fn run(
         .map_err(|_| anyhow::anyhow!("本机已有检测正在执行，请等待当前检测结束"))?;
     let _lease = lease;
     let started = Instant::now();
-    let overall_deadline = started + Duration::from_secs(1020);
+    let overall_deadline = started + DIRECT_BUDGET + Duration::from_secs(780);
     let bus = EventBus { started, sender };
     let mut run = RunResult::new(config.public_target());
     let directory = std::path::absolute(root.join(&run.id))?;
@@ -157,7 +168,7 @@ pub async fn run(
     atomic_json(&directory.join("result.json"), &run)?;
     bus.emit(RunEvent::Started { run: run.clone() });
     let transport = Transport::new(config.clone(), &directory.join("http"), cancel.clone())?;
-    let direct_deadline = (started + Duration::from_secs(240)).min(overall_deadline);
+    let direct_deadline = started + DIRECT_BUDGET;
     for id in [
         CheckId::Response,
         CheckId::Tools,
@@ -176,16 +187,18 @@ pub async fn run(
                 CheckId::Tools => "检查工具选择与参数，回传结果并核对使用情况",
                 CheckId::Schema => "发送指定格式要求，核对结构与字段",
                 CheckId::Context => "探测上下文边界和实际 token 计量",
-                _ => "校准规定输入输出负载，准备四并发测量",
+                _ => "逐级探测 1、2、4、8、16、32 并发，记录实际成功数与限流",
             }
             .into(),
         });
+        let deadline = interface_deadline(id, direct_deadline);
+        let progress = |message| bus.emit(RunEvent::Step { id, message });
         let outcome = match id {
-            CheckId::Response => checks::response(&transport, direct_deadline).await,
-            CheckId::Tools => checks::tools(&transport, direct_deadline).await,
-            CheckId::Schema => checks::schema(&transport, direct_deadline).await,
-            CheckId::Context => measure::context(&transport, direct_deadline).await,
-            _ => measure::performance(&transport, direct_deadline).await,
+            CheckId::Response => checks::response(&transport, deadline).await,
+            CheckId::Tools => checks::tools(&transport, deadline).await,
+            CheckId::Schema => checks::schema(&transport, deadline).await,
+            CheckId::Context => measure::context(&transport, deadline).await,
+            _ => measure::performance_with_progress(&transport, deadline, Some(&progress)).await,
         };
         let check =
             outcome.unwrap_or_else(|error| blocked_check(id, config.redact(&error.to_string())));

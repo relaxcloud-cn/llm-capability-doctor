@@ -6,6 +6,22 @@ use agent_check::{
 use serde_json::Value;
 
 #[test]
+fn customer_fenced_schema_content_is_compatible_but_not_native_json() {
+    let expected = SourceSnapshot::generate("agentcheck/1")
+        .expected(None)
+        .unwrap();
+    let check = agent_check::checks::evaluate_schema(
+        include_str!("fixtures/schema-fenced-content.txt"),
+        &expected,
+        std::time::Instant::now(),
+        vec![],
+    );
+    assert_eq!(check.status, agent_check::model::Status::Passed);
+    assert_eq!(check.facts["native_format_satisfied"], false);
+    assert_eq!(check.facts["compatibility_extraction"], true);
+}
+
+#[test]
 fn real_tool_answer_preserves_correct_values_inside_markdown() {
     let evidence: Value =
         serde_json::from_str(include_str!("fixtures/tool-answer-fenced.json")).unwrap();

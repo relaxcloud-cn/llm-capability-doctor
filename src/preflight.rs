@@ -1,14 +1,11 @@
 use crate::{
     config::{ModelConfig, Target},
-    transport::{RequestFailure, Transport, messages_body},
+    transport::{REQUEST_BUDGET, RequestFailure, Transport, messages_body},
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{
-    path::Path,
-    time::{Duration, Instant},
-};
+use std::{path::Path, time::Instant};
 use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConnectionReceipt {
@@ -31,7 +28,7 @@ pub async fn check(
         false,
     );
     let outcome = transport
-        .send(body, false, Instant::now() + Duration::from_secs(60))
+        .send(body, false, Instant::now() + REQUEST_BUDGET)
         .await?;
     if let Some(failure) = &outcome.failure {
         bail!(

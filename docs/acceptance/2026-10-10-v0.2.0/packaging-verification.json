@@ -1,0 +1,12 @@
+{
+  "archive": "/Users/libolun/Desktop/AgentCheck-CLI-v0.2.0-macOS-arm64-试用版.zip",
+  "archive_bytes": 203827167,
+  "archive_sha256": "64cf61197dbf9259db9c10c5ed5c0b6fa421c8151a46d2f63d7bf1621f2de011",
+  "binary_sha256": "e383d18a3ac2d7d3d7bf19507948feab455357eedb794634b63ca5e4e9603986",
+  "version": "agent-check 0.2.0",
+  "extracted_checksums": true,
+  "executable_permission": true,
+  "fresh_cache_offline_self_test": true,
+  "model_requests": 0,
+  "gui_opened": false
+}

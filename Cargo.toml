@@ -1,6 +1,6 @@
 [package]
 name = "agent-check"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 
@@ -39,6 +39,9 @@ tar = "0.4"
 fs2 = "0.4"
 tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.0", features = ["test-util"] }
 
 [build-dependencies]
 flate2 = "1"
