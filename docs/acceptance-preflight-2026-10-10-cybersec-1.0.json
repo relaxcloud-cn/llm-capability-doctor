@@ -1,0 +1,104 @@
+{
+  "model": "cybersec-1.0",
+  "base_url": "https://ai.gov110.cn/llm_v2/v1/",
+  "protocol": "chat-completions",
+  "attempts": [
+    {
+      "checked_at": "2026-10-10T08:37:06+08:00",
+      "model": "cybersec-1.0",
+      "endpoint": "https://ai.gov110.cn/llm_v2/v1/chat/completions",
+      "protocol": "chat-completions",
+      "check": "minimal_connectivity_only",
+      "request_body": {
+        "model": "cybersec-1.0",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with OK."
+          }
+        ],
+        "max_tokens": 16,
+        "stream": false
+      },
+      "http_status": 200,
+      "json_response": true,
+      "has_choices": true,
+      "has_text": false,
+      "model_matches_requested": false,
+      "finish_reason": "length",
+      "elapsed_seconds": 0.22,
+      "capability_verdict": "not_evaluated"
+    },
+    {
+      "checked_at": "2026-10-10T08:37:40+08:00",
+      "model": "cybersec-1.0",
+      "endpoint": "https://ai.gov110.cn/llm_v2/v1/chat/completions",
+      "protocol": "chat-completions",
+      "check": "minimal_connectivity_only",
+      "request_body": {
+        "model": "cybersec-1.0",
+        "messages": [
+          {
+            "role": "user",
+            "content": "Reply with exactly OK."
+          }
+        ],
+        "max_tokens": 512,
+        "stream": false
+      },
+      "http_status": 200,
+      "json_response": true,
+      "has_choices": true,
+      "has_text": true,
+      "model_matches_requested": false,
+      "returned_model": "deepseek-v4-flash",
+      "finish_reason": "stop",
+      "response": {
+        "id": "chatcmpl-a540f1eade3fadf8",
+        "object": "chat.completion",
+        "created": 1791592660,
+        "model": "deepseek-v4-flash",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "OK.",
+              "refusal": null,
+              "annotations": null,
+              "audio": null,
+              "function_call": null,
+              "reasoning": "We need to respond with exactly \"OK\". No extra text. So just \"OK\"."
+            },
+            "logprobs": null,
+            "finish_reason": "stop",
+            "stop_reason": null,
+            "token_ids": null,
+            "routed_experts": null
+          }
+        ],
+        "service_tier": null,
+        "system_fingerprint": "vllm-0.26.0-tp2-8ee9be83",
+        "usage": {
+          "prompt_tokens": 9,
+          "total_tokens": 31,
+          "completion_tokens": 22,
+          "prompt_tokens_details": {
+            "cached_tokens": 0,
+            "created_cache_tokens": 0,
+            "multimodal_tokens": null
+          }
+        },
+        "prompt_logprobs": null,
+        "prompt_token_ids": null,
+        "prompt_text": null,
+        "kv_transfer_params": null,
+        "ec_transfer_params": null,
+        "metrics": null
+      },
+      "elapsed_seconds": 0.27,
+      "capability_verdict": "not_evaluated"
+    }
+  ],
+  "capability_verdict": "not_evaluated"
+}
