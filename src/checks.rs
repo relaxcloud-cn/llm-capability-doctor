@@ -282,7 +282,7 @@ pub async fn tools(transport: &Transport, deadline: Instant) -> Result<CheckResu
             break;
         }
         let stream = turn == 0;
-        let mut body = messages_body(cfg, messages.clone(), 4096, stream);
+        let mut body = messages_body(cfg, messages.clone(), 20_000, stream);
         add_tools(&mut body, cfg.protocol, &definitions);
         let outcome = transport.send(body, stream, deadline).await?;
         evidence.push(outcome.evidence.id.clone());

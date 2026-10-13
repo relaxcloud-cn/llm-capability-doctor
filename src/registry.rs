@@ -118,7 +118,7 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
                 ),
                 CheckId::Tools => (
                     360,
-                    "本次工具选择、参数、调用关联及工具结果使用",
+                    "本次工具选择、参数、调用关联及工具结果使用；每次请求最多输出 20000 tokens",
                     vec![("roundtrip", "工具调用与结果回传正确", true)],
                 ),
                 CheckId::Schema => (
@@ -157,7 +157,7 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
             CheckSpec {
                 id,
                 name: id.name().into(),
-                version: if id == CheckId::Performance { "2" } else { "1" }.into(),
+                version: if matches!(id, CheckId::Tools | CheckId::Performance) { "2" } else { "1" }.into(),
                 scope: scope.into(),
                 group: if id.is_agent() {
                     CheckGroup::Agent

@@ -616,6 +616,40 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
     check
 }
 #[tokio::test]
+async fn tool_call_requests_use_20000_output_tokens_for_all_rounds() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        for variant in ["normal", "serial", "repeated_query"] {
+            let directory = tempfile::tempdir().unwrap();
+            let case = Case {
+                id: format!("tools.{variant}"),
+                check: CheckId::Tools,
+                variant: variant.into(),
+                expected: Status::Passed,
+            };
+            let check = execute_http(&case, protocol, directory.path()).await;
+            assert_eq!(check.status, Status::Passed);
+            assert!(check.evidence_ids.len() >= 2);
+            for (round, id) in check.evidence_ids.iter().enumerate() {
+                let row: HttpEvidence = serde_json::from_slice(
+                    &std::fs::read(directory.path().join("http").join(format!("{id}.json")))
+                        .unwrap(),
+                )
+                .unwrap();
+                let field = match protocol {
+                    Protocol::ChatCompletions => "max_tokens",
+                    Protocol::Responses => "max_output_tokens",
+                };
+                assert_eq!(
+                    row.request[field], 20_000,
+                    "{protocol:?} {variant} round {round}"
+                );
+                assert_eq!(row.stream, round == 0);
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn all_registered_requirements_match_independent_acceptance_labels_on_both_protocols() {
     let data: Value =
         serde_json::from_str(include_str!("fixtures/acceptance-matrix.json")).unwrap();
