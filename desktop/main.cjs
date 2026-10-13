@@ -5,7 +5,9 @@ const fs=require('node:fs/promises');
 const {spawn,execFile}=require('node:child_process');
 const readline=require('node:readline');
 const crypto=require('node:crypto');
+const createReports=require('./reports.cjs');
 let mainWindow,worker,busy=false,quitting=false,root,workerReady=false,confirmingQuit=false;
+const reports=createReports({BrowserWindow,resolveFile:id=>recordFile(id,'report.html'),isQuitting:()=>quitting,canAutoOpen:()=>Boolean(mainWindow&&!mainWindow.isDestroyed())&&!process.argv.includes('--agentcheck-no-open-report')&&!['SSH_CONNECTION','SSH_TTY','SSH_CLIENT','CI'].some(name=>process.env[name]!==undefined),onAutoError:()=>publish({type:'error',message:'报告已保存，但未能自动打开。请点击“查看报告”重试；检测结果不受影响。'})});
 const pending=new Map(),idleWaiters=[];
 let sequence=0,eventTape=[],uiReadyResolve;
 const uiReady=new Promise(resolve=>uiReadyResolve=resolve);
@@ -18,6 +20,7 @@ function publish(message){
  if(message.type==='state'){busy=Boolean(message.busy);if(!busy){idleWaiters.splice(0).forEach(resolve=>resolve());}}
  if(message.type==='event'&&message.data?.event?.type==='started')busy=true;
  if(mainWindow&&!mainWindow.isDestroyed())mainWindow.webContents.send('agentcheck:event',message);
+ if(message.type==='event'&&message.data?.event?.type==='finished')void reports.finished(message.data.event.run);
 }
 function request(type,data={}){
  if(!worker||!workerReady)return Promise.reject(new Error('检测执行器尚未就绪'));
@@ -55,12 +58,7 @@ async function recordFile(id,name){
  if(!file.startsWith(base+path.sep))throw new Error('文件不属于本机检测记录');
  return file;
 }
-async function openReport(id){
- const file=await recordFile(id,'report.html');
- const window=new BrowserWindow({width:1280,height:1040,title:'AgentCheck · 检测报告',webPreferences:{contextIsolation:true,nodeIntegration:false,sandbox:true}});
- window.webContents.setWindowOpenHandler(()=>({action:'deny'}));window.webContents.on('will-navigate',event=>event.preventDefault());
- await window.loadFile(file);return true;
-}
+async function openReport(id){return reports.open(id);}
 async function requestQuit(){
  if(quitting||confirmingQuit)return;
  if(!busy){await stopAndQuit();return;}

@@ -7,7 +7,7 @@ use agent_check::{
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use serde_json::json;
-use std::{path::PathBuf, sync::Arc, time::Instant};
+use std::{io::IsTerminal, path::PathBuf, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
 #[derive(Parser)]
 #[command(name = "agent-check", version, about = "模型接入检测工具")]
@@ -28,6 +28,8 @@ struct Cli {
     gui: bool,
     #[arg(long)]
     report_dir: Option<PathBuf>,
+    #[arg(long, help = "检测完成后不自动打开 HTML 报告")]
+    no_open_report: bool,
     #[arg(long, help = "输出最终 JSON，使用 CLI 模式")]
     json: bool,
     #[arg(long)]
@@ -258,7 +260,7 @@ async fn run() -> Result<()> {
                 "cyan",
                 cli.no_color,
             );
-            match agent_check::gui::launch(&config, &receipt, &root).await {
+            match agent_check::gui::launch(&config, &receipt, &root, cli.no_open_report).await {
                 Ok(()) => {
                     agent_check::terminal::startup("GUI 窗口已显示", "✓", "green", cli.no_color);
                     agent_check::terminal::startup(
@@ -304,6 +306,26 @@ async fn run() -> Result<()> {
             "[报告] HTML：{path}\n[记录] ZIP ：{}",
             output.directory.join("records.zip").display()
         );
+    }
+    if agent_check::gui::auto_open_report_allowed(
+        agent_check::gui::current_desktop(),
+        std::io::stdin().is_terminal() && std::io::stderr().is_terminal(),
+        cli.json,
+        cli.no_open_report || developer,
+        output.run.cancelled,
+    ) {
+        if let Some(path) = &output.run.report_path {
+            if agent_check::gui::open_report_file(std::path::Path::new(path))
+                .await
+                .is_ok()
+            {
+                eprintln!("[报告] 已请求打开 HTML；PDF 可在报告中按需保存。");
+            } else {
+                eprintln!(
+                    "[报告] 文件已保存，但未能自动打开，请按上述路径手动查看；检测结果不受影响。"
+                );
+            }
+        }
     }
     if output.run.cancelled {
         std::process::exit(130);

@@ -97,6 +97,19 @@ fn failed_preflight_stops_without_capability_result_and_keeps_stdout_json_clean(
     );
 }
 #[test]
+fn report_auto_open_opt_out_is_a_supported_cli_option() {
+    let result = Command::new(env!("CARGO_BIN_EXE_agent-check"))
+        .args(["--no-open-report", "--help"])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert!(
+        String::from_utf8(result.stdout)
+            .unwrap()
+            .contains("--no-open-report")
+    );
+}
+#[test]
 fn mutually_exclusive_modes_fail_before_network() {
     let result = Command::new(env!("CARGO_BIN_EXE_agent-check"))
         .args(["--gui", "--no-gui"])

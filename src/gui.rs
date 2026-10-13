@@ -35,8 +35,66 @@ pub fn current_desktop() -> bool {
         platform(),
         std::env::var_os("SSH_CONNECTION").is_some()
             || std::env::var_os("SSH_TTY").is_some()
+            || std::env::var_os("SSH_CLIENT").is_some()
             || std::env::var_os("CI").is_some(),
     )
+}
+pub fn auto_open_report_allowed(
+    desktop: bool,
+    interactive: bool,
+    json_output: bool,
+    disabled: bool,
+    cancelled: bool,
+) -> bool {
+    desktop && interactive && !json_output && !disabled && !cancelled
+}
+fn report_open_command(platform: Platform, file: &Path) -> Result<Command> {
+    let mut command = match platform {
+        Platform::Macos => {
+            let mut command = Command::new("/usr/bin/open");
+            command.arg(file);
+            command
+        }
+        Platform::Windows => {
+            let system_root =
+                std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+            let mut command = Command::new(
+                PathBuf::from(system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe"),
+            );
+            command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; Start-Process -FilePath $env:AGENTCHECK_REPORT_FILE"]);
+            command.env("AGENTCHECK_REPORT_FILE", file);
+            command
+        }
+        _ => bail!("本平台保留报告路径，不自动打开浏览器"),
+    };
+    command
+        .env_remove("MODEL_API_KEY")
+        .env_remove("AGENTCHECK_SSH_PASSWORD")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    Ok(command)
+}
+async fn dispatch_report(mut command: Command, timeout: Duration) -> Result<()> {
+    let status = tokio::time::timeout(timeout, command.status())
+        .await
+        .context("打开报告等待超时")??;
+    if !status.success() {
+        bail!("系统未能打开报告");
+    }
+    Ok(())
+}
+pub async fn open_report_file(path: &Path) -> Result<()> {
+    let file = path.canonicalize().context("报告文件不存在")?;
+    if !file.is_file() || file.extension().is_none_or(|value| value != "html") {
+        bail!("报告必须是已保存的 HTML 文件");
+    }
+    dispatch_report(
+        report_open_command(platform(), &file)?,
+        Duration::from_secs(5),
+    )
+    .await
 }
 pub fn executable() -> Result<PathBuf> {
     if let Some(path) = crate::runtime::component("gui")? {
@@ -125,6 +183,7 @@ pub async fn launch(
     config: &ModelConfig,
     receipt: &ConnectionReceipt,
     report_root: &Path,
+    no_open_report: bool,
 ) -> Result<()> {
     let gui = executable()?;
     let mut command = Command::new(gui);
@@ -137,6 +196,9 @@ pub async fn launch(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
+    if no_open_report {
+        command.arg("--agentcheck-no-open-report");
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -187,6 +249,82 @@ pub async fn launch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_auto_open_requires_interactive_desktop_and_respects_suppression() {
+        assert!(auto_open_report_allowed(true, true, false, false, false));
+        for flags in [
+            (false, true, false, false, false),
+            (true, false, false, false, false),
+            (true, true, true, false, false),
+            (true, true, false, true, false),
+            (true, true, false, false, true),
+        ] {
+            assert!(!auto_open_report_allowed(
+                flags.0, flags.1, flags.2, flags.3, flags.4
+            ));
+        }
+    }
+    #[test]
+    fn report_paths_are_arguments_or_environment_values_not_shell_code() {
+        let path = Path::new("/tmp/report ' $(command) & space/report.html");
+        let mac = report_open_command(Platform::Macos, path).unwrap();
+        assert_eq!(mac.as_std().get_program(), "/usr/bin/open");
+        assert_eq!(
+            mac.as_std().get_args().collect::<Vec<_>>(),
+            vec![path.as_os_str()]
+        );
+        let windows = report_open_command(Platform::Windows, path).unwrap();
+        assert!(
+            windows
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "AGENTCHECK_REPORT_FILE"
+                    && value == Some(path.as_os_str()))
+        );
+        assert!(
+            !windows
+                .as_std()
+                .get_args()
+                .any(|arg| arg == path.as_os_str())
+        );
+        assert!(
+            windows
+                .as_std()
+                .get_envs()
+                .any(|(key, value)| key == "MODEL_API_KEY" && value.is_none())
+        );
+        assert!(report_open_command(Platform::Linux, path).is_err());
+    }
+    #[tokio::test]
+    async fn missing_or_non_html_files_are_rejected_without_launching() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            open_report_file(&dir.path().join("missing.html"))
+                .await
+                .is_err()
+        );
+        let path = dir.path().join("not-a-report.txt");
+        std::fs::write(&path, "text").unwrap();
+        assert!(open_report_file(&path).await.is_err());
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn opener_failure_and_timeout_do_not_wait_indefinitely() {
+        assert!(
+            dispatch_report(Command::new("/usr/bin/false"), Duration::from_secs(1))
+                .await
+                .is_err()
+        );
+        let mut command = Command::new("/bin/sleep");
+        command.arg("10").kill_on_drop(true);
+        let started = std::time::Instant::now();
+        assert!(
+            dispatch_report(command, Duration::from_millis(20))
+                .await
+                .is_err()
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
     #[test]
     fn desktop_policy_keeps_linux_cli_and_ssh_headless() {
         assert!(desktop_available(Platform::Macos, false));
