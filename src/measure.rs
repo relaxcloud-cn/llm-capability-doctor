@@ -1,14 +1,9 @@
 //! Context uses service token accounting; concurrency uses actual simultaneous request outcomes.
 use crate::{
-    dataset::parse_record_payload,
-    model::{
-        CONCURRENCY_LEVELS, CheckId, CheckResult, FailureOrigin, Finding, MIN_CONTEXT_TOKENS,
-        Status,
-    },
-    transport::{REQUEST_BUDGET, RequestFailure, RequestOutcome, Transport, messages_body},
+    model::{CheckId, CheckResult, FailureOrigin, Finding, MIN_CONTEXT_TOKENS, Status},
+    transport::{RequestOutcome, Transport, messages_body},
 };
 use anyhow::Result;
-use futures_util::future::join_all;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Instant};
 const RESERVED_OUTPUT: u64 = 1024;
@@ -46,6 +41,7 @@ fn check(
         facts,
         findings: finding.into_iter().collect(),
         tasks: vec![],
+        assessment: None,
     }
 }
 fn issue(code: &str, title: &str, fact: &str, origin: FailureOrigin, ids: &[String]) -> Finding {
@@ -381,199 +377,15 @@ pub async fn context(transport: &Transport, stage_deadline: Instant) -> Result<C
         Some(finding),
     ))
 }
-/// One short, verifiable response per request; token accounting is supplementary.
 pub async fn performance(transport: &Transport, deadline: Instant) -> Result<CheckResult> {
-    performance_with_progress(transport, deadline, None).await
+    crate::concurrency::probe(transport, deadline, None, Default::default()).await
 }
 pub async fn performance_with_progress(
     transport: &Transport,
     deadline: Instant,
     progress: Option<&(dyn Fn(String) + Send + Sync)>,
 ) -> Result<CheckResult> {
-    let started = Instant::now();
-    let mut evidence = vec![];
-    let mut rounds = vec![];
-    let mut lower = 0;
-    let mut first_unsuccessful = None;
-    let mut stop_reason = "probe_cap";
-    let mut best_max = 0;
-    let mut best_mean = 0.0;
-    for level in CONCURRENCY_LEVELS {
-        if deadline.saturating_duration_since(Instant::now()) < REQUEST_BUDGET {
-            stop_reason = "stage_budget";
-            break;
-        }
-        if transport.is_cancelled() {
-            stop_reason = "cancelled";
-            break;
-        }
-        if let Some(progress) = progress {
-            progress(format!(
-                "正在探测 {level} 并发；此前最高成功 {lower}，单次超时 180 秒"
-            ));
-        }
-        let round_start = Instant::now();
-        let requests = (0..level).map(|_| async {
-            let expected = json!({"probe_id":uuid::Uuid::new_v4().simple().to_string(),"ok":true});
-            let prompt =
-                format!("这是并发请求测试。请原样返回以下 JSON，不增加字段或解释：{expected}");
-            let body = messages_body(
-                transport.config(),
-                json!([{"role":"user","content":prompt}]),
-                2048,
-                false,
-            );
-            let dispatch_offset_ms = round_start.elapsed().as_millis() as u64;
-            let outcome = transport.send_once(body, deadline).await?;
-            let response = outcome.response.as_ref();
-            let valid = outcome.failure.is_none()
-                && response.is_some_and(|r| {
-                    r.normal_end
-                        && r.calls.is_empty()
-                        && parse_record_payload(&r.text, true)
-                            .is_ok_and(|actual| actual == expected)
-                });
-            let reason = match &outcome.failure {
-                Some(RequestFailure::Cancelled) => "cancelled",
-                Some(RequestFailure::StageBudget) => "stage_budget",
-                Some(RequestFailure::Timeout) => "timeout",
-                Some(RequestFailure::Http(429)) => "rate_limited",
-                Some(RequestFailure::Http(401 | 403 | 404)) => "configuration",
-                Some(RequestFailure::Http(_)) => "http_error",
-                Some(RequestFailure::Network) => "network",
-                Some(RequestFailure::InvalidResponse(_)) => "invalid_response",
-                None if !valid => "invalid_response",
-                None => "passed",
-            };
-            let record = json!({
-                "evidence_id":outcome.evidence.id,
-                "success":valid,"reason":reason,
-                "dispatch_offset_ms":dispatch_offset_ms,
-                "elapsed_ms":outcome.evidence.elapsed_ms,
-                "http_status":outcome.evidence.attempts.last().and_then(|a|a.http_status),
-                "attempts":outcome.evidence.attempts.len(),
-                "input_tokens":response.and_then(|r|r.usage.input),
-                "completion_tokens":response.and_then(|r|r.usage.output),
-            });
-            Ok::<_, anyhow::Error>((outcome.evidence.id, record))
-        });
-        let mut records = vec![];
-        for response in join_all(requests).await {
-            let (id, record) = response?;
-            evidence.push(id);
-            records.push(record);
-        }
-        let successful = records.iter().filter(|r| r["success"] == true).count();
-        let maximum = records
-            .iter()
-            .filter_map(|r| r["elapsed_ms"].as_u64())
-            .max()
-            .unwrap_or(0);
-        let mean = records
-            .iter()
-            .filter_map(|r| r["elapsed_ms"].as_u64())
-            .sum::<u64>() as f64
-            / level as f64;
-        let rate_limited = records
-            .iter()
-            .filter(|r| r["reason"] == "rate_limited")
-            .count();
-        let interrupted = records
-            .iter()
-            .any(|r| r["reason"] == "cancelled" || r["reason"] == "stage_budget");
-        rounds.push(
-            json!({"concurrency":level,"successful":successful,"failed":level-successful,
-            "rate_limited":rate_limited,"elapsed_ms":round_start.elapsed().as_millis() as u64,
-            "longest_elapsed_ms":maximum,"mean_elapsed_ms":mean,"requests":records}),
-        );
-        if let Some(progress) = progress {
-            progress(format!(
-                "{level} 并发：{successful}/{level} 成功，最长 {:.2} 秒，限流 {rate_limited} 次",
-                maximum as f64 / 1000.0
-            ));
-        }
-        if successful == level {
-            lower = level;
-            best_max = maximum;
-            best_mean = mean;
-        } else {
-            first_unsuccessful = Some(level);
-            stop_reason = if interrupted {
-                "interrupted"
-            } else if rate_limited > 0 {
-                "rate_limited"
-            } else {
-                "request_failed"
-            };
-            break;
-        }
-    }
-    let interrupted = matches!(stop_reason, "cancelled" | "interrupted" | "stage_budget");
-    let status = if lower >= 2 && !interrupted {
-        Status::Passed
-    } else {
-        Status::Incomplete
-    };
-    let boundary = match first_unsuccessful {
-        Some(n) => format!("；{n} 并发本次未全部通过"),
-        None if stop_reason == "probe_cap" => "（已达本次探测上限，最大值未确认）".into(),
-        _ => "；探测提前结束，最大值未确认".into(),
-    };
-    let title = if lower >= 2 {
-        format!("已实测至少支持 {lower} 并发{boundary}")
-    } else if lower == 1 {
-        format!("单请求通过，尚未确认多请求并发能力{boundary}")
-    } else {
-        "并发探测未确认，尚未取得成功请求".into()
-    };
-    let facts = BTreeMap::from([
-        ("probe_mode".into(), json!("concurrent_requests")),
-        (
-            "probe_cap".into(),
-            json!(CONCURRENCY_LEVELS.last().unwrap()),
-        ),
-        (
-            "request_timeout_seconds".into(),
-            json!(REQUEST_BUDGET.as_secs()),
-        ),
-        ("request_retries".into(), json!(0)),
-        (
-            "workload".into(),
-            json!("短 JSON 回显，每个请求使用独立标识；不是 32K/1K 固定 token 压测"),
-        ),
-        ("verified_concurrency_lower_bound".into(), json!(lower)),
-        ("concurrency".into(), json!(lower)),
-        ("maximum_confirmed".into(), json!(false)),
-        ("maximum_concurrency".into(), Value::Null),
-        (
-            "first_unsuccessful_concurrency".into(),
-            json!(first_unsuccessful),
-        ),
-        ("stop_reason".into(), json!(stop_reason)),
-        ("longest_elapsed_ms".into(), json!(best_max)),
-        ("mean_elapsed_ms".into(), json!(best_mean)),
-        ("rounds".into(), json!(rounds)),
-    ]);
-    let finding = if first_unsuccessful.is_some() || status != Status::Passed {
-        Some(Finding {
-            code:"concurrency_probe_boundary".into(),title:title.clone(),
-            fact:format!("本次最高全成功档位为 {lower}；首次未全部成功档位为 {first_unsuccessful:?}，停止原因 {stop_reason}。每个请求仅尝试一次，未用重试掩盖限流或失败。"),
-            impact:"这是当前账号、网关、短请求负载和 180 秒时限下的实测结果；限流、网络或排队会影响结果，不能据此宣称模型唯一最大并发数或内部并行推理数量。".into(),
-            suggestion:"查看各档成功数、限流与耗时；需要更高并发时核对服务配额和部署容量后再测。".into(),
-            origin:if interrupted {FailureOrigin::Detector} else {FailureOrigin::Service},evidence_ids:evidence.clone(),
-        })
-    } else {
-        None
-    };
-    Ok(check(
-        CheckId::Performance,
-        started,
-        status,
-        title,
-        evidence,
-        facts,
-        finding,
-    ))
+    crate::concurrency::probe(transport, deadline, progress, Default::default()).await
 }
 
 #[cfg(test)]
@@ -581,11 +393,11 @@ mod tests {
     use super::*;
     use crate::{
         config::Protocol,
-        transport::{HttpAttempt, HttpEvidence},
+        transport::{HttpAttempt, HttpEvidence, RequestFailure},
     };
     #[test]
     fn capacity_errors_require_actual_counting_not_a_hint_or_network_error() {
-        let mut outcome=RequestOutcome{evidence:HttpEvidence{id:"x".into(),endpoint:"x".into(),protocol:Protocol::ChatCompletions,request:json!({}),stream:false,elapsed_ms:1,attempts:vec![HttpAttempt{number:1,elapsed_ms:1,http_status:Some(400),headers:BTreeMap::new(),response_body:json!({"error":{"code":"context_length_exceeded","maximum_context_length":65536}}).to_string(),error:None}],parse_error:None},response:None,failure:Some(RequestFailure::Http(400))};
+        let mut outcome=RequestOutcome{evidence:HttpEvidence{id:"x".into(),endpoint:"x".into(),protocol:Protocol::ChatCompletions,request:json!({}),stream:false,elapsed_ms:1,attempts:vec![HttpAttempt{number:1,elapsed_ms:1,http_status:Some(400),headers:BTreeMap::new(),response_body:json!({"error":{"code":"context_length_exceeded","maximum_context_length":65536}}).to_string(),error:None}],parse_error:None,failure:None},response:None,failure:Some(RequestFailure::Http(400))};
         assert_eq!(rejected_total(&outcome), None);
         assert_eq!(declared_context_hint(&outcome), Some(65536));
         outcome.evidence.attempts[0].response_body =

@@ -529,6 +529,7 @@ export default function(pi) {
         step,
     };
     let mut first_valid = true;
+    let mut first_content_valid = true;
     let execution = async {
         session.wait_ready(deadline, &cancel).await?;
         session.turn(snapshot.prompt(), deadline, &cancel).await?;
@@ -548,6 +549,7 @@ export default function(pi) {
                 folder.join("stage1-result.json"),
                 serde_json::to_vec_pretty(&output)?,
             )?;
+            first_content_valid = validation.content_valid;
             first_valid = validation.passed;
             if first_valid {
                 session
@@ -662,16 +664,12 @@ export default function(pi) {
                     folder.join("validation.json"),
                     serde_json::to_vec_pretty(&validation)?,
                 )?;
-                result.status = if kind == CheckId::Recovery && !fault_delivered {
-                    crate::model::Status::Incomplete
-                } else if validation.passed
-                    && first_valid
-                    && (kind != CheckId::Recovery || recovered)
-                {
-                    crate::model::Status::Passed
-                } else {
-                    crate::model::Status::Failed
-                };
+                result.status = task_status(
+                    &validation,
+                    first_content_valid,
+                    first_valid && (kind != CheckId::Recovery || (fault_delivered && recovered)),
+                    result.normal_end,
+                );
                 result.title = if result.status == crate::model::Status::Passed {
                     match kind {
                         CheckId::Continuous => "连续执行多个工具，任务结果正确",
@@ -679,12 +677,16 @@ export default function(pi) {
                         _ => "新增和修改要求均已落实",
                     }
                     .into()
+                } else if !result.normal_end {
+                    "任务未正常结束，内容能力尚未确认".into()
                 } else if !fault_delivered && kind == CheckId::Recovery {
                     "尚未确认读取故障已送达模型".into()
                 } else if kind == CheckId::Recovery && !recovered {
                     "没有故障送达后继续执行成功的工具证据".into()
-                } else if !first_valid {
+                } else if !first_content_valid {
                     "第一轮结果不符合要求".into()
+                } else if !first_valid {
+                    "第一轮过程证据不足，第二轮未执行".into()
                 } else if let Some(difference) = validation.differences.first() {
                     if difference.field == "version"
                         && kind == CheckId::Multiturn
@@ -699,8 +701,6 @@ export default function(pi) {
                     } else {
                         "任务结果存在遗漏或字段错误".into()
                     }
-                } else if !result.normal_end {
-                    "任务未正常结束".into()
                 } else {
                     "缺少实际读取或写入证据".into()
                 };
@@ -719,13 +719,26 @@ export default function(pi) {
                     ));
                 }
             } else {
-                result.status = crate::model::Status::Failed;
-                result.title = "未生成有效结果文件".into();
+                result.status = if result.normal_end {
+                    crate::model::Status::Failed
+                } else {
+                    crate::model::Status::Incomplete
+                };
+                result.title = if result.normal_end {
+                    "未生成有效结果文件"
+                } else {
+                    "任务未正常结束，结果文件尚未确认"
+                }
+                .into();
                 result.findings.push(finding(
                     "missing_result",
                     &result.title,
                     "任务结束后 result.json 缺失或不是有效 JSON",
-                    FailureOrigin::ModelOutput,
+                    if result.normal_end {
+                        FailureOrigin::ModelOutput
+                    } else {
+                        FailureOrigin::Runtime
+                    },
                     &result.evidence_ids,
                 ));
             }
@@ -736,6 +749,22 @@ export default function(pi) {
         serde_json::to_vec_pretty(&result)?,
     )?;
     Ok(result)
+}
+fn task_status(
+    validation: &dataset::Validation,
+    first_content_valid: bool,
+    process_valid: bool,
+    normal_end: bool,
+) -> crate::model::Status {
+    if !normal_end {
+        crate::model::Status::Incomplete
+    } else if !validation.content_valid || !first_content_valid {
+        crate::model::Status::Failed
+    } else if !validation.passed || !process_valid {
+        crate::model::Status::Incomplete
+    } else {
+        crate::model::Status::Passed
+    }
 }
 fn continued_after_fault(events: &[ToolEvent], calls: &std::collections::BTreeSet<String>) -> bool {
     events.iter().any(|event| {
@@ -765,6 +794,50 @@ fn finding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unverified_first_turn_process_is_not_a_model_content_failure() {
+        let mut validation = dataset::Validation {
+            passed: false,
+            content_valid: true,
+            differences: vec![],
+            process_errors: vec!["来源证据不足".into()],
+        };
+        assert_eq!(
+            task_status(&validation, true, false, true),
+            crate::model::Status::Incomplete
+        );
+        assert_eq!(
+            task_status(&validation, false, false, true),
+            crate::model::Status::Failed
+        );
+        validation.process_errors.clear();
+        validation.passed = true;
+        assert_eq!(
+            task_status(&validation, true, false, true),
+            crate::model::Status::Incomplete
+        );
+        assert_eq!(
+            task_status(&validation, true, true, true),
+            crate::model::Status::Passed
+        );
+    }
+    #[test]
+    fn abnormal_termination_does_not_turn_partial_output_into_a_model_failure() {
+        let validation = dataset::Validation {
+            passed: false,
+            content_valid: false,
+            differences: vec![],
+            process_errors: vec!["任务未正常结束".into()],
+        };
+        assert_eq!(
+            task_status(&validation, false, false, false),
+            crate::model::Status::Incomplete
+        );
+        assert_eq!(
+            task_status(&validation, false, true, true),
+            crate::model::Status::Failed
+        );
+    }
     #[test]
     fn pending_calls_are_not_mistaken_for_actions_after_error_delivery() {
         let earlier = ToolEvent {

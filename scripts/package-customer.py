@@ -17,7 +17,7 @@ parser.add_argument("--output", type=Path, required=True)
 args = parser.parse_args()
 version = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M)[1]
 name = "AgentCheck-CLI-v" + version + "-macOS-arm64"
-binary = ROOT / "dist/agent-check-macos-arm64"
+binary = ROOT / "dist/agent-check"
 
 
 def digest(path):
@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="v" + version + "-", dir=str(receipt_dir
     stage = work / name
     stage.mkdir()
     files = {
-        "agent-check-macos-arm64": binary,
+        "agent-check": binary,
         "使用手册.md": ROOT / "docs/customer/使用手册.md",
         "model.example.json": ROOT / "docs/customer/model.example.json",
         "licenses/omp-LICENSE.txt": ROOT / ".cache/omp/18.1.13/aarch64-apple-darwin/LICENSE",
@@ -50,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix="v" + version + "-", dir=str(receipt_dir
         destination = stage / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)
-        destination.chmod(0o755 if relative == "agent-check-macos-arm64" else 0o644)
+        destination.chmod(0o755 if relative == "agent-check" else 0o644)
     template = json.loads((stage / "model.example.json").read_text())
     assert "api_key" not in template
     for relative in ["使用手册.md", "model.example.json"]:
@@ -65,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix="v" + version + "-", dir=str(receipt_dir
     extracted = work / "中文 解压验收"
     subprocess.run(["/usr/bin/ditto", "-x", "-k", str(staged_zip), str(extracted)], check=True)
     package = extracted / name
-    executable = package / "agent-check-macos-arm64"
+    executable = package / "agent-check"
     assert os.access(executable, os.X_OK)
     subprocess.run(["/usr/bin/shasum", "-a", "256", "-c", "SHA256SUMS"], cwd=package, check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith("AGENTCHECK_") and k != "MODEL_API_KEY"}

@@ -11,6 +11,6 @@ npm run package:mac --prefix desktop
 python3 scripts/prepare-bundle.py aarch64-apple-darwin
 AGENTCHECK_BUNDLE_DIR="$PWD/.cache/bundles/aarch64-apple-darwin" cargo build --release --features bundled-runtime
 mkdir -p dist
-cp target/release/agent-check dist/agent-check-macos-arm64
-shasum -a 256 dist/agent-check-macos-arm64 > dist/SHA256SUMS
-printf '%s\n' 'Built dist/agent-check-macos-arm64. Target-machine acceptance and distribution signing are separate release gates.'
+cp target/release/agent-check dist/agent-check
+shasum -a 256 dist/agent-check > dist/SHA256SUMS
+printf '%s\n' 'Built dist/agent-check. Target-machine acceptance and distribution signing are separate release gates.'

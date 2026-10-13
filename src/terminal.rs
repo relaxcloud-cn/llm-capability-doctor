@@ -62,25 +62,14 @@ impl Default for CheckView {
         }
     }
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct TerminalState {
     target: Option<Target>,
     checks: BTreeMap<CheckId, CheckView>,
+    plan: Vec<crate::judgment::CheckSpec>,
+    order: Vec<CheckId>,
     reporting: bool,
     done: Option<RunResult>,
-}
-impl Default for TerminalState {
-    fn default() -> Self {
-        Self {
-            target: None,
-            checks: CheckId::ALL
-                .into_iter()
-                .map(|id| (id, CheckView::default()))
-                .collect(),
-            reporting: false,
-            done: None,
-        }
-    }
 }
 impl TerminalState {
     pub fn apply(&mut self, envelope: &EventEnvelope) {
@@ -89,6 +78,13 @@ impl TerminalState {
             RunEvent::Started { run } => {
                 *self = Self::default();
                 self.target = Some(run.target.clone());
+                self.plan = run.plan.clone();
+                self.order = run.checks.iter().map(|c| c.id).collect();
+                self.checks = self
+                    .order
+                    .iter()
+                    .map(|id| (*id, CheckView::default()))
+                    .collect();
             }
             RunEvent::CheckStarted { id } => {
                 let view = self.checks.get_mut(id).unwrap();
@@ -136,7 +132,13 @@ impl TerminalState {
                 task_view.ended = Some(time);
                 task_view.finished = task.finished;
                 if !view.tasks.values().any(|t| t.state == LiveState::Running)
-                    && view.tasks.len() < 2
+                    && view.tasks.len()
+                        < self
+                            .plan
+                            .iter()
+                            .find(|s| s.id == task.kind)
+                            .map(|s| s.repetitions as usize)
+                            .unwrap_or(2)
                 {
                     view.state = LiveState::WaitingNext;
                 }
@@ -203,15 +205,23 @@ impl TerminalState {
             color,
         ));
         lines.push(String::new());
-        for id in CheckId::ALL {
+        for &id in &self.order {
             let check = &self.checks[&id];
+            let spec = self.plan.iter().find(|s| s.id == id);
+            let repetitions = spec.map(|s| s.repetitions).unwrap_or(2);
+            let agent = spec
+                .map(|s| s.group == crate::judgment::CheckGroup::Agent)
+                .unwrap_or_else(|| id.is_agent());
             let done = check.tasks.values().filter(|t| t.finished).count();
             let (title, tone) = match check.state {
                 LiveState::Waiting => ("等待中".into(), "dim"),
-                LiveState::WaitingNext => (format!("等待下次执行 · 已完成 {done} / 2 次"), "dim"),
+                LiveState::WaitingNext => (
+                    format!("等待下次执行 · 已完成 {done} / {repetitions} 次"),
+                    "dim",
+                ),
                 LiveState::Running => (
-                    if id.is_agent() {
-                        format!("进行中 · 已完成 {done} / 2 次")
+                    if agent {
+                        format!("进行中 · 已完成 {done} / {repetitions} 次")
                     } else {
                         "进行中".into()
                     },
@@ -220,7 +230,10 @@ impl TerminalState {
                 LiveState::Final => (check.title.clone(), status_tone(check.status)),
             };
             let mark = marker(check.state, check.status, time);
-            let name = pad(id.name(), 20);
+            let name = pad(
+                spec.map(|s| s.name.as_str()).unwrap_or_else(|| id.name()),
+                20,
+            );
             let duration = check
                 .started
                 .map(|start| duration(check.ended.unwrap_or(time).saturating_sub(start)))
@@ -234,8 +247,8 @@ impl TerminalState {
             let content = right_duration(content, &duration, width, color);
             lines.push(content);
             if check.state == LiveState::Running {
-                if id.is_agent() {
-                    for repetition in [1, 2] {
+                if agent {
+                    for repetition in 1..=repetitions {
                         let task = check.tasks.get(&repetition).cloned().unwrap_or_default();
                         let mark = marker(task.state, task.status, time);
                         let tone = if task.state == LiveState::Running {
@@ -261,18 +274,22 @@ impl TerminalState {
         }
         lines.push(String::new());
         let count = self.completed();
-        let fill = count * 3;
+        let total = self.checks.len();
+        let fill = (count * 24 / total.max(1)).min(24);
         lines.push(format!(
             "{}{}  {}  {}",
             paint(&"█".repeat(fill), "cyan", color),
             paint(&"░".repeat(24 - fill), "dim", color),
             paint(
-                &format!("{}%", (count as f64 / 8.0 * 100.0).round() as u64),
+                &format!(
+                    "{}%",
+                    (count as f64 / total.max(1) as f64 * 100.0).round() as u64
+                ),
                 "cyan",
                 color
             ),
             paint(
-                &format!("已完成 {count} / 8 项 · 已用 {}", duration(time)),
+                &format!("已完成 {count} / {total} 项 · 已用 {}", duration(time)),
                 "dim",
                 color
             )
@@ -298,7 +315,7 @@ impl TerminalState {
                 .iter()
                 .filter(|c| c.status == Status::Failed)
                 .count();
-            let pending = 8 - passed - failed;
+            let pending = run.checks.len().saturating_sub(passed + failed);
             lines.push(String::new());
             lines.push(paint(
                 &format!(
@@ -471,8 +488,9 @@ fn wrap_ansi(text: &str, width: usize) -> Vec<String> {
 pub fn log_line(event: &RunEvent) -> Option<String> {
     Some(match event {
         RunEvent::Started { run } => format!(
-            "[开始] 模型 {} · 共 8 个检测项目",
-            safe_text(&run.target.model)
+            "[开始] 模型 {} · 共 {} 个检测项目",
+            safe_text(&run.target.model),
+            run.checks.len()
         ),
         RunEvent::CheckStarted { id } => format!("[开始] {}", id.name()),
         RunEvent::Step { id, message } => format!("[{}] {}", id.name(), safe_text(message)),
@@ -504,7 +522,26 @@ pub fn log_line(event: &RunEvent) -> Option<String> {
         ),
         RunEvent::CheckProgress { .. } => return None,
         RunEvent::ReportStarted => "[报告] 正在生成报告和整理检测记录…".into(),
-        RunEvent::Finished { run } => format!("[结论] {}", run.verdict.title()),
+        RunEvent::Finished { run } => {
+            let mut text = format!("[结论] {}", run.verdict.title());
+            if let Some(decision) = &run.decision {
+                text.push_str(&format!("\n[依据] {}", safe_text(&decision.reason)));
+                for condition in &decision.conditions {
+                    text.push_str(&format!("\n[条件] {}", safe_text(condition)));
+                }
+                if let Some(report) = &run.report_path {
+                    text.push_str(&format!(
+                        "\n[证据] {}",
+                        safe_text(
+                            &std::path::Path::new(report)
+                                .with_file_name("evidence-index.json")
+                                .to_string_lossy()
+                        )
+                    ));
+                }
+            }
+            text
+        }
         RunEvent::Error { message } => format!("[错误] {}", safe_text(message)),
     })
 }

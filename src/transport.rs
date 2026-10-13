@@ -62,8 +62,11 @@ pub struct HttpEvidence {
     pub elapsed_ms: u64,
     pub attempts: Vec<HttpAttempt>,
     pub parse_error: Option<String>,
+    #[serde(default)]
+    pub failure: Option<RequestFailure>,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestFailure {
     Cancelled,
     Timeout,
@@ -71,7 +74,16 @@ pub enum RequestFailure {
     Network,
     Http(u16),
     InvalidResponse(String),
+    EvidenceConflict(String),
 }
+#[derive(Debug)]
+pub(crate) struct EvidenceConflict(&'static str);
+impl std::fmt::Display for EvidenceConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for EvidenceConflict {}
 impl RequestFailure {
     pub fn title(&self) -> String {
         match self {
@@ -80,7 +92,7 @@ impl RequestFailure {
             Self::StageBudget => "检测阶段预算已耗尽".into(),
             Self::Network => "无法连接模型服务".into(),
             Self::Http(code) => format!("模型服务返回 HTTP {code}"),
-            Self::InvalidResponse(message) => message.clone(),
+            Self::InvalidResponse(message) | Self::EvidenceConflict(message) => message.clone(),
         }
     }
 }
@@ -155,6 +167,7 @@ impl Transport {
             elapsed_ms: 0,
             attempts: vec![],
             parse_error: None,
+            failure: None,
         };
         let mut response = None;
         let mut failure = None;
@@ -253,7 +266,11 @@ impl Transport {
                             Err(error) => {
                                 let text = self.config.redact(&error.to_string());
                                 evidence.parse_error = Some(text.clone());
-                                failure = Some(RequestFailure::InvalidResponse(text));
+                                failure = Some(if error.is::<EvidenceConflict>() {
+                                    RequestFailure::EvidenceConflict(text)
+                                } else {
+                                    RequestFailure::InvalidResponse(text)
+                                });
                             }
                         };
                         false
@@ -277,6 +294,7 @@ impl Transport {
             tokio::select! { _=self.cancel.cancelled()=>{failure=Some(RequestFailure::Cancelled);break;},_=tokio::time::sleep(delay)=>{} }
         }
         evidence.elapsed_ms = started.elapsed().as_millis() as u64;
+        evidence.failure = failure.clone();
         // Every attempt is preserved, including temporary failures and cancellation.
         let path = self.evidence_dir.join(format!("{}.json", evidence.id));
         std::fs::write(path, serde_json::to_vec_pretty(&evidence)?)?;
@@ -568,11 +586,25 @@ pub fn parse_stream(protocol: Protocol, bytes: &[u8]) -> Result<ModelResponse> {
                             .as_u64()
                             .ok_or_else(|| anyhow::anyhow!("流式工具参数缺少序号"))?;
                         let entry = tools.entry(index).or_default();
-                        if let Some(value) = tool["id"].as_str() {
-                            entry.0.push_str(value);
+                        if let Some(value) = tool["id"].as_str().filter(|v| !v.is_empty()) {
+                            if !entry.0.is_empty() && entry.0 != value {
+                                return Err(EvidenceConflict(
+                                    "同一流式工具调用出现冲突 ID，关联未确认",
+                                )
+                                .into());
+                            }
+                            entry.0 = value.to_owned();
                         }
-                        if let Some(value) = tool["function"]["name"].as_str() {
-                            entry.1.push_str(value);
+                        if let Some(value) =
+                            tool["function"]["name"].as_str().filter(|v| !v.is_empty())
+                        {
+                            if !entry.1.is_empty() && entry.1 != value {
+                                return Err(EvidenceConflict(
+                                    "同一流式工具调用出现冲突名称，关联未确认",
+                                )
+                                .into());
+                            }
+                            entry.1 = value.to_owned();
                         }
                         if let Some(value) = tool["function"]["arguments"].as_str() {
                             entry.2.push_str(value);

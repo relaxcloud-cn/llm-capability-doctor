@@ -5,14 +5,12 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub const CHECK_VERSION: &str = "agentcheck/2";
-pub const RESULT_SCHEMA_VERSION: u32 = 1;
+pub const CHECK_VERSION: &str = "agentcheck/6";
+pub const RESULT_SCHEMA_VERSION: u32 = 2;
 pub const MIN_CONTEXT_TOKENS: u64 = 131_072;
-pub const CONCURRENCY_LEVELS: [usize; 6] = [1, 2, 4, 8, 16, 32];
 pub const OMP_VERSION: &str = env!("AGENTCHECK_OMP_VERSION");
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CheckId {
     Response,
     Tools,
@@ -22,6 +20,26 @@ pub enum CheckId {
     Continuous,
     Recovery,
     Multiturn,
+    Custom(u32),
+}
+impl Serialize for CheckId {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.key())
+    }
+}
+impl<'de> Deserialize<'de> for CheckId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let key = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|id| id.key() == key)
+            .or_else(|| {
+                key.strip_prefix("custom_")
+                    .and_then(|s| s.parse().ok())
+                    .map(Self::Custom)
+            })
+            .ok_or_else(|| serde::de::Error::custom("未知检测编号"))
+    }
 }
 impl CheckId {
     pub const ALL: [Self; 8] = [
@@ -34,6 +52,19 @@ impl CheckId {
         Self::Recovery,
         Self::Multiturn,
     ];
+    pub fn key(self) -> String {
+        match self {
+            Self::Response => "response".into(),
+            Self::Tools => "tools".into(),
+            Self::Schema => "schema".into(),
+            Self::Context => "context".into(),
+            Self::Performance => "performance".into(),
+            Self::Continuous => "continuous".into(),
+            Self::Recovery => "recovery".into(),
+            Self::Multiturn => "multiturn".into(),
+            Self::Custom(id) => format!("custom_{id}"),
+        }
+    }
     pub fn name(self) -> &'static str {
         match self {
             Self::Response => "接口与响应",
@@ -44,6 +75,7 @@ impl CheckId {
             Self::Continuous => "连续工具执行",
             Self::Recovery => "工具故障恢复",
             Self::Multiturn => "多轮继续执行",
+            Self::Custom(_) => "扩展检测",
         }
     }
     pub fn is_agent(self) -> bool {
@@ -104,6 +136,8 @@ pub struct CheckResult {
     pub findings: Vec<Finding>,
     #[serde(default)]
     pub tasks: Vec<TaskResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assessment: Option<crate::judgment::Assessment>,
 }
 impl CheckResult {
     pub fn pending(id: CheckId) -> Self {
@@ -117,6 +151,7 @@ impl CheckResult {
             facts: BTreeMap::new(),
             findings: vec![],
             tasks: vec![],
+            assessment: None,
         }
     }
 }
@@ -176,9 +211,18 @@ pub struct RunResult {
     pub checks: Vec<CheckResult>,
     pub report_path: Option<String>,
     pub baseline_version: Option<String>,
+    #[serde(default)]
+    pub plan: Vec<crate::judgment::CheckSpec>,
+    #[serde(default)]
+    pub evidence: crate::judgment::EvidenceIndex,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<crate::judgment::Decision>,
 }
 impl RunResult {
     pub fn new(target: Target) -> Self {
+        Self::with_plan(target, crate::registry::builtin_specs())
+    }
+    pub fn with_plan(target: Target, plan: Vec<crate::judgment::CheckSpec>) -> Self {
         Self {
             schema_version: RESULT_SCHEMA_VERSION,
             check_version: CHECK_VERSION.into(),
@@ -194,18 +238,43 @@ impl RunResult {
             elapsed_ms: 0,
             cancelled: false,
             verdict: Verdict::Incomplete,
-            checks: CheckId::ALL.into_iter().map(CheckResult::pending).collect(),
+            checks: plan
+                .iter()
+                .map(|spec| CheckResult::pending(spec.id))
+                .collect(),
             report_path: None,
             baseline_version: None,
+            plan,
+            evidence: Default::default(),
+            decision: None,
         }
     }
     pub fn update(&mut self, result: CheckResult) {
         if let Some(slot) = self.checks.iter_mut().find(|c| c.id == result.id) {
             *slot = result;
         }
+        self.refresh_decision();
+    }
+    pub fn refresh_decision(&mut self) {
         self.verdict = self.compute_verdict();
+        if self.schema_version >= 2 {
+            self.decision = Some(crate::judgment::aggregate(&self.plan, &self.checks));
+        }
+    }
+    pub fn check_name(&self, id: CheckId) -> &str {
+        self.plan
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| s.name.as_str())
+            .unwrap_or_else(|| id.name())
     }
     pub fn compute_verdict(&self) -> Verdict {
+        if self.schema_version >= 2 {
+            return crate::judgment::aggregate(&self.plan, &self.checks).verdict;
+        }
+        self.legacy_verdict()
+    }
+    fn legacy_verdict(&self) -> Verdict {
         if self.checks.iter().any(|c| {
             c.status == Status::Failed || c.tasks.iter().any(|t| t.status == Status::Failed)
         }) {
@@ -302,11 +371,15 @@ mod tests {
     use super::*;
     use crate::config::Protocol;
     fn run() -> RunResult {
-        RunResult::new(Target {
+        let mut run = RunResult::new(Target {
             model: "m".into(),
             endpoint: "http://localhost/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
-        })
+        });
+        run.schema_version = 1;
+        run.check_version = "agentcheck/5".into();
+        run.plan.clear();
+        run
     }
     #[test]
     fn failure_survives_cancellation_and_missing_results() {

@@ -1,12 +1,12 @@
 use crate::{
-    checks,
     config::ModelConfig,
-    measure,
+    judgment,
     model::{
         CheckId, CheckResult, EventEnvelope, FailureOrigin, Finding, RunEvent, RunResult, Status,
         TaskResult,
     },
     omp,
+    registry::{CheckContext, Registration, Registry},
     transport::Transport,
 };
 use anyhow::Result;
@@ -47,13 +47,13 @@ pub fn atomic_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
 }
-fn aggregate(kind: CheckId, tasks: Vec<TaskResult>) -> CheckResult {
+fn aggregate(kind: CheckId, tasks: Vec<TaskResult>, repetitions: u8) -> CheckResult {
     let failed = tasks.iter().any(|t| t.status == Status::Failed);
-    let all = tasks.len() == 2
-        && [1, 2].iter().all(|run| {
+    let all = tasks.len() == repetitions as usize
+        && (1..=repetitions).all(|run| {
             tasks
                 .iter()
-                .any(|t| t.repetition == *run && t.status == Status::Passed)
+                .any(|t| t.repetition == run && t.status == Status::Passed)
         });
     let status = if failed {
         Status::Failed
@@ -62,7 +62,7 @@ fn aggregate(kind: CheckId, tasks: Vec<TaskResult>) -> CheckResult {
     } else {
         Status::Incomplete
     };
-    let finished = tasks.len() == 2 && tasks.iter().all(|t| t.finished);
+    let finished = tasks.len() == repetitions as usize && tasks.iter().all(|t| t.finished);
     let title = if all {
         match kind {
             CheckId::Continuous => "连续执行多个工具，任务结果正确",
@@ -78,7 +78,7 @@ fn aggregate(kind: CheckId, tasks: Vec<TaskResult>) -> CheckResult {
             .map(|t| t.title.clone())
             .unwrap_or_else(|| {
                 format!(
-                    "等待下次执行，已完成 {} / 2 次",
+                    "等待下次执行，已完成 {} / {repetitions} 次",
                     tasks.iter().filter(|t| t.finished).count()
                 )
             })
@@ -93,6 +93,7 @@ fn aggregate(kind: CheckId, tasks: Vec<TaskResult>) -> CheckResult {
         facts: BTreeMap::new(),
         findings: tasks.iter().flat_map(|t| t.findings.clone()).collect(),
         tasks,
+        assessment: None,
     }
 }
 fn blocked_check(id: CheckId, message: String) -> CheckResult {
@@ -132,15 +133,13 @@ pub struct EngineOutput {
     pub run: RunResult,
     pub directory: PathBuf,
 }
-pub const DIRECT_BUDGET: Duration = Duration::from_secs(2880);
+pub const DIRECT_BUDGET: Duration = Duration::from_secs(5400);
 pub fn interface_deadline(id: CheckId, stage_deadline: Instant) -> Instant {
-    let seconds = match id {
-        CheckId::Response | CheckId::Tools => 360,
-        CheckId::Schema => 180,
-        CheckId::Context => 900,
-        CheckId::Performance => 1080,
-        _ => 180,
-    };
+    let seconds = crate::registry::builtin_specs()
+        .into_iter()
+        .find(|s| s.id == id)
+        .map(|s| s.budget_seconds)
+        .unwrap_or(180);
     stage_deadline.min(Instant::now() + Duration::from_secs(seconds))
 }
 pub async fn run(
@@ -149,6 +148,66 @@ pub async fn run(
     cancel: CancellationToken,
     sender: Option<UnboundedSender<EventEnvelope>>,
 ) -> Result<EngineOutput> {
+    run_with_registry(config, root, cancel, sender, Registry::builtin()).await
+}
+fn adjudicate(
+    registration: &Registration,
+    check: &mut CheckResult,
+    run: &mut RunResult,
+    directory: &Path,
+    config: &ModelConfig,
+) -> Result<()> {
+    atomic_json(
+        &directory
+            .join("observations")
+            .join(format!("{}.json", check.id.key())),
+        check,
+    )?;
+    run.evidence = judgment::index_evidence(directory)?;
+    let evaluation =
+        match (registration.evaluate)(&registration.spec, check, directory, &run.evidence) {
+            Ok(evaluation) => evaluation,
+            Err(error) => judgment::Evaluation {
+                claims: registration
+                    .spec
+                    .requirements
+                    .iter()
+                    .filter(|r| r.required)
+                    .map(|r| judgment::Claim {
+                        requirement: r.id.clone(),
+                        validity: judgment::Validity::Insufficient,
+                        outcome: judgment::Outcome::Unknown,
+                        reason: format!("检测证据核对受阻：{}", config.redact(&error.to_string())),
+                        expected: serde_json::Value::Null,
+                        observed: serde_json::Value::Null,
+                        evidence_ids: vec![format!("file:observations/{}.json", check.id.key())],
+                        origin: Some(FailureOrigin::Detector),
+                        condition: None,
+                    })
+                    .collect(),
+                facts: Default::default(),
+            },
+        };
+    check.facts = evaluation.facts;
+    judgment::seal(
+        &registration.spec,
+        check,
+        evaluation.claims,
+        directory,
+        &run.evidence,
+    )?;
+    // task-result.json stays the executor's raw record; adjudicated fields live
+    // in the check assessment, so indexed evidence must not be rewritten here.
+    Ok(())
+}
+pub async fn run_with_registry(
+    config: ModelConfig,
+    root: &Path,
+    cancel: CancellationToken,
+    sender: Option<UnboundedSender<EventEnvelope>>,
+    registry: Registry,
+) -> Result<EngineOutput> {
+    let registry = Registry::new(registry.entries)?;
     std::fs::create_dir_all(root)?;
     let lease = std::fs::OpenOptions::new()
         .create(true)
@@ -162,46 +221,42 @@ pub async fn run(
     let started = Instant::now();
     let overall_deadline = started + DIRECT_BUDGET + Duration::from_secs(780);
     let bus = EventBus { started, sender };
-    let mut run = RunResult::new(config.public_target());
+    let mut run = RunResult::with_plan(config.public_target(), registry.plan());
     let directory = std::path::absolute(root.join(&run.id))?;
     std::fs::create_dir_all(&directory)?;
     atomic_json(&directory.join("result.json"), &run)?;
     bus.emit(RunEvent::Started { run: run.clone() });
     let transport = Transport::new(config.clone(), &directory.join("http"), cancel.clone())?;
     let direct_deadline = started + DIRECT_BUDGET;
-    for id in [
-        CheckId::Response,
-        CheckId::Tools,
-        CheckId::Schema,
-        CheckId::Context,
-        CheckId::Performance,
-    ] {
+    for registration in registry.entries.iter().filter(|e| e.execute.is_some()) {
+        let id = registration.spec.id;
         if cancel.is_cancelled() || Instant::now() >= direct_deadline {
             break;
         }
         bus.emit(RunEvent::CheckStarted { id });
         bus.emit(RunEvent::Step {
             id,
-            message: match id {
-                CheckId::Response => "检查普通响应、流式响应和结束状态",
-                CheckId::Tools => "检查工具选择与参数，回传结果并核对使用情况",
-                CheckId::Schema => "发送指定格式要求，核对结构与字段",
-                CheckId::Context => "探测上下文边界和实际 token 计量",
-                _ => "逐级探测 1、2、4、8、16、32 并发，记录实际成功数与限流",
-            }
-            .into(),
+            message: registration.spec.scope.clone(),
         });
-        let deadline = interface_deadline(id, direct_deadline);
+        let deadline = direct_deadline
+            .min(Instant::now() + Duration::from_secs(registration.spec.budget_seconds));
         let progress = |message| bus.emit(RunEvent::Step { id, message });
-        let outcome = match id {
-            CheckId::Response => checks::response(&transport, deadline).await,
-            CheckId::Tools => checks::tools(&transport, deadline).await,
-            CheckId::Schema => checks::schema(&transport, deadline).await,
-            CheckId::Context => measure::context(&transport, deadline).await,
-            _ => measure::performance_with_progress(&transport, deadline, Some(&progress)).await,
+        let execution = (registration.execute.unwrap())(CheckContext {
+            spec: &registration.spec,
+            directory: &directory,
+            transport: &transport,
+            deadline,
+            progress: Some(&progress),
+        });
+        let outcome = tokio::select! {
+            biased;
+            result=execution=>result,
+            _=cancel.cancelled()=>Err(anyhow::anyhow!("检测已取消，保留已有证据")),
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(deadline))=>Err(anyhow::anyhow!("检测执行预算已耗尽")),
         };
-        let check =
+        let mut check =
             outcome.unwrap_or_else(|error| blocked_check(id, config.redact(&error.to_string())));
+        adjudicate(registration, &mut check, &mut run, &directory, &config)?;
         run.update(check.clone());
         atomic_json(&directory.join("result.json"), &run)?;
         bus.emit(RunEvent::CheckFinished { check });
@@ -215,16 +270,31 @@ pub async fn run(
         timeout_cancel.cancel();
     });
     let mut tasks: BTreeMap<CheckId, Vec<TaskResult>> = BTreeMap::new();
-    for pair in [
-        [(CheckId::Continuous, 1), (CheckId::Recovery, 1)],
-        [(CheckId::Multiturn, 1), (CheckId::Continuous, 2)],
-        [(CheckId::Recovery, 2), (CheckId::Multiturn, 2)],
-    ] {
+    let agent_definitions: Vec<_> = registry
+        .entries
+        .iter()
+        .filter(|e| e.execute.is_none())
+        .collect();
+    let repetitions = agent_definitions
+        .iter()
+        .map(|e| e.spec.repetitions)
+        .max()
+        .unwrap_or(0);
+    let jobs: Vec<_> = (1..=repetitions)
+        .flat_map(|repetition| {
+            agent_definitions
+                .iter()
+                .filter(move |e| e.spec.repetitions >= repetition)
+                .map(move |e| (*e, repetition))
+        })
+        .collect();
+    for pair in jobs.chunks(2) {
         if stage_cancel.is_cancelled() || Instant::now() >= stage_deadline {
             break;
         }
         let mut futures = FuturesUnordered::new();
-        for (kind, repetition) in pair {
+        for &(registration, repetition) in pair {
+            let kind = registration.spec.id;
             if !tasks.contains_key(&kind) {
                 bus.emit(RunEvent::CheckStarted { id: kind });
             }
@@ -267,12 +337,16 @@ pub async fn run(
                     finding.title = task.title.clone();
                 }
             }
-            bus.emit(RunEvent::TaskFinished { task: task.clone() });
             tasks.entry(kind).or_default().push(task);
-            let check = aggregate(kind, tasks[&kind].clone());
+            let registration = registry.entries.iter().find(|e| e.spec.id == kind).unwrap();
+            let mut check = aggregate(kind, tasks[&kind].clone(), registration.spec.repetitions);
+            adjudicate(registration, &mut check, &mut run, &directory, &config)?;
+            if let Some(task) = check.tasks.iter().find(|t| t.repetition == repetition) {
+                bus.emit(RunEvent::TaskFinished { task: task.clone() });
+            }
             run.update(check.clone());
             atomic_json(&directory.join("result.json"), &run)?;
-            if check.tasks.len() == 2 {
+            if check.tasks.len() == registration.spec.repetitions as usize {
                 bus.emit(RunEvent::CheckFinished { check });
             } else {
                 bus.emit(RunEvent::CheckProgress { check });
@@ -295,7 +369,7 @@ pub async fn run(
     run.cancelled = cancel.is_cancelled();
     run.elapsed_ms = started.elapsed().as_millis() as u64;
     run.finished_at = Some(chrono::Utc::now());
-    run.verdict = run.compute_verdict();
+    run.refresh_decision();
     atomic_json(&directory.join("result.json"), &run)?;
     bus.emit(RunEvent::ReportStarted);
     let mut report = tokio::process::Command::new(std::env::current_exe()?);

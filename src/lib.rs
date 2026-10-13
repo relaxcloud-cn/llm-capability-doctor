@@ -1,12 +1,16 @@
+pub mod assessment;
 pub mod checks;
+pub mod concurrency;
 pub mod config;
 pub mod dataset;
 pub mod engine;
 pub mod gui;
+pub mod judgment;
 pub mod measure;
 pub mod model;
 pub mod omp;
 pub mod preflight;
+pub mod registry;
 pub mod report;
 pub mod runtime;
 pub mod store;

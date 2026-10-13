@@ -31,6 +31,7 @@ fn result(
         facts,
         findings,
         tasks: vec![],
+        assessment: None,
     }
 }
 fn problem(
@@ -63,6 +64,9 @@ fn rejected(
 ) -> Option<CheckResult> {
     let (status, title, origin) = if let Some(failure) = &outcome.failure {
         match failure {
+            RequestFailure::EvidenceConflict(_) => {
+                (Status::Incomplete, failure.title(), FailureOrigin::Detector)
+            }
             RequestFailure::StageBudget => (
                 Status::Incomplete,
                 "检测阶段预算已耗尽".into(),
@@ -271,164 +275,166 @@ pub async fn tools(transport: &Transport, deadline: Instant) -> Result<CheckResu
         json!({"name":"get_service_time","description":"查询服务当前时间，不能查询记录","strict":true,"parameters":{"type":"object","properties":{"timezone":{"type":"string","enum":["UTC"]}},"required":["timezone"],"additionalProperties":false}}),
     ];
     let mut messages = json!([{"role":"user","content":format!("请使用适合的工具查询这些记录的负责人和版本，并把查询到的原始记录以 {{\"records\":[...]}} JSON 输出，不新增其他字段：{}。",ids.iter().cloned().collect::<Vec<_>>().join("、"))}]);
-    let mut first_body = messages_body(cfg, messages.clone(), 4096, true);
-    add_tools(&mut first_body, cfg.protocol, &definitions);
-    let first = transport.send(first_body, true, deadline).await?;
-    evidence.push(first.evidence.id.clone());
-    if let Some(result) = rejected(id, started, &first, evidence.clone()) {
-        return Ok(result);
-    }
-    let response = first.response.as_ref().unwrap();
-    if response.calls.is_empty() {
-        return Ok(semantic_failure(
-            id,
-            started,
-            "没有调用任务所需的工具",
-            "响应没有提供工具调用".into(),
-            evidence,
-        ));
-    }
     let mut queried = BTreeSet::new();
-    let mut outputs = vec![];
-    for call in &response.calls {
-        if call.name != "get_records" {
-            return Ok(semantic_failure(
-                id,
-                started,
-                "选择的工具不符合任务要求",
-                format!("调用了 {}，本次需要查询记录", call.name),
-                evidence,
-            ));
+    let mut call_count = 0usize;
+    for turn in 0..32 {
+        if transport.is_cancelled() || Instant::now() >= deadline {
+            break;
         }
-        let args = match serde_json::from_value::<LookupArgs>(call.arguments.clone()) {
-            Ok(args) => args,
-            Err(_) => {
+        let stream = turn == 0;
+        let mut body = messages_body(cfg, messages.clone(), 4096, stream);
+        add_tools(&mut body, cfg.protocol, &definitions);
+        let outcome = transport.send(body, stream, deadline).await?;
+        evidence.push(outcome.evidence.id.clone());
+        if let Some(check) = rejected(id, started, &outcome, evidence.clone()) {
+            return Ok(check);
+        }
+        let response = outcome.response.as_ref().unwrap();
+        if response.calls.is_empty() {
+            if queried != ids {
                 return Ok(semantic_failure(
                     id,
                     started,
-                    "工具参数结构或字段不正确",
-                    format!("调用 {} 的参数未满足工具定义", call.id),
+                    "任务结束前未查询完整的指定记录",
+                    "没有实际查询全部指定记录的工具证据".into(),
                     evidence,
                 ));
             }
-        };
-        let _ = args.query.kind;
-        if args.query.ids.is_empty()
-            || args.query.ids.iter().any(|value| !ids.contains(value))
-            || args.query.ids.iter().collect::<BTreeSet<_>>().len() != args.query.ids.len()
-        {
-            return Ok(semantic_failure(
+            let Some(actual) = parse_record_payload(&response.text, true).ok() else {
+                let title = "工具结果使用情况尚未确认";
+                let finding = problem(
+                    "tool_answer_unverified",
+                    title,
+                    "工具选择、参数和回传正常，但最终回答没有可独立比较的记录内容",
+                    FailureOrigin::ModelOutput,
+                    &evidence,
+                );
+                return Ok(result(
+                    id,
+                    started,
+                    Status::Incomplete,
+                    title,
+                    evidence,
+                    BTreeMap::new(),
+                    vec![finding],
+                ));
+            };
+            if !compare_records(&expected, &actual).passed {
+                return Ok(semantic_failure(
+                    id,
+                    started,
+                    "工具结果没有被正确用于后续回答",
+                    "最终输出没有完整保留正确的记录字段".into(),
+                    evidence,
+                ));
+            }
+            return Ok(result(
                 id,
                 started,
-                "工具参数没有对应正确的记录 ID",
-                format!("调用 {} 的查询范围与要求不符", call.id),
+                Status::Passed,
+                "工具选择、参数和结果使用均正确",
                 evidence,
+                BTreeMap::from([
+                    ("tool_call_count".into(), json!(call_count)),
+                    ("validated_ids".into(), json!(ids)),
+                    ("interaction_rounds".into(), json!(turn + 1)),
+                ]),
+                vec![],
             ));
         }
-        let output = RecordFile {
-            records: selected
-                .iter()
-                .filter(|r| args.query.ids.contains(&r.id))
-                .cloned()
-                .collect(),
-        };
-        queried.extend(args.query.ids);
-        outputs.push((call.id.clone(), serde_json::to_string(&output)?));
-    }
-    if queried != ids {
-        return Ok(semantic_failure(
-            id,
-            started,
-            "工具查询遗漏了指定记录",
-            "工具调用未覆盖全部要求查询的记录".into(),
-            evidence,
-        ));
-    }
-    match cfg.protocol {
-        Protocol::ChatCompletions => {
-            messages
-                .as_array_mut()
-                .unwrap()
-                .push(response.wire["choices"][0]["message"].clone());
-            for (call_id, output) in outputs {
+        let mut outputs = vec![];
+        for call in &response.calls {
+            if call.name != "get_records" {
+                return Ok(semantic_failure(
+                    id,
+                    started,
+                    "选择的工具不符合任务要求",
+                    format!("调用了 {}，本次需要查询记录", call.name),
+                    evidence,
+                ));
+            }
+            let args = match serde_json::from_value::<LookupArgs>(call.arguments.clone()) {
+                Ok(args) => args,
+                Err(_) => {
+                    return Ok(semantic_failure(
+                        id,
+                        started,
+                        "工具参数结构或字段不正确",
+                        format!("调用 {} 的参数未满足工具定义", call.id),
+                        evidence,
+                    ));
+                }
+            };
+            let _ = args.query.kind;
+            if args.query.ids.is_empty()
+                || args.query.ids.iter().any(|value| !ids.contains(value))
+                || args.query.ids.iter().collect::<BTreeSet<_>>().len() != args.query.ids.len()
+            {
+                return Ok(semantic_failure(
+                    id,
+                    started,
+                    "工具参数没有对应正确的记录 ID",
+                    format!("调用 {} 的查询范围与要求不符", call.id),
+                    evidence,
+                ));
+            }
+            let output = RecordFile {
+                records: selected
+                    .iter()
+                    .filter(|r| args.query.ids.contains(&r.id))
+                    .cloned()
+                    .collect(),
+            };
+            queried.extend(args.query.ids);
+            call_count += 1;
+            outputs.push((call.id.clone(), serde_json::to_string(&output)?));
+        }
+        match cfg.protocol {
+            Protocol::ChatCompletions => {
                 messages
                     .as_array_mut()
                     .unwrap()
-                    .push(json!({"role":"tool","tool_call_id":call_id,"content":output}));
+                    .push(response.wire["choices"][0]["message"].clone());
+                for (call_id, output) in outputs {
+                    messages
+                        .as_array_mut()
+                        .unwrap()
+                        .push(json!({"role":"tool","tool_call_id":call_id,"content":output}));
+                }
+            }
+            Protocol::Responses => {
+                // Preserve reasoning and function-call items exactly as the API requires.
+                messages.as_array_mut().unwrap().extend(
+                    response.wire["output"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .cloned(),
+                );
+                for (call_id, output) in outputs {
+                    messages.as_array_mut().unwrap().push(
+                        json!({"type":"function_call_output","call_id":call_id,"output":output}),
+                    );
+                }
             }
         }
-        Protocol::Responses => {
-            // Preserve reasoning and function-call items exactly as the API requires.
-            messages.as_array_mut().unwrap().extend(
-                response.wire["output"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
-            for (call_id, output) in outputs {
-                messages
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"type":"function_call_output","call_id":call_id,"output":output}));
-            }
-        }
     }
-    let mut next_body = messages_body(cfg, messages, 4096, false);
-    add_tools(&mut next_body, cfg.protocol, &definitions);
-    let follow = transport.send(next_body, false, deadline).await?;
-    evidence.push(follow.evidence.id.clone());
-    if let Some(result) = rejected(id, started, &follow, evidence.clone()) {
-        return Ok(result);
-    }
-    let response = follow.response.as_ref().unwrap();
-    let actual = crate::dataset::parse_record_payload(&response.text, true).ok();
-    if actual.is_none() && response.calls.is_empty() {
-        let title = "工具结果使用情况尚未确认";
-        let finding = problem(
-            "tool_answer_unverified",
-            title,
-            "工具选择、参数和回传正常，但后续回答没有可独立比较的记录内容",
-            FailureOrigin::ModelOutput,
-            &evidence,
-        );
-        return Ok(result(
-            id,
-            started,
-            Status::Incomplete,
-            title,
-            evidence,
-            BTreeMap::new(),
-            vec![finding],
-        ));
-    }
-    if !response.calls.is_empty()
-        || actual
-            .as_ref()
-            .is_none_or(|v| !compare_records(&expected, v).passed)
-    {
-        return Ok(semantic_failure(
-            id,
-            started,
-            "工具结果没有被正确用于后续回答",
-            "回传记录之后，最终输出没有完整保留正确的记录字段".into(),
-            evidence,
-        ));
-    }
+    let title = "工具交互预算已到或检测已取消，完整结果未确认";
+    let finding = problem(
+        "tool_interaction_budget",
+        title,
+        "最多 32 轮交互，并共享本项时间预算；未把尚未完成的调用序列判为模型失败",
+        FailureOrigin::Detector,
+        &evidence,
+    );
     Ok(result(
         id,
         started,
-        Status::Passed,
-        "工具选择、参数和结果使用均正确",
+        Status::Incomplete,
+        title,
         evidence,
-        BTreeMap::from([
-            (
-                "tool_call_count".into(),
-                json!(first.response.as_ref().unwrap().calls.len()),
-            ),
-            ("validated_ids".into(), json!(ids)),
-        ]),
-        vec![],
+        BTreeMap::from([("tool_call_count".into(), json!(call_count))]),
+        vec![finding],
     ))
 }
 pub fn record_schema(records: &RecordFile) -> Value {

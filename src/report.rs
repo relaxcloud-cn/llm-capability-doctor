@@ -61,7 +61,7 @@ fn build_archive(directory: &Path, run: &mut RunResult, finalize: bool) -> Resul
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o600);
     let mut paths = vec![];
-    for name in ["http", "agent"] {
+    for name in ["http", "agent", "observations"] {
         let path = directory.join(name);
         if path.is_dir() {
             files(&path, directory, &mut paths)?;
@@ -108,21 +108,16 @@ fn build_archive(directory: &Path, run: &mut RunResult, finalize: bool) -> Resul
     }
     zip.start_file("result.json", options)?;
     zip.write_all(&serde_json::to_vec_pretty(run)?)?;
+    if run.schema_version >= 2 {
+        zip.start_file("evidence-index.json", options)?;
+        zip.write_all(&serde_json::to_vec_pretty(&run.evidence)?)?;
+    }
     zip.start_file("README.txt", options)?;
     zip.write_all("本包来自对应检测编号的实际记录。请求、原始响应、工具过程、来源快照和最终文件均按目录保留。密钥已脱敏；重放时从 MODEL_API_KEY 环境变量提供密钥。地址中脱敏的查询参数需要由技术人员按原配置补足。报告生成阶段没有调用任何模型。\n".as_bytes())?;
     Ok(zip.finish()?.into_inner())
 }
-fn name(id: CheckId) -> &'static str {
-    match id {
-        CheckId::Response => "response",
-        CheckId::Tools => "tools",
-        CheckId::Schema => "schema",
-        CheckId::Context => "context",
-        CheckId::Performance => "performance",
-        CheckId::Continuous => "continuous",
-        CheckId::Recovery => "recovery",
-        CheckId::Multiturn => "multiturn",
-    }
+fn name(id: CheckId) -> String {
+    id.key()
 }
 fn note(id: CheckId) -> &'static str {
     match id {
@@ -130,10 +125,11 @@ fn note(id: CheckId) -> &'static str {
         CheckId::Tools => "检查工具选择、参数和结果使用",
         CheckId::Schema => "分别核对内容正确性与原生 JSON 格式；单一代码块可兼容解析",
         CheckId::Context => "探测模型支持的最大上下文长度",
-        CheckId::Performance => "逐级探测当前服务的并发请求能力，保留成功数、限流和耗时",
+        CheckId::Performance => "翻倍增加并发，结合请求正确率与响应耗时给出粗略建议档位",
         CheckId::Continuous => "检查多个工具步骤能否衔接并完成任务",
         CheckId::Recovery => "检查工具临时出错后能否恢复并完成任务",
         CheckId::Multiturn => "检查新增要求后的任务继续与结果更新",
+        CheckId::Custom(_) => "按本次注册的要求和证据进行检测",
     }
 }
 fn observation(check: &crate::model::CheckResult) -> Value {
@@ -265,20 +261,56 @@ fn issues(run: &RunResult) -> String {
     if cards.is_empty() {
         cards="<article class=\"error-block\"><div class=\"error-head\"><h3>本次检测未发现阻止接入的问题</h3></div><p>建议按本次验证的协议、版本和负载接入，并保留本次检测记录。</p></article>".into();
     }
-    if let Some(rounds) = run
+    if let Some((check, rounds)) = run
         .checks
         .iter()
         .find(|c| c.id == CheckId::Performance)
-        .and_then(|c| c.facts.get("rounds"))
-        .and_then(Value::as_array)
+        .and_then(|c| {
+            c.facts
+                .get("rounds")
+                .and_then(Value::as_array)
+                .map(|rounds| (c, rounds))
+        })
     {
-        cards.push_str("<article class=\"error-block incomplete\"><h3>并发逐级探测记录</h3><p>短 JSON 回显负载，每个请求仅尝试一次，超时 180 秒。显示本次最高成功档位；不代表模型内部并行推理数，也不代表已确认唯一最大并发数。</p><table style=\"width:100%;text-align:left\"><thead><tr><th>并发</th><th>成功</th><th>失败</th><th>限流</th><th>最长用时</th><th>平均用时</th></tr></thead><tbody>");
+        cards.push_str("<article class=\"error-block incomplete\"><h3>并发逐级探测记录</h3><p>短 JSON 回显负载，每个请求仅尝试一次，单请求最长等待 180 秒。耗时从发出请求到收到完整响应计算，不是首 token 延迟。</p>");
+        if let (Some(mean), Some(tail)) = (
+            check
+                .facts
+                .get("max_mean_elapsed_ms")
+                .and_then(Value::as_f64),
+            check
+                .facts
+                .get("max_tail_elapsed_ms")
+                .and_then(Value::as_f64),
+        ) {
+            cards.push_str(&format!("<p>合格标准：全部请求正确完成，平均 ≤ {} 秒、P95 ≤ {} 秒；少于 20 个请求时用最慢耗时代替 P95。P95 按耗时排序后的 nearest-rank 计算。180 秒仅为硬超时。翻倍升档，首次请求失败或响应过慢即停止，建议上一档；不测精确极限。</p>", mean / 1000.0, tail / 1000.0));
+        } else {
+            cards.push_str(
+                "<p>历史记录未设置响应时间合格阈值，保留当时结论，不按新标准重新判定。</p>",
+            );
+        }
+        cards.push_str("<table style=\"width:100%;text-align:left\"><thead><tr><th>阶段</th><th>并发</th><th>成功</th><th>失败</th><th>限流</th><th>最长用时</th><th>平均用时</th><th>P95 / 小样本最慢</th><th>判定</th></tr></thead><tbody>");
         for round in rounds {
-            cards.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2} 秒</td><td>{:.2} 秒</td></tr>",
+            let tail = match round["tail_metric"].as_str() {
+                Some("maximum") => round["longest_elapsed_ms"]
+                    .as_f64()
+                    .map(|ms| format!("最慢 {:.2} 秒", ms / 1000.0)),
+                Some("p95") => round["p95_elapsed_ms"]
+                    .as_f64()
+                    .map(|ms| format!("P95 {:.2} 秒", ms / 1000.0)),
+                _ => None,
+            }
+            .unwrap_or_else(|| "未记录".into());
+            let verdict = round["failure_reason"]
+                .as_str()
+                .map(crate::concurrency::failure_label)
+                .unwrap_or("未记录");
+            cards.push_str(&format!("<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2} 秒</td><td>{:.2} 秒</td><td>{}</td><td>{}</td></tr>",
+                match round["phase"].as_str().unwrap_or("") {"expand"=>"升档","bisect"=>"缩小区间","health_control"=>"恢复检查","confirm_usable"=>"可用档复核","confirm_rejected"=>"失败档复核",_=>"探测"},
                 round["concurrency"].as_u64().unwrap_or(0),round["successful"].as_u64().unwrap_or(0),
                 round["failed"].as_u64().unwrap_or(0),round["rate_limited"].as_u64().unwrap_or(0),
                 round["longest_elapsed_ms"].as_f64().unwrap_or(0.0)/1000.0,
-                round["mean_elapsed_ms"].as_f64().unwrap_or(0.0)/1000.0));
+                round["mean_elapsed_ms"].as_f64().unwrap_or(0.0)/1000.0, html(&tail), html(verdict)));
         }
         cards.push_str("</tbody></table></article>");
     }
@@ -293,6 +325,80 @@ fn replace_between(source: &mut String, start: &str, end: &str, replacement: &st
         + start.len();
     source.replace_range(a..b, replacement);
     Ok(())
+}
+fn evidence_details(run: &RunResult) -> String {
+    if run.schema_version < 2 {
+        return String::new();
+    }
+    let mut output = String::from(
+        "<article class=\"error-block incomplete\"><h3>判定与证据</h3><p>每项要求分别记录证据有效性和满足情况。原始文件链接适用于完整结果目录；单独分享 HTML 时，可从页尾下载 ZIP，按相同路径查看。校验和用于核对记录完整性，不代表服务自报数据经过第三方认证。</p>",
+    );
+    if let Some(decision) = &run.decision {
+        output.push_str(&format!(
+            "<p><strong>总评依据：</strong>{}</p>",
+            html(&decision.reason)
+        ));
+        for condition in &decision.conditions {
+            output.push_str(&format!(
+                "<p><strong>接入条件：</strong>{}</p>",
+                html(condition)
+            ));
+        }
+    }
+    for check in &run.checks {
+        output.push_str(&format!(
+            "<details id=\"proof-{}\"><summary>{} · {}</summary>",
+            name(check.id),
+            html(run.check_name(check.id)),
+            html(check.status.label())
+        ));
+        if let Some(spec) = run.plan.iter().find(|s| s.id == check.id) {
+            output.push_str(&format!(
+                "<p>规则版本 {} · {}</p>",
+                html(&spec.version),
+                html(&spec.scope)
+            ));
+        }
+        if let Some(assessment) = &check.assessment {
+            for requirement in &assessment.requirements {
+                let validity = match requirement.validity {
+                    crate::judgment::Validity::Verified => "证据已核验",
+                    crate::judgment::Validity::Insufficient => "证据不足",
+                    crate::judgment::Validity::Conflicting => "证据冲突",
+                };
+                let outcome = match requirement.outcome {
+                    crate::judgment::Outcome::Satisfied => "满足",
+                    crate::judgment::Outcome::Unsatisfied => "不满足",
+                    crate::judgment::Outcome::Unknown => "未确认",
+                };
+                output.push_str(&format!(
+                    "<p><strong>{}</strong>（{}）：{} · {}</p><p>{}</p><ul>",
+                    html(&requirement.title),
+                    if requirement.required {
+                        "必需"
+                    } else {
+                        "补充观察"
+                    },
+                    validity,
+                    outcome,
+                    html(&requirement.reason)
+                ));
+                for id in &requirement.evidence_ids {
+                    if let Some(reference) = run.evidence.get(id) {
+                        output.push_str(&format!("<li><a href=\"./{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a><br><small>ZIP 路径：{} · SHA-256：{}</small></li>",html(&reference.path),html(id),html(&reference.path),html(&reference.sha256)));
+                    } else {
+                        output.push_str(&format!("<li>{}：证据缺失</li>", html(id)));
+                    }
+                }
+                output.push_str("</ul>");
+            }
+        } else {
+            output.push_str("<p>尚未完成证据裁决，不作通过或失败判断。</p>");
+        }
+        output.push_str("</details>");
+    }
+    output.push_str("</article>");
+    output
 }
 pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
     let mut document =
@@ -319,9 +425,15 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
         .find(|c| c.status == Status::Failed)
         .or_else(|| run.checks.iter().find(|c| c.status != Status::Passed))
         .or_else(|| run.checks.iter().find(|c| !c.findings.is_empty()));
-    let reason = major
-        .map(|c| format!("{}：{}", c.id.name(), c.title))
-        .unwrap_or_else(|| "本次全部必测项目均达到接入要求。".into());
+    let reason = run
+        .decision
+        .as_ref()
+        .map(|d| d.reason.clone())
+        .unwrap_or_else(|| {
+            major
+                .map(|c| format!("{}：{}", run.check_name(c.id), c.title))
+                .unwrap_or_else(|| "本次全部必测项目均达到接入要求。".into())
+        });
     let suggestion = if run.verdict == Verdict::Passed {
         "建议按本次验证的协议、版本和负载接入。"
     } else if run.verdict == Verdict::Failed {
@@ -365,14 +477,14 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
         &mut document,
         "   <article class=\"error-block\"",
         " </section>",
-        &format!("{}\n", issues(run)),
+        &format!("{}\n{}\n", issues(run), evidence_details(run)),
     )
     .or_else(|_| {
         replace_between(
             &mut document,
             "  <article class=\"error-block\"",
             " </section>",
-            &format!("{}\n", issues(run)),
+            &format!("{}\n{}\n", issues(run), evidence_details(run)),
         )
     })?;
     document = document.replace("1 项需要处理", &format!("{attention} 项需关注"));
@@ -392,7 +504,11 @@ pub fn render(run: &RunResult, zip: &[u8]) -> Result<String> {
         "const modeControl=document.getElementById('reference-mode');",
         "const modeControl={value:'missing',addEventListener(){}};",
     );
-    let data:Vec<_>=run.checks.iter().map(|check|json!({"id":name(check.id),"group":if check.id.is_agent(){"智能体任务检测"}else{"模型接口检测"},"name":check.id.name(),"note":note(check.id),"customer":observation(check),"official":{"title":"暂无实测数据","status":"incomplete"},"agent":check.id.is_agent()})).collect();
+    let data:Vec<_>=run.checks.iter().map(|check| {
+        let spec=run.plan.iter().find(|s|s.id==check.id);
+        let agent=spec.map(|s|s.group==crate::judgment::CheckGroup::Agent).unwrap_or_else(||check.id.is_agent());
+        json!({"id":name(check.id),"group":if agent{"智能体任务检测"}else{"模型接口检测"},"name":run.check_name(check.id),"note":spec.map(|s|s.scope.as_str()).unwrap_or_else(||note(check.id)),"customer":observation(check),"official":{"title":"暂无实测数据","status":"incomplete"},"agent":agent})
+    }).collect();
     let start = document
         .find("const checks=")
         .context("报告检测数据入口缺失")?;
@@ -451,6 +567,12 @@ fn atomic_file(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 pub fn write(run: &mut RunResult, directory: &Path) -> Result<()> {
+    if run.schema_version >= 2 {
+        for reference in run.evidence.values() {
+            crate::judgment::verify_reference(directory, reference)?;
+        }
+        atomic_json(&directory.join("evidence-index.json"), &run.evidence)?;
+    }
     let zip = build_archive(directory, run, true)?;
     let document = render(run, &zip)?;
     atomic_file(&directory.join("records.zip"), &zip)?;
@@ -515,4 +637,23 @@ fn report_preserves_compatibility_notes_and_concurrency_probe_boundaries() {
     assert!(html.contains("并发逐级探测记录"));
     assert!(html.contains("已达本次探测上限，最大值未确认"));
     assert!(html.contains("observation.probeMode==='concurrent_requests')return observation"));
+    assert!(html.contains("历史记录未设置响应时间合格阈值"));
+    assert!(!html.contains("平均 ≤ 10 秒"));
+    let check = &mut run.checks[4];
+    check
+        .facts
+        .insert("max_mean_elapsed_ms".into(), json!(10_000));
+    check
+        .facts
+        .insert("max_tail_elapsed_ms".into(), json!(20_000));
+    check.facts.insert("rounds".into(), json!([
+        {"concurrency":16,"successful":16,"failed":0,"mean_elapsed_ms":2000,"longest_elapsed_ms":4000,"tail_metric":"maximum","failure_reason":"passed"},
+        {"concurrency":32,"successful":32,"failed":0,"mean_elapsed_ms":3000,"p95_elapsed_ms":21000,"longest_elapsed_ms":22000,"tail_metric":"p95","failure_reason":"p95_latency"}
+    ]));
+    let html = render(&run, &[]).unwrap();
+    assert!(html.contains("平均 ≤ 10 秒、P95 ≤ 20 秒"));
+    assert!(html.contains("最慢 4.00 秒"));
+    assert!(html.contains("P95 21.00 秒"));
+    assert!(html.contains("响应过慢（P95 耗时超标）"));
+    assert!(!html.contains("历史记录未设置响应时间合格阈值"));
 }

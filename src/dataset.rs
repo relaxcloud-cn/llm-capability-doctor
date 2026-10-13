@@ -63,6 +63,8 @@ pub struct RecordDifference {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Validation {
     pub passed: bool,
+    #[serde(default)]
+    pub content_valid: bool,
     pub differences: Vec<RecordDifference>,
     pub process_errors: Vec<String>,
 }
@@ -187,6 +189,7 @@ pub fn compare_records(expected: &RecordFile, actual: &Value) -> Validation {
         Err(_) => {
             return Validation {
                 passed: false,
+                content_valid: false,
                 differences,
                 process_errors: vec!["结果格式、字段或类型不符合要求".into()],
             };
@@ -241,9 +244,94 @@ pub fn compare_records(expected: &RecordFile, actual: &Value) -> Validation {
     }
     Validation {
         passed: differences.is_empty() && process_errors.is_empty(),
+        content_valid: differences.is_empty() && process_errors.is_empty(),
         differences,
         process_errors,
     }
+}
+fn path_matches(path: &str, expected: &str) -> bool {
+    let path = path.replace('\\', "/");
+    if path.split('/').any(|part| part == "..") {
+        return false;
+    }
+    let path = path.split('?').next().unwrap_or(&path);
+    path == expected
+        || path.ends_with(&format!("/{expected}"))
+        || path
+            .strip_prefix(&format!("{expected}:"))
+            .is_some_and(|s| !s.is_empty())
+        || path
+            .rsplit_once(&format!("/{expected}:"))
+            .is_some_and(|(_, s)| !s.is_empty())
+}
+pub fn references_path(event: &ToolEvent, expected: &str) -> bool {
+    let argument = event
+        .arguments
+        .get("path")
+        .or_else(|| event.arguments.get("file_path"))
+        .or_else(|| event.arguments.get("filePath"))
+        .and_then(Value::as_str);
+    let resolved = event
+        .result
+        .pointer("/details/resolvedPath")
+        .or_else(|| event.result.pointer("/details/meta/source/value"))
+        .or_else(|| event.result.pointer("/details/path"))
+        .and_then(Value::as_str);
+    resolved
+        .or(argument)
+        .is_some_and(|path| path_matches(path, expected))
+}
+fn source_observed(event: &ToolEvent, expected_path: &str, source: &RecordFile) -> bool {
+    if event.is_error || !matches!(event.name.as_str(), "read" | "grep") {
+        return false;
+    }
+    let Some(targets) = event
+        .result
+        .pointer("/details/displayReadTargets")
+        .and_then(Value::as_array)
+    else {
+        return references_path(event, expected_path);
+    };
+    if !targets
+        .iter()
+        .filter_map(Value::as_str)
+        .any(|p| path_matches(p, expected_path))
+    {
+        return false;
+    }
+    let matches_source = |body: &str| {
+        serde_json::from_str::<Value>(body).is_ok_and(|v| compare_records(source, &v).passed)
+    };
+    let mut active = false;
+    let mut section = String::new();
+    let mut matched = false;
+    for text in event.result["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c["text"].as_str())
+    {
+        for line in text.lines() {
+            if let Some((path, _)) = line
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(|s| s.rsplit_once('#'))
+            {
+                matched |= active && matches_source(&section);
+                section.clear();
+                active = path_matches(path, expected_path);
+            } else if active {
+                if let Some((_, body)) = line
+                    .split_once(':')
+                    .filter(|(n, _)| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()))
+                {
+                    section.push_str(body);
+                    section.push('\n');
+                }
+            }
+        }
+    }
+    matched || (active && matches_source(&section))
 }
 /// Retain the independently held snapshot; never reconstruct expected values from mutable input files.
 pub fn validate_task(
@@ -256,10 +344,22 @@ pub fn validate_task(
     fault_delivered: bool,
 ) -> Result<Validation> {
     let mut validation = compare_records(&snapshot.expected(changes)?, output);
-    let successful_read = events.iter().any(|e| e.name == "read" && !e.is_error);
-    let successful_write = events
+    let missing_sources: Vec<_> = snapshot
+        .files
         .iter()
-        .any(|e| matches!(e.name.as_str(), "write" | "edit") && !e.is_error);
+        .filter(|(name, source)| {
+            !events
+                .iter()
+                .any(|e| source_observed(e, &format!("inputs/{name}"), source))
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+    let successful_read = missing_sources.is_empty();
+    let successful_write = events.iter().any(|e| {
+        matches!(e.name.as_str(), "write" | "edit")
+            && !e.is_error
+            && references_path(e, "result.json")
+    });
     if !normal_end {
         validation.process_errors.push("任务未正常结束".into());
     }
@@ -309,8 +409,12 @@ mod tests {
     fn event(name: &str, error: bool) -> ToolEvent {
         ToolEvent {
             call_id: format!("{name}-{error}"),
-            name: name.into(),
-            arguments: json!({}),
+            name: name.trim_end_matches(|c: char| c.is_ascii_digit()).into(),
+            arguments: if name.starts_with("read") {
+                json!({"path":format!("inputs/source-{}.json",name.strip_prefix("read").filter(|s|!s.is_empty()).unwrap_or("1"))})
+            } else {
+                json!({"path":"result.json"})
+            },
             result: json!({}),
             is_error: error,
         }
@@ -375,7 +479,12 @@ mod tests {
                 .unwrap()
                 .passed
         );
-        let events = [event("read", false), event("write", false)];
+        let events = [
+            event("read", false),
+            event("read2", false),
+            event("read3", false),
+            event("write", false),
+        ];
         assert!(
             !validate_task(
                 &s,
@@ -410,6 +519,8 @@ mod tests {
         let events = [
             event("read", true),
             event("read", false),
+            event("read2", false),
+            event("read3", false),
             event("write", false),
         ];
         assert!(
