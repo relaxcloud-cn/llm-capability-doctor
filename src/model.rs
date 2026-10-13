@@ -199,6 +199,8 @@ impl Verdict {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RunResult {
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_version: Option<String>,
     pub check_version: String,
     pub omp_version: String,
     pub id: String,
@@ -225,6 +227,7 @@ impl RunResult {
     pub fn with_plan(target: Target, plan: Vec<crate::judgment::CheckSpec>) -> Self {
         Self {
             schema_version: RESULT_SCHEMA_VERSION,
+            app_version: Some(env!("CARGO_PKG_VERSION").into()),
             check_version: CHECK_VERSION.into(),
             omp_version: OMP_VERSION.into(),
             id: format!(
