@@ -294,16 +294,18 @@ async fn respond(State(state): State<Arc<Service>>, Json(body): Json<Value>) -> 
             let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
             tokio::time::sleep(Duration::from_millis(20)).await;
             state.active.fetch_sub(1, Ordering::SeqCst);
-            if variant == "rate_limit" && active > 2 {
+            if matches!(variant, "rate_limit" | "extra_text") && active > 2 {
                 return http_response(
                     StatusCode::TOO_MANY_REQUESTS,
                     json!({"error":{"message":"limited"}}),
                 );
             }
-            text = if variant == "content_error" && number > 3 {
-                "not JSON".into()
+            text = if variant == "empty_response" && number > 3 {
+                String::new()
+            } else if variant == "extra_text" {
+                "我先简短确认一下：你好，连接正常。".into()
             } else {
-                prompt.split_once('：').unwrap().1.into()
+                "你好。".into()
             };
             include_usage = false;
         }

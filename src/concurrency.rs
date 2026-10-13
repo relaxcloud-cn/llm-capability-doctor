@@ -1,13 +1,23 @@
 //! Coarse concurrency probe: double the load and stop at the first unsuccessful wave.
 use crate::{
-    dataset::parse_record_payload,
     model::{CheckId, CheckResult, FailureOrigin, Finding, Status},
-    transport::{REQUEST_BUDGET, RequestFailure, Transport, messages_body},
+    transport::{ModelResponse, REQUEST_BUDGET, RequestFailure, Transport, messages_body},
 };
 use anyhow::Result;
 use futures_util::future::join_all;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, time::Instant};
+
+pub(crate) const PROMPT: &str = "请用一句简短的中文打个招呼。";
+pub(crate) const OUTPUT_TOKENS: u64 = 2048;
+pub(crate) const WORKLOAD: &str = "固定普通短文本请求；正常结束并返回非空文本，不要求 JSON、固定措辞或原样回显；平均及尾部耗时须达标";
+
+pub(crate) fn usable_text_response(response: &ModelResponse) -> bool {
+    response.normal_end
+        && !response.refused
+        && response.calls.is_empty()
+        && !response.text.trim().is_empty()
+}
 
 #[derive(Clone, Debug)]
 pub struct ProbeOptions {
@@ -80,8 +90,8 @@ impl Latency {
 pub(crate) fn failure_label(reason: &str) -> &str {
     match reason {
         "passed" => "达标",
-        "request_failure" => "请求未全部正确完成",
-        "invalid_response" => "响应格式或内容错误",
+        "request_failure" => "请求未全部满足本次要求",
+        "invalid_response" => "响应未满足本次有效性要求",
         "network" => "网络错误",
         "http_error" => "服务错误",
         "evidence_conflict" => "证据关联冲突",
@@ -149,14 +159,11 @@ impl Search<'_> {
         ));
         let started = Instant::now();
         let responses=join_all((0..level).map(|_|async {
-            let expected=json!({"probe_id":uuid::Uuid::new_v4().simple().to_string(),"ok":true});
-            let prompt=format!("这是并发请求测试。请原样返回以下 JSON，不增加字段或解释：{expected}");
-            let body=messages_body(self.transport.config(),json!([{"role":"user","content":prompt}]),2048,false);
+            let body=messages_body(self.transport.config(),json!([{"role":"user","content":PROMPT}]),OUTPUT_TOKENS,false);
             let dispatch=started.elapsed().as_millis() as u64;
             let outcome=self.transport.send_once(body,self.deadline).await?;
             let response=outcome.response.as_ref();
-            let valid=outcome.failure.is_none() && response.is_some_and(|r|r.normal_end && r.calls.is_empty()
-                && parse_record_payload(&r.text,true).is_ok_and(|actual|actual==expected));
+            let valid=outcome.failure.is_none() && response.is_some_and(usable_text_response);
             let reason=match &outcome.failure {
                 Some(RequestFailure::Cancelled)=>"cancelled",Some(RequestFailure::StageBudget)=>"stage_budget",
                 Some(RequestFailure::Timeout)=>"timeout",Some(RequestFailure::Http(429))=>"rate_limited",
@@ -331,12 +338,8 @@ pub async fn probe(
         ("p95_method".into(), json!("nearest_rank")),
         ("small_sample_tail".into(), json!("maximum_below_20")),
         ("first_unsuccessful_reason".into(), json!(rejected_reason)),
-        (
-            "workload".into(),
-            json!(
-                "短 JSON 回显；全部请求正确完成，且完整响应的平均和尾部耗时均达标；180 秒仅为单请求硬超时"
-            ),
-        ),
+        ("workload_type".into(), json!("short_text")),
+        ("workload".into(), json!(WORKLOAD)),
         ("verified_concurrency_lower_bound".into(), json!(low)),
         ("concurrency".into(), json!(low)),
         (
@@ -390,12 +393,12 @@ pub async fn probe(
     };
     let fact = match first_unsuccessful {
         Some(failed) if non_capacity_reason.is_some() => format!(
-            "{failed} 并发出现{}；本次在此停止。已验证档位 {low} 保留，但不能把内容、网络或证据问题解释为服务容量边界。",
+            "{failed} 并发出现{}；本次在此停止。已验证档位 {low} 保留，但不能把不完整响应、协议、网络或证据问题解释为服务容量边界。",
             failure_label(non_capacity_reason.unwrap())
         ),
         Some(failed) if low > 0 => {
             format!(
-                "{low} 并发全部正确完成且耗时达标（{}）；下一档 {failed} 并发{rejected_label}（{rejected_latency}），因此建议并发 {low}。",
+                "{low} 并发全部正常完成且耗时达标（{}）；下一档 {failed} 并发{rejected_label}（{rejected_latency}），因此建议并发 {low}。",
                 best.and_then(|r| r["latency_summary"].as_str())
                     .unwrap_or("")
             )
@@ -411,7 +414,7 @@ pub async fn probe(
         title: title.clone(),
         fact,
         impact: format!(
-            "这是短 JSON 请求在平均 ≤ {} 秒、P95 ≤ {} 秒（少于 20 个请求时用最慢耗时）标准下的粗略建议档位；180 秒仅为硬超时，不代表性能合格线，也没有测量精确极限。",
+            "这是普通短文本请求在平均 ≤ {} 秒、P95 ≤ {} 秒（少于 20 个请求时用最慢耗时）标准下的粗略建议档位；180 秒仅为硬超时，不代表性能合格线，也没有测量精确极限。",
             search.options.max_mean_ms as f64 / 1000.0,
             search.options.max_tail_ms as f64 / 1000.0
         ),

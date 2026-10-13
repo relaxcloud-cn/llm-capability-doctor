@@ -744,18 +744,26 @@ fn performance_claims(
             if row.attempts.len() != 1 {
                 bail!("并发请求不是单次尝试");
             }
-            let expected: Value = serde_json::from_str(
-                messages(&row)?[0]["content"]
-                    .as_str()
-                    .and_then(|s| s.split_once('：'))
-                    .context("负载缺少独立标识")?
-                    .1,
-            )?;
-            let good = response(&row).is_ok_and(|r| {
-                r.normal_end
-                    && r.calls.is_empty()
-                    && parse_record_payload(&r.text, true).is_ok_and(|v| v == expected)
-            });
+            let input = messages(&row)?;
+            if input.len() != 1
+                || input[0]["role"] != "user"
+                || input[0]["content"] != crate::concurrency::PROMPT
+                || row.stream
+                || row
+                    .request
+                    .get("max_tokens")
+                    .or_else(|| row.request.get("max_output_tokens"))
+                    .and_then(Value::as_u64)
+                    != Some(crate::concurrency::OUTPUT_TOKENS)
+                || row.request.get("tools").is_some()
+                || row.request.get("response_format").is_some()
+                || row.request.pointer("/text/format").is_some()
+            {
+                bail!("并发请求不符合当前普通短文本负载定义，不能按新规则重判旧负载");
+            }
+            let good = row.failure.is_none()
+                && row.attempts[0].error.is_none()
+                && response(&row).is_ok_and(|r| crate::concurrency::usable_text_response(&r));
             let last = &row.attempts[0];
             let reason = if good {
                 "passed"
@@ -809,7 +817,7 @@ fn performance_claims(
         None
     };
     let reason = if non_capacity {
-        format!("响应内容或服务异常导致停止；已验证档位 {lower}，容量边界未确认")
+        format!("未取得完整有效文本或发生服务异常；已验证档位 {lower}，容量边界未确认")
     } else if let (Some(n), Some(failed)) = (recommended, rejected) {
         format!("建议并发 {n}：下一档 {failed} 在本次负载下未达标；不是精确最大值")
     } else {
@@ -818,7 +826,7 @@ fn performance_claims(
     if proof.is_empty() {
         proof.push(format!("file:observations/{}.json", check.id.key()));
     }
-    let facts = json!({"probe_mode":"concurrent_requests","search_method":"doubling_first_failure","concurrency":lower,"verified_concurrency_lower_bound":lower,"recommended_concurrency":recommended,"estimate_complete":completed,"maximum_confirmed":false,"maximum_concurrency":null,"request_count":total,"request_retries":0,"request_timeout_seconds":180,"max_mean_elapsed_ms":10000,"max_tail_elapsed_ms":20000,"p95_method":"nearest_rank","small_sample_tail":"maximum_below_20","first_unsuccessful_concurrency":rejected,"first_unsuccessful_reason":rejection,"capacity_boundary_unconfirmed_reason":if non_capacity{json!("content_or_service_error")}else{Value::Null},"rounds":rounds});
+    let facts = json!({"probe_mode":"concurrent_requests","workload_type":"short_text","workload":crate::concurrency::WORKLOAD,"search_method":"doubling_first_failure","concurrency":lower,"verified_concurrency_lower_bound":lower,"recommended_concurrency":recommended,"estimate_complete":completed,"maximum_confirmed":false,"maximum_concurrency":null,"request_count":total,"request_retries":0,"request_timeout_seconds":180,"max_mean_elapsed_ms":10000,"max_tail_elapsed_ms":20000,"p95_method":"nearest_rank","small_sample_tail":"maximum_below_20","first_unsuccessful_concurrency":rejected,"first_unsuccessful_reason":rejection,"capacity_boundary_unconfirmed_reason":if non_capacity{json!("response_or_service_error")}else{Value::Null},"rounds":rounds});
     let mut recommendation = claim(
         "recommendation",
         if recommended.is_some_and(|n| n >= 2) {
@@ -827,16 +835,16 @@ fn performance_claims(
             Outcome::Unknown
         },
         reason,
-        json!("至少 2 并发且有允许建议的停止证据"),
+        json!("至少 2 并发正常完成普通短文本请求且有允许建议的停止证据"),
         facts.clone(),
         proof.clone(),
     );
     if recommended.is_some() {
         recommendation.condition =
-            Some("仅为本次短 JSON 请求及耗时标准下的粗略建议，不是容量极限或长期保证".into());
+            Some("仅为本次普通短文本负载及耗时标准下的粗略建议；不检验 JSON 格式或内容准确性，不是容量极限或长期保证".into());
     }
     let mut content = claim(
-        "batch_content",
+        "batch_completion",
         if total == 0 {
             Outcome::Unknown
         } else if correct == total {
@@ -844,7 +852,7 @@ fn performance_claims(
         } else {
             Outcome::Unsatisfied
         },
-        format!("{total} 个请求中 {correct} 个正确完成，错误类型逐请求保留"),
+        format!("{total} 个请求中 {correct} 个正常结束并返回非空文本；不校验正文措辞或 JSON 格式"),
         json!(total),
         json!(correct),
         proof,

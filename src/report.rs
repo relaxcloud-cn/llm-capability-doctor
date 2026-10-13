@@ -272,7 +272,13 @@ fn issues(run: &RunResult) -> String {
                 .map(|rounds| (c, rounds))
         })
     {
-        cards.push_str("<article class=\"error-block incomplete\"><h3>并发逐级探测记录</h3><p>短 JSON 回显负载，每个请求仅尝试一次，单请求最长等待 180 秒。耗时从发出请求到收到完整响应计算，不是首 token 延迟。</p>");
+        let workload =
+            if check.facts.get("workload_type").and_then(Value::as_str) == Some("short_text") {
+                "普通短文本负载；只核对正常结束且有非空文本，不要求 JSON、固定措辞或原样回显"
+            } else {
+                "短 JSON 回显负载"
+            };
+        cards.push_str(&format!("<article class=\"error-block incomplete\"><h3>并发逐级探测记录</h3><p>{workload}，每个请求仅尝试一次，单请求最长等待 180 秒。耗时从发出请求到收到完整响应计算，不是首 token 延迟。</p>"));
         if let (Some(mean), Some(tail)) = (
             check
                 .facts
@@ -656,4 +662,12 @@ fn report_preserves_compatibility_notes_and_concurrency_probe_boundaries() {
     assert!(html.contains("P95 21.00 秒"));
     assert!(html.contains("响应过慢（P95 耗时超标）"));
     assert!(!html.contains("历史记录未设置响应时间合格阈值"));
+    assert!(html.contains("短 JSON 回显负载"));
+    run.checks[4]
+        .facts
+        .insert("workload_type".into(), json!("short_text"));
+    let html = render(&run, &[]).unwrap();
+    assert!(html.contains("普通短文本负载"));
+    assert!(html.contains("不要求 JSON、固定措辞或原样回显"));
+    assert!(!html.contains("短 JSON 回显负载"));
 }

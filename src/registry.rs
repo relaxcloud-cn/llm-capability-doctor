@@ -139,10 +139,10 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
                 ),
                 CheckId::Performance => (
                     3600,
-                    "当前账号与短 JSON 负载的并发表现；内容错误不证明服务容量边界",
+                    "当前账号与普通短文本负载的并发表现；不校验正文格式或措辞，不证明通用内容质量或精确容量上限",
                     vec![
-                        ("recommendation", "并发建议有正确性及耗时证据", true),
-                        ("batch_content", "各档请求是否全部正确完成", false),
+                        ("recommendation", "并发建议有正常完成及耗时证据", true),
+                        ("batch_completion", "各档请求是否正常结束并返回非空文本", false),
                     ],
                 ),
                 _ => (
@@ -157,7 +157,7 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
             CheckSpec {
                 id,
                 name: id.name().into(),
-                version: "1".into(),
+                version: if id == CheckId::Performance { "2" } else { "1" }.into(),
                 scope: scope.into(),
                 group: if id.is_agent() {
                     CheckGroup::Agent

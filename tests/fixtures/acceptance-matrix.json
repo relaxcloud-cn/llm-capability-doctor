@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "scope": "Deterministic acceptance labels fixed before implementation changes. HTTP cases execute real local transport; agent cases use independently constructed files and traces. Neither category is claimed to be a live model sample.",
+  "version": 2,
+  "scope": "Deterministic acceptance labels. Version 2 adopts the approved plain-text concurrency workload: arbitrary completed nonempty text is valid, empty text is not. HTTP cases execute real local transport; agent cases use independently constructed files and traces. Neither category is claimed to be a live model sample.",
   "cases": [
     {"id":"response.normal","check":"response","variant":"normal","expected":"passed"},
     {"id":"response.empty","check":"response","variant":"empty","expected":"failed"},
@@ -34,7 +34,8 @@
     {"id":"context.missing_usage","check":"context","variant":"missing_usage","expected":"incomplete"},
     {"id":"context.unrelated_rejection","check":"context","variant":"unrelated_rejection","expected":"passed"},
     {"id":"performance.rate_limit","check":"performance","variant":"rate_limit","expected":"passed"},
-    {"id":"performance.content_error","check":"performance","variant":"content_error","expected":"incomplete"},
+    {"id":"performance.extra_text","check":"performance","variant":"extra_text","expected":"passed"},
+    {"id":"performance.empty_response","check":"performance","variant":"empty_response","expected":"incomplete"},
     {"id":"performance.budget","check":"performance","variant":"budget","expected":"incomplete"},
     {"id":"performance.false_pass_label","check":"performance","variant":"false_pass_label","expected":"incomplete"},
     {"id":"continuous.correct","check":"continuous","variant":"normal","expected":"passed"},

@@ -1,10 +1,13 @@
 use agent_check::{
+    assessment,
     checks::evaluate_schema,
     concurrency::{self, ProbeOptions},
     config::{ModelConfig, Protocol},
     dataset::SourceSnapshot,
-    measure,
+    engine::atomic_json,
+    judgment, measure,
     model::{CHECK_VERSION, Status},
+    registry::builtin_specs,
     transport::{RequestFailure, Transport},
 };
 use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
@@ -87,13 +90,11 @@ async fn respond(
         );
     }
     let responses = body.get("input").is_some();
-    let prompt = if responses {
-        &body["input"][0]["content"]
+    let text = if state.invalid {
+        " \n\t"
     } else {
-        &body["messages"][0]["content"]
+        "你好，祝你今天愉快。"
     };
-    let (_, expected) = prompt.as_str().unwrap().split_once('：').unwrap();
-    let text = if state.invalid { "wrong" } else { expected };
     // Deliberately omit usage: lack of token accounting must never prevent probing.
     let reply = if responses {
         json!({"status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":text}]}]})
@@ -319,7 +320,7 @@ async fn rate_limit_stops_on_the_first_failed_level_and_is_not_hidden_by_retries
 }
 
 #[tokio::test]
-async fn http_success_with_wrong_content_does_not_count_as_capacity() {
+async fn http_success_with_empty_text_does_not_count_as_capacity() {
     let (result, state) = probe(100, true, Protocol::ChatCompletions).await;
     assert_eq!(result.status, Status::Incomplete);
     assert_eq!(result.facts["verified_concurrency_lower_bound"], 0);
@@ -387,4 +388,213 @@ async fn cancelled_probe_does_not_launch_requests_or_report_a_limit() {
     assert_eq!(result.status, Status::Incomplete);
     assert!(result.evidence_ids.is_empty());
     assert_eq!(result.facts["stop_reason"], "cancelled");
+}
+
+struct TextReply {
+    reply: Value,
+    active: AtomicUsize,
+    requests: std::sync::Mutex<Vec<Value>>,
+}
+async fn text_reply(
+    State(state): State<Arc<TextReply>>,
+    Json(body): Json<Value>,
+) -> (StatusCode, Json<Value>) {
+    state.requests.lock().unwrap().push(body);
+    let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    state.active.fetch_sub(1, Ordering::SeqCst);
+    if active > 2 {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":{"message":"limited"}})),
+        )
+    } else {
+        (StatusCode::OK, Json(state.reply.clone()))
+    }
+}
+fn text_envelope(protocol: Protocol, text: &str) -> Value {
+    match protocol {
+        Protocol::ChatCompletions => {
+            json!({"choices":[{"message":{"role":"assistant","content":text},"finish_reason":"stop"}]})
+        }
+        Protocol::Responses => {
+            json!({"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":text}]}]})
+        }
+    }
+}
+async fn probe_text_reply(
+    protocol: Protocol,
+    reply: Value,
+) -> (
+    tempfile::TempDir,
+    agent_check::model::CheckResult,
+    Arc<TextReply>,
+) {
+    let state = Arc::new(TextReply {
+        reply,
+        active: AtomicUsize::new(0),
+        requests: Default::default(),
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = ModelConfig::new(
+        &format!("http://{}/v1", listener.local_addr().unwrap()),
+        "test",
+        "placeholder".into(),
+        Some(protocol),
+    )
+    .unwrap();
+    let app = Router::new()
+        .route("/v1/chat/completions", post(text_reply))
+        .route("/v1/responses", post(text_reply))
+        .with_state(state.clone());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let transport = Transport::new(
+        config,
+        &directory.path().join("http"),
+        CancellationToken::new(),
+    )
+    .unwrap();
+    let check = concurrency::probe(
+        &transport,
+        Instant::now() + Duration::from_secs(3600),
+        None,
+        ProbeOptions {
+            max_requests: 7,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    server.abort();
+    (directory, check, state)
+}
+fn adjudicate_probe(directory: &std::path::Path, check: &mut agent_check::model::CheckResult) {
+    atomic_json(&directory.join("observations/performance.json"), check).unwrap();
+    let index = judgment::index_evidence(directory).unwrap();
+    let spec = builtin_specs()
+        .into_iter()
+        .find(|s| s.id == check.id)
+        .unwrap();
+    let evaluation = assessment::builtin_evaluation(&spec, check, directory, &index).unwrap();
+    check.facts = evaluation.facts;
+    judgment::seal(&spec, check, evaluation.claims, directory, &index).unwrap();
+}
+#[tokio::test]
+async fn plain_text_and_explanations_pass_both_probe_and_evidence_judgment() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        for text in [
+            "你好！",
+            "**连接正常。**",
+            "We need answer exactly JSON. Need obey no extra.{\"ok\":true,\"probe_id\":\"2e3a49151a54465298481c9d472ffae1\"}",
+        ] {
+            let (directory, mut check, state) =
+                probe_text_reply(protocol, text_envelope(protocol, text)).await;
+            assert_eq!(check.status, Status::Passed, "{protocol:?}: {text}");
+            assert_eq!(check.facts["recommended_concurrency"], 2);
+            assert_eq!(check.facts["request_count"], 7);
+            let requests = state.requests.lock().unwrap();
+            assert_eq!(requests.len(), 7);
+            for request in requests.iter() {
+                let content = request
+                    .get("messages")
+                    .or_else(|| request.get("input"))
+                    .unwrap()[0]["content"]
+                    .as_str()
+                    .unwrap();
+                assert_eq!(content, "请用一句简短的中文打个招呼。");
+                assert!(request.get("tools").is_none());
+                assert!(request.get("response_format").is_none());
+                assert!(request.pointer("/text/format").is_none());
+                assert_eq!(
+                    request
+                        .get("max_tokens")
+                        .or_else(|| request.get("max_output_tokens"))
+                        .unwrap(),
+                    2048
+                );
+            }
+            drop(requests);
+            adjudicate_probe(directory.path(), &mut check);
+            assert_eq!(check.status, Status::Passed);
+            assert_eq!(check.facts["recommended_concurrency"], 2);
+            assert_eq!(check.facts["workload_type"], "short_text");
+            assert_eq!(check.facts["maximum_confirmed"], false);
+        }
+    }
+}
+#[tokio::test]
+async fn legacy_json_workloads_are_not_reinterpreted_as_plain_text_runs() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        let (directory, check, _) =
+            probe_text_reply(protocol, text_envelope(protocol, "你好")).await;
+        for id in &check.evidence_ids {
+            let path = directory.path().join("http").join(format!("{id}.json"));
+            let mut row: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let field = if protocol == Protocol::ChatCompletions {
+                "messages"
+            } else {
+                "input"
+            };
+            row["request"][field][0]["content"] = json!(
+                "这是并发请求测试。请原样返回以下 JSON，不增加字段或解释：{\"ok\":true,\"probe_id\":\"legacy\"}"
+            );
+            atomic_json(&path, &row).unwrap();
+        }
+        let index = judgment::index_evidence(directory.path()).unwrap();
+        let spec = builtin_specs()
+            .into_iter()
+            .find(|s| s.id == check.id)
+            .unwrap();
+        assert_eq!(spec.version, "2");
+        let error =
+            assessment::builtin_evaluation(&spec, &check, directory.path(), &index).unwrap_err();
+        assert!(error.to_string().contains("不能按新规则重判旧负载"));
+    }
+}
+
+#[tokio::test]
+async fn http_200_without_a_completed_text_response_is_not_capacity_evidence() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        let mut truncated = text_envelope(protocol, "partial");
+        let mut refusal = text_envelope(protocol, "");
+        let mut reasoning_only = text_envelope(protocol, "");
+        let mut tool = text_envelope(protocol, "calling a tool");
+        match protocol {
+            Protocol::ChatCompletions => {
+                truncated["choices"][0]["finish_reason"] = json!("length");
+                refusal["choices"][0]["message"]["refusal"] = json!("declined");
+                reasoning_only["choices"][0]["message"]["reasoning_content"] =
+                    json!("thinking only");
+                tool["choices"][0]["finish_reason"] = json!("tool_calls");
+                tool["choices"][0]["message"]["tool_calls"] = json!([{"id":"call-extra","type":"function","function":{"name":"unrequested","arguments":"{}"}}]);
+            }
+            Protocol::Responses => {
+                truncated["status"] = json!("incomplete");
+                refusal["output"][0]["content"] = json!([{"type":"refusal","refusal":"declined"}]);
+                reasoning_only["output"] = json!([{"type":"reasoning","summary":[{"type":"summary_text","text":"thinking only"}]}]);
+                tool["output"].as_array_mut().unwrap().push(json!({"type":"function_call","id":"fc-extra","call_id":"call-extra","name":"unrequested","arguments":"{}"}));
+            }
+        }
+        for reply in [
+            text_envelope(protocol, ""),
+            text_envelope(protocol, " \n\t"),
+            truncated,
+            refusal,
+            reasoning_only,
+            tool,
+            json!({"error":{"message":"service error"}}),
+        ] {
+            let (directory, mut check, state) = probe_text_reply(protocol, reply).await;
+            assert_eq!(check.status, Status::Incomplete);
+            assert_eq!(check.facts["recommended_concurrency"], Value::Null);
+            assert_eq!(state.requests.lock().unwrap().len(), 1);
+            adjudicate_probe(directory.path(), &mut check);
+            assert_eq!(check.status, Status::Incomplete);
+            assert_eq!(check.facts["recommended_concurrency"], Value::Null);
+            assert_eq!(check.facts["verified_concurrency_lower_bound"], 0);
+        }
+    }
 }
