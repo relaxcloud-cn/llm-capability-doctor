@@ -578,6 +578,7 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
             }],
             parse_error: None,
             failure: None,
+            request_timeout_seconds: None,
         };
         atomic_json(
             &folder.join("http").join(format!("{http_id}.json")),
@@ -616,7 +617,7 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
     check
 }
 #[tokio::test]
-async fn tool_call_requests_use_20000_output_tokens_for_all_rounds() {
+async fn tool_requests_keep_schema_and_budgets_without_strict_enforcement() {
     for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
         for variant in ["normal", "serial", "repeated_query"] {
             let directory = tempfile::tempdir().unwrap();
@@ -644,8 +645,72 @@ async fn tool_call_requests_use_20000_output_tokens_for_all_rounds() {
                     "{protocol:?} {variant} round {round}"
                 );
                 assert_eq!(row.stream, round == 0);
+                assert_eq!(row.request_timeout_seconds, Some(600));
+                assert!(row.request.get("tool_choice").is_none());
+                let tools = row.request["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 2);
+                let definitions: Vec<_> = tools
+                    .iter()
+                    .map(|tool| {
+                        assert_eq!(tool["type"], "function");
+                        match protocol {
+                            Protocol::ChatCompletions => {
+                                assert!(tool["function"].get("strict").is_none());
+                                &tool["function"]
+                            }
+                            Protocol::Responses => {
+                                assert_eq!(tool["strict"], false);
+                                tool
+                            }
+                        }
+                    })
+                    .collect();
+                assert_eq!(definitions[0]["name"], "get_records");
+                assert_eq!(definitions[1]["name"], "get_service_time");
+                let ids: Vec<_> = (1..=12).map(|n| format!("R-{n:02}")).collect();
+                assert_eq!(
+                    definitions[0]["parameters"],
+                    json!({"type":"object","properties":{"query":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"string","enum":ids}},"kind":{"type":"string","enum":["records"]}},"required":["ids","kind"],"additionalProperties":false}},"required":["query"],"additionalProperties":false})
+                );
+                assert_eq!(
+                    definitions[1]["parameters"],
+                    json!({"type":"object","properties":{"timezone":{"type":"string","enum":["UTC"]}},"required":["timezone"],"additionalProperties":false})
+                );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn schema_requests_still_require_native_strict_output() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        let directory = tempfile::tempdir().unwrap();
+        let case = Case {
+            id: "schema.native".into(),
+            check: CheckId::Schema,
+            variant: "normal".into(),
+            expected: Status::Passed,
+        };
+        let check = execute_http(&case, protocol, directory.path()).await;
+        assert_eq!(check.status, Status::Passed);
+        assert_eq!(check.evidence_ids.len(), 1);
+        let row: HttpEvidence = serde_json::from_slice(
+            &std::fs::read(
+                directory
+                    .path()
+                    .join("http")
+                    .join(format!("{}.json", check.evidence_ids[0])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let format = match protocol {
+            Protocol::ChatCompletions => &row.request["response_format"]["json_schema"],
+            Protocol::Responses => &row.request["text"]["format"],
+        };
+        assert_eq!(format["strict"], true);
+        assert!(format["schema"].is_object());
+        assert_eq!(row.request_timeout_seconds, Some(180));
     }
 }
 

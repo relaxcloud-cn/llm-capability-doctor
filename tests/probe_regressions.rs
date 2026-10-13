@@ -370,8 +370,93 @@ async fn request_waits_beyond_sixty_seconds_and_times_out_at_180() {
     let outcome = request.await.unwrap();
     assert!(matches!(outcome.failure, Some(RequestFailure::Timeout)));
     assert_eq!(outcome.evidence.attempts.len(), 1);
+    assert_eq!(outcome.evidence.request_timeout_seconds, Some(180));
     server.abort();
     tokio::time::resume();
+}
+
+#[tokio::test]
+async fn tool_request_waits_past_180_and_360_seconds_but_stops_at_600() {
+    use agent_check::model::CheckId;
+    let plan = builtin_specs();
+    for (id, seconds) in [
+        (CheckId::Response, 360),
+        (CheckId::Tools, 1200),
+        (CheckId::Schema, 180),
+        (CheckId::Context, 900),
+        (CheckId::Performance, 3600),
+    ] {
+        assert_eq!(
+            plan.iter().find(|s| s.id == id).unwrap().budget_seconds,
+            seconds
+        );
+    }
+    assert_eq!(agent_check::transport::REQUEST_BUDGET.as_secs(), 180);
+    assert_eq!(agent_check::engine::DIRECT_BUDGET.as_secs(), 6240);
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        async fn hang(State(arrived): State<Arc<tokio::sync::Notify>>) -> &'static str {
+            arrived.notify_one();
+            std::future::pending::<()>().await;
+            ""
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = ModelConfig::new(
+            &format!("http://{}/v1", listener.local_addr().unwrap()),
+            "test",
+            "placeholder".into(),
+            Some(protocol),
+        )
+        .unwrap();
+        let app = Router::new()
+            .route("/v1/chat/completions", post(hang))
+            .route("/v1/responses", post(hang))
+            .with_state(arrived.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let transport = Transport::new(config, directory.path(), CancellationToken::new()).unwrap();
+        let deadline = agent_check::engine::interface_deadline(
+            agent_check::model::CheckId::Tools,
+            Instant::now() + Duration::from_secs(3600),
+        );
+        let request = tokio::spawn(async move {
+            agent_check::checks::tools(&transport, deadline)
+                .await
+                .unwrap()
+        });
+        arrived.notified().await;
+        tokio::time::pause();
+        tokio::time::advance(Duration::from_secs(181)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "tool request stopped at the old 180-second limit"
+        );
+        tokio::time::advance(Duration::from_secs(181)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !request.is_finished(),
+            "tool request stopped at the old 360-second stage budget"
+        );
+        tokio::time::advance(Duration::from_secs(239)).await;
+        let check = request.await.unwrap();
+        assert_eq!(check.evidence_ids.len(), 1);
+        let row: Value = serde_json::from_slice(
+            &std::fs::read(
+                directory
+                    .path()
+                    .join(format!("{}.json", check.evidence_ids[0])),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(row["failure"], "timeout");
+        assert_eq!(row["request_timeout_seconds"], 600);
+        server.abort();
+        tokio::time::resume();
+    }
 }
 
 #[tokio::test]

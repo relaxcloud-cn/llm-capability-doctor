@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 fn result(
@@ -256,6 +256,7 @@ enum ResourceKind {
     Records,
 }
 pub async fn tools(transport: &Transport, deadline: Instant) -> Result<CheckResult> {
+    let transport = transport.with_request_budget(Duration::from_secs(600));
     let id = CheckId::Tools;
     let started = Instant::now();
     let cfg = transport.config();
@@ -270,10 +271,15 @@ pub async fn tools(transport: &Transport, deadline: Instant) -> Result<CheckResu
         .iter()
         .map(|r| r.id.clone())
         .collect::<BTreeSet<_>>();
-    let definitions = vec![
-        json!({"name":"get_records","description":"根据记录 ID 查询负责人和版本，返回 records 数组","strict":true,"parameters":{"type":"object","properties":{"query":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"string","enum":records.iter().map(|r|&r.id).collect::<Vec<_>>()}},"kind":{"type":"string","enum":["records"]}},"required":["ids","kind"],"additionalProperties":false}},"required":["query"],"additionalProperties":false}}),
-        json!({"name":"get_service_time","description":"查询服务当前时间，不能查询记录","strict":true,"parameters":{"type":"object","properties":{"timezone":{"type":"string","enum":["UTC"]}},"required":["timezone"],"additionalProperties":false}}),
+    let mut definitions = vec![
+        json!({"name":"get_records","description":"根据记录 ID 查询负责人和版本，返回 records 数组","parameters":{"type":"object","properties":{"query":{"type":"object","properties":{"ids":{"type":"array","items":{"type":"string","enum":records.iter().map(|r|&r.id).collect::<Vec<_>>()}},"kind":{"type":"string","enum":["records"]}},"required":["ids","kind"],"additionalProperties":false}},"required":["query"],"additionalProperties":false}}),
+        json!({"name":"get_service_time","description":"查询服务当前时间，不能查询记录","parameters":{"type":"object","properties":{"timezone":{"type":"string","enum":["UTC"]}},"required":["timezone"],"additionalProperties":false}}),
     ];
+    if cfg.protocol == Protocol::Responses {
+        for definition in &mut definitions {
+            definition["strict"] = json!(false);
+        }
+    }
     let mut messages = json!([{"role":"user","content":format!("请使用适合的工具查询这些记录的负责人和版本，并把查询到的原始记录以 {{\"records\":[...]}} JSON 输出，不新增其他字段：{}。",ids.iter().cloned().collect::<Vec<_>>().join("、"))}]);
     let mut queried = BTreeSet::new();
     let mut call_count = 0usize;

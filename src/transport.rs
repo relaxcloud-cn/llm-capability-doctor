@@ -64,6 +64,8 @@ pub struct HttpEvidence {
     pub parse_error: Option<String>,
     #[serde(default)]
     pub failure: Option<RequestFailure>,
+    #[serde(default)]
+    pub request_timeout_seconds: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -108,6 +110,7 @@ pub struct Transport {
     client: reqwest::Client,
     evidence_dir: Arc<PathBuf>,
     cancel: CancellationToken,
+    request_budget: Duration,
 }
 impl Transport {
     pub fn new(
@@ -125,7 +128,14 @@ impl Transport {
             client,
             evidence_dir: Arc::new(evidence_dir.to_owned()),
             cancel,
+            request_budget: REQUEST_BUDGET,
         })
+    }
+    pub fn with_request_budget(&self, request_budget: Duration) -> Self {
+        Self {
+            request_budget,
+            ..self.clone()
+        }
     }
     pub fn config(&self) -> &ModelConfig {
         &self.config
@@ -155,7 +165,7 @@ impl Transport {
         attempts: u8,
     ) -> Result<RequestOutcome> {
         let started = Instant::now();
-        let deadline = stage_deadline.min(started + REQUEST_BUDGET);
+        let deadline = stage_deadline.min(started + self.request_budget);
         let id = format!("http-{}", Uuid::new_v4().simple());
         let safe_body = self.redact_json(body.clone());
         let mut evidence = HttpEvidence {
@@ -168,6 +178,7 @@ impl Transport {
             attempts: vec![],
             parse_error: None,
             failure: None,
+            request_timeout_seconds: Some(self.request_budget.as_secs()),
         };
         let mut response = None;
         let mut failure = None;
@@ -216,7 +227,7 @@ impl Transport {
             };
             let outcome = tokio::select! {
                 _=self.cancel.cancelled()=>Err(RequestFailure::Cancelled),
-                value=tokio::time::timeout(deadline.saturating_duration_since(Instant::now()),operation)=>value.unwrap_or_else(|_|Err(if stage_deadline<started+REQUEST_BUDGET {RequestFailure::StageBudget}else{RequestFailure::Timeout})),
+                value=tokio::time::timeout(deadline.saturating_duration_since(Instant::now()),operation)=>value.unwrap_or_else(|_|Err(if stage_deadline<started+self.request_budget {RequestFailure::StageBudget}else{RequestFailure::Timeout})),
             };
             let mut retry_after = None;
             let mut attempt = HttpAttempt {
@@ -284,7 +295,7 @@ impl Transport {
             let delay = retry_after
                 .unwrap_or_else(|| Duration::from_millis(400 * 2u64.pow((number - 1) as u32)));
             if delay >= deadline.saturating_duration_since(Instant::now()) {
-                failure = Some(if stage_deadline < started + REQUEST_BUDGET {
+                failure = Some(if stage_deadline < started + self.request_budget {
                     RequestFailure::StageBudget
                 } else {
                     RequestFailure::Timeout

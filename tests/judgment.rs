@@ -233,6 +233,7 @@ fn a_failed_first_request_does_not_claim_unexecuted_streaming_also_failed() {
             }],
             parse_error: None,
             failure: None,
+            request_timeout_seconds: None,
         },
     )
     .unwrap();

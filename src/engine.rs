@@ -133,7 +133,7 @@ pub struct EngineOutput {
     pub run: RunResult,
     pub directory: PathBuf,
 }
-pub const DIRECT_BUDGET: Duration = Duration::from_secs(5400);
+pub const DIRECT_BUDGET: Duration = Duration::from_secs(6240);
 pub fn interface_deadline(id: CheckId, stage_deadline: Instant) -> Instant {
     let seconds = crate::registry::builtin_specs()
         .into_iter()
