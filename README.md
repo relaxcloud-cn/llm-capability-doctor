@@ -105,7 +105,7 @@ export MODEL_API_KEY
 - **兼容不等于原生支持。** 结构化输出可兼容唯一 JSON 代码块，但会注明格式条件；直接工具项不以服务端 `strict` 强制约束为前提。
 - **结论只覆盖本次范围。** 上下文下界不是精确最大值，基础任务通过不是通用知识、记忆或业务能力认证；旧报告保留当时规则，不用新题库补判。
 
-更完整的预算、协议差异与异常处理见[使用手册](docs/customer/使用手册.md#4-检测内容报告与退出码)。
+客户操作见[使用说明](docs/customer/使用手册.md)；技术规则与预算见[实现状态](docs/implementation-status.md)。
 
 ## 查看结果
 
@@ -156,7 +156,7 @@ python3 scripts/verify-runtime.py dist/agent-check --output .cache/runtime-verif
 
 ## 文档导航
 
-- [用户使用手册](docs/customer/使用手册.md)：拿到程序后的配置、自测、GUI 操作、结果解读和问题反馈。
+- [客户使用说明](docs/customer/使用手册.md)：一条命令开始检测、查看报告和处理常见问题。
 - [无密钥配置模板](docs/customer/model.example.json)：填写你自己的服务信息。
 - [实现状态与变更记录](docs/implementation-status.md)：版本变化、验证范围及发布缺口。
 - [设计与验收要求](docs/agent-check-final-plan-2026-10-09.md)：产品范围和验收约束，早期方案以标注的后续修订为准。
