@@ -156,7 +156,7 @@ python3 scripts/verify-runtime.py dist/agent-check --output .cache/runtime-verif
 
 ## 文档导航
 
-- [CLI 使用手册](docs/customer/使用手册.md)：详细配置、命令、检测规则和错误处理。
+- [用户使用手册](docs/customer/使用手册.md)：拿到程序后的配置、自测、GUI 操作、结果解读和问题反馈。
 - [无密钥配置模板](docs/customer/model.example.json)：填写你自己的服务信息。
 - [实现状态与变更记录](docs/implementation-status.md)：版本变化、验证范围及发布缺口。
 - [设计与验收要求](docs/agent-check-final-plan-2026-10-09.md)：产品范围和验收约束，早期方案以标注的后续修订为准。
