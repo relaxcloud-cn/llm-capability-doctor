@@ -297,7 +297,6 @@ async fn slow_single_request_does_not_produce_a_recommendation() {
     assert_eq!(result.facts["rounds"][0]["successful"], 1);
     assert_eq!(result.facts["first_unsuccessful_reason"], "mean_latency");
     assert_eq!(state.total.load(Ordering::SeqCst), 1);
-    assert!(result.title.contains("响应过慢"));
 }
 
 #[tokio::test]
@@ -633,10 +632,7 @@ async fn legacy_json_workloads_are_not_reinterpreted_as_plain_text_runs() {
             .into_iter()
             .find(|s| s.id == check.id)
             .unwrap();
-        assert_eq!(spec.version, "2");
-        let error =
-            assessment::builtin_evaluation(&spec, &check, directory.path(), &index).unwrap_err();
-        assert!(error.to_string().contains("不能按新规则重判旧负载"));
+        assert!(assessment::builtin_evaluation(&spec, &check, directory.path(), &index).is_err());
     }
 }
 

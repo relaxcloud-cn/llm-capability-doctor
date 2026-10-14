@@ -24,6 +24,7 @@ impl Drop for Server {
         }
     }
 }
+const RAW_PREFLIGHT_ERROR: &str = "{\n  \"error\": {\n    \"message\": \"bad key test-secret-key\",\n    \"code\": \"invalid_api_key\"\n  }\n}\n";
 fn server(status: StatusCode) -> Server {
     let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     socket.set_nonblocking(true).unwrap();
@@ -37,12 +38,9 @@ fn server(status: StatusCode) -> Server {
         runtime.block_on(async move {
             async fn respond(
                 State((count, status)): State<(Arc<AtomicUsize>, StatusCode)>,
-            ) -> (StatusCode, Json<Value>) {
+            ) -> (StatusCode, &'static str) {
                 count.fetch_add(1, Ordering::SeqCst);
-                (
-                    status,
-                    Json(json!({"error":{"message":"bad key","code":"invalid_api_key"}})),
-                )
+                (status, RAW_PREFLIGHT_ERROR)
             }
             axum::serve(
                 tokio::net::TcpListener::from_std(socket).unwrap(),
@@ -85,6 +83,10 @@ fn failed_preflight_stops_without_capability_result_and_keeps_stdout_json_clean(
     assert!(result.stdout.is_empty());
     let stderr = String::from_utf8(result.stderr).unwrap();
     assert!(stderr.contains("未开始正式检测"));
+    let expected = RAW_PREFLIGHT_ERROR.replace("test-secret-key", "[REDACTED]");
+    assert!(stderr.contains(&format!("HTTP 401\n{expected}")));
+    assert_eq!(stderr.matches(expected.trim_end()).count(), 1);
+    assert!(!stderr.contains("API 密钥未通过验证"));
     assert!(!stderr.contains("test-secret-key"));
     assert!(!stderr.contains('\x1b'));
     assert_eq!(model.count.load(Ordering::SeqCst), 1);
@@ -149,6 +151,62 @@ fn worker_accepts_private_control_and_eof_shutdown_without_a_model() {
     assert!(child.wait().unwrap().success());
 }
 
+#[test]
+fn worker_returns_the_original_preflight_error_without_starting_checks() {
+    let model = server(StatusCode::UNAUTHORIZED);
+    let root = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_agent-check"))
+        .args(["--worker", "--report-dir", root.path().to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    let mut lines = BufReader::new(child.stdout.take().unwrap());
+    let mut next = || {
+        let mut line = String::new();
+        lines.read_line(&mut line).unwrap();
+        serde_json::from_str::<Value>(&line).unwrap()
+    };
+    assert_eq!(next()["type"], "ready");
+    writeln!(input,"{}",json!({"id":"connection","type":"submit","config":{"base_url":model.url,"model":"test","api_key":"test-secret-key","protocol":"chat-completions"}})).unwrap();
+    let reply = loop {
+        let message = next();
+        assert_ne!(message["type"], "event");
+        if message["id"] == "connection" {
+            break message;
+        }
+    };
+    assert_eq!(reply["success"], false);
+    assert_eq!(
+        reply["error"],
+        format!(
+            "HTTP 401\n{}",
+            RAW_PREFLIGHT_ERROR.replace("test-secret-key", "[REDACTED]")
+        )
+    );
+    writeln!(input, "{}", json!({"id":"state","type":"state"})).unwrap();
+    loop {
+        let message = next();
+        assert_ne!(message["type"], "event");
+        if message["id"] == "state" {
+            assert_eq!(message["data"]["busy"], false);
+            assert!(message["data"]["run"].is_null());
+            break;
+        }
+    }
+    drop(input);
+    assert!(child.wait().unwrap().success());
+    assert_eq!(model.count.load(Ordering::SeqCst), 1);
+    assert!(!std::fs::read_dir(root.path()).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("AC-")
+    }));
+}
 #[tokio::test]
 async fn worker_rejects_duplicate_start_and_eof_cancels_active_request_preserving_result() {
     use std::time::Duration;

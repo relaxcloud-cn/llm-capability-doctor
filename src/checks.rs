@@ -12,6 +12,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const INTERFACE_DATASET_SEED: &str = "agentcheck/10";
+
 fn result(
     id: CheckId,
     started: Instant,
@@ -261,7 +263,7 @@ pub async fn tools(transport: &Transport, deadline: Instant) -> Result<CheckResu
     let started = Instant::now();
     let cfg = transport.config();
     let mut evidence = vec![];
-    let snapshot = SourceSnapshot::generate(crate::model::CHECK_VERSION);
+    let snapshot = SourceSnapshot::generate(INTERFACE_DATASET_SEED);
     let records = snapshot.records();
     let selected = vec![records[0].clone(), records[6].clone(), records[11].clone()];
     let expected = RecordFile {
@@ -450,7 +452,7 @@ pub async fn schema(transport: &Transport, deadline: Instant) -> Result<CheckRes
     let id = CheckId::Schema;
     let started = Instant::now();
     let cfg = transport.config();
-    let expected = SourceSnapshot::generate(crate::model::CHECK_VERSION).expected(None)?;
+    let expected = SourceSnapshot::generate(INTERFACE_DATASET_SEED).expected(None)?;
     let prompt = format!(
         "请按接口指定的原生 JSON 格式约束返回这份记录，保持每个 ID 对应的负责人和版本，不新增字段：{}",
         serde_json::to_string(&expected)?

@@ -1,8 +1,8 @@
 use crate::{
     config::{ModelConfig, Target},
-    transport::{REQUEST_BUDGET, RequestFailure, Transport, messages_body},
+    transport::{REQUEST_BUDGET, RequestFailure, RequestOutcome, Transport, messages_body},
 };
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{path::Path, time::Instant};
@@ -31,24 +31,35 @@ pub async fn check(
         .send(body, false, Instant::now() + REQUEST_BUDGET)
         .await?;
     if let Some(failure) = &outcome.failure {
-        bail!(
-            "{}",
-            match failure {
-                RequestFailure::Http(401 | 403) => "模型连通性失败：API 密钥未通过验证".into(),
-                RequestFailure::Http(404) => "模型连通性失败：模型或接口地址不存在".into(),
-                RequestFailure::Cancelled => "连接检查已取消".into(),
-                _ => format!("模型连通性失败：{}", failure.title()),
-            }
-        );
+        return Err(connection_error(&outcome, &failure.title()));
     }
     let response = outcome
         .response
+        .as_ref()
         .filter(|r| r.normal_end && !r.text.trim().is_empty() && r.calls.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("模型连通性失败：未取得完整的正常回复"))?;
+        .ok_or_else(|| connection_error(&outcome, "连接检查未取得完整的正常回复"))?;
     Ok(ConnectionReceipt {
         target: config.public_target(),
         elapsed_ms: outcome.evidence.elapsed_ms,
-        returned_model: response.model,
+        returned_model: response.model.clone(),
         evidence_id: outcome.evidence.id,
     })
+}
+fn connection_error(outcome: &RequestOutcome, fallback: &str) -> anyhow::Error {
+    if matches!(outcome.failure, Some(RequestFailure::Cancelled)) {
+        return anyhow!("连接检查已取消");
+    }
+    if let Some(attempt) = outcome.evidence.attempts.last() {
+        if let Some(status) = attempt.http_status {
+            return if attempt.response_body.trim().is_empty() {
+                anyhow!("HTTP {status}（响应正文为空）")
+            } else {
+                anyhow!("HTTP {status}\n{}", attempt.response_body)
+            };
+        }
+        if let Some(error) = &attempt.error {
+            return anyhow!(error.clone());
+        }
+    }
+    anyhow!(fallback.to_owned())
 }

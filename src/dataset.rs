@@ -50,7 +50,6 @@ pub struct SourceSnapshot {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChangeSet {
-    pub added: Vec<Record>,
     pub updated: BTreeMap<String, Record>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -71,15 +70,21 @@ pub struct Validation {
 
 impl SourceSnapshot {
     pub fn generate(seed: &str) -> Self {
+        Self::generate_files(seed, 3, 4)
+    }
+    pub fn for_omp(seed: &str) -> Self {
+        Self::generate_files(seed, 2, 1)
+    }
+    fn generate_files(seed: &str, file_count: usize, records_per_file: usize) -> Self {
         let digest = Sha256::digest(seed.as_bytes());
         let owners = [
             "林言", "周宁", "许舟", "陈晨", "张禾", "沈安", "李川", "陆雨",
         ];
         let mut files = BTreeMap::new();
-        for file in 0..3 {
-            let records = (0..4)
+        for file in 0..file_count {
+            let records = (0..records_per_file)
                 .map(|row| {
-                    let i = file * 4 + row;
+                    let i = file * records_per_file + row;
                     Record {
                         id: format!("R-{:02}", i + 1),
                         owner: owners[(digest[i] as usize) % owners.len()].into(),
@@ -103,15 +108,15 @@ impl SourceSnapshot {
             .collect()
     }
     pub fn changes(&self) -> ChangeSet {
-        let records = self.records();
-        let mut update = records[6].clone();
+        let mut update = self
+            .files
+            .values()
+            .flat_map(|file| &file.records)
+            .next()
+            .expect("generated snapshot contains records")
+            .clone();
         update.version += 1;
         ChangeSet {
-            added: vec![Record {
-                id: "R-13".into(),
-                owner: "陈晨".into(),
-                version: 1,
-            }],
             updated: BTreeMap::from([(update.id.clone(), update)]),
         }
     }
@@ -127,11 +132,6 @@ impl SourceSnapshot {
                     bail!("无效的源数据变更");
                 }
                 records.insert(id.clone(), value.clone());
-            }
-            for record in &changes.added {
-                if records.insert(record.id.clone(), record.clone()).is_some() {
-                    bail!("新增记录重复");
-                }
             }
         }
         Ok(RecordFile {
@@ -149,15 +149,14 @@ impl SourceSnapshot {
         Ok(())
     }
     pub fn prompt(&self) -> String {
-        "请读取 inputs 目录中的全部 3 份 JSON 文件，将所有 records 汇总到当前目录的 result.json。每条记录保留 id、owner、version，输出格式为 {\"records\":[...]}。请用文件工具实际读取和写入文件，保持来源值，不新增字段。".into()
+        "请用文件工具读取 inputs/source-1.json 和 inputs/source-2.json，每份文件各有一条记录。将这两条记录原样合并，写入当前目录的 result.json，格式为 {\"records\":[...]}。保留每条记录的 id、owner、version 及其原值，不增加记录或字段，不需要计算或排序。请实际完成文件读写，不要只在回复里给出结果。可用 write 写入完整文件，也可用 edit。".into()
     }
     pub fn continuation_prompt(&self) -> String {
         let changes = self.changes();
         let update = changes.updated.values().next().unwrap();
-        let added = &changes.added[0];
         format!(
-            "请在刚才的 result.json 中新增记录 {}，负责人为 {}，版本为 {}；将 {} 的版本改为 {}。保留其他全部记录及字段值，继续使用同一个结果文件。",
-            added.id, added.owner, added.version, update.id, update.version
+            "请继续处理刚才的 result.json，只将 {} 的 version 改为 {}。保留两条记录，另一条记录以及所有其他字段和值均不变，不新增或删除记录。请实际写回同一个结果文件；可用 write 写入完整文件，也可用 edit。",
+            update.id, update.version
         )
     }
 }
@@ -281,7 +280,7 @@ pub fn references_path(event: &ToolEvent, expected: &str) -> bool {
         .or(argument)
         .is_some_and(|path| path_matches(path, expected))
 }
-fn source_observed(event: &ToolEvent, expected_path: &str, source: &RecordFile) -> bool {
+pub(crate) fn source_observed(event: &ToolEvent, expected_path: &str, source: &RecordFile) -> bool {
     if event.is_error || !matches!(event.name.as_str(), "read" | "grep") {
         return false;
     }
@@ -344,21 +343,18 @@ pub fn validate_task(
     fault_delivered: bool,
 ) -> Result<Validation> {
     let mut validation = compare_records(&snapshot.expected(changes)?, output);
-    let missing_sources: Vec<_> = snapshot
-        .files
-        .iter()
-        .filter(|(name, source)| {
-            !events
-                .iter()
-                .any(|e| source_observed(e, &format!("inputs/{name}"), source))
-        })
-        .map(|(name, _)| name.clone())
-        .collect();
-    let successful_read = missing_sources.is_empty();
-    let successful_write = events.iter().any(|e| {
+    let last_write = events.iter().rposition(|e| {
         matches!(e.name.as_str(), "write" | "edit")
             && !e.is_error
             && references_path(e, "result.json")
+    });
+    let successful_write = last_write.is_some();
+    let before_write = &events[..last_write.unwrap_or(events.len())];
+    let successful_read = snapshot.files.iter().all(|(name, source)| {
+        let path = format!("inputs/{name}");
+        before_write
+            .iter()
+            .any(|e| source_observed(e, &path, source))
     });
     if !normal_end {
         validation.process_errors.push("任务未正常结束".into());
@@ -366,7 +362,7 @@ pub fn validate_task(
     if !successful_read {
         validation
             .process_errors
-            .push("没有实际读取来源文件的证据".into());
+            .push("没有在写入结果前实际读取全部来源文件的证据".into());
     }
     if !successful_write {
         validation
@@ -472,7 +468,7 @@ mod tests {
     }
     #[test]
     fn task_claims_files_and_abnormal_end_cannot_substitute_for_process_evidence() {
-        let s = SourceSnapshot::generate("same-source");
+        let s = SourceSnapshot::for_omp("same-source");
         let expected = json!(s.expected(None).unwrap());
         assert!(
             !validate_task(&s, None, &expected, CheckId::Continuous, &[], true, false)
@@ -482,7 +478,6 @@ mod tests {
         let events = [
             event("read", false),
             event("read2", false),
-            event("read3", false),
             event("write", false),
         ];
         assert!(
@@ -513,14 +508,50 @@ mod tests {
         );
     }
     #[test]
+    fn reading_sources_after_writing_does_not_prove_data_dependency() {
+        let snapshot = SourceSnapshot::for_omp("read-before-write");
+        let output = json!(snapshot.expected(None).unwrap());
+        let mut events = vec![
+            event("write", false),
+            event("read", false),
+            event("read2", false),
+        ];
+        assert!(
+            !validate_task(
+                &snapshot,
+                None,
+                &output,
+                CheckId::Continuous,
+                &events,
+                true,
+                false
+            )
+            .unwrap()
+            .passed
+        );
+        events.push(event("edit", false));
+        assert!(
+            validate_task(
+                &snapshot,
+                None,
+                &output,
+                CheckId::Continuous,
+                &events,
+                true,
+                false
+            )
+            .unwrap()
+            .passed
+        );
+    }
+    #[test]
     fn injected_error_delivery_and_recovery_are_required() {
-        let s = SourceSnapshot::generate("same-source");
+        let s = SourceSnapshot::for_omp("same-source");
         let expected = json!(s.expected(None).unwrap());
         let events = [
             event("read", true),
             event("read", false),
             event("read2", false),
-            event("read3", false),
             event("write", false),
         ];
         assert!(
@@ -545,19 +576,22 @@ mod tests {
         );
     }
     #[test]
-    fn continuation_requires_addition_update_and_preservation() {
-        let s = SourceSnapshot::generate("continuation");
+    fn continuation_requires_single_update_and_preserves_other_data() {
+        let s = SourceSnapshot::for_omp("continuation");
+        let original = s.expected(None).unwrap();
         let changes = s.changes();
         let expected = s.expected(Some(&changes)).unwrap();
-        assert_eq!(expected.records.len(), 13);
-        assert!(compare_records(&expected, &json!(expected)).passed);
-        let unchanged = s.expected(None).unwrap();
-        let result = compare_records(&expected, &json!(unchanged));
-        assert_eq!(result.differences.len(), 2);
-        let mut bad = expected.clone();
-        bad.records[0].owner = "changed unexpectedly".into();
-        assert!(!compare_records(&expected, &json!(bad)).passed);
-        let mut wrong_type = json!(expected);
+        let mut correct = original.clone();
+        correct.records[0].version += 1;
+        assert!(compare_records(&expected, &json!(correct)).passed);
+        assert!(!compare_records(&expected, &json!(original)).passed);
+        let mut missing = correct.clone();
+        missing.records.pop();
+        assert!(!compare_records(&expected, &json!(missing)).passed);
+        let mut changed = correct.clone();
+        changed.records[1].owner = "changed unexpectedly".into();
+        assert!(!compare_records(&expected, &json!(changed)).passed);
+        let mut wrong_type = json!(correct);
         wrong_type["records"][0]["version"] = json!("1");
         assert!(!compare_records(&expected, &wrong_type).passed);
     }

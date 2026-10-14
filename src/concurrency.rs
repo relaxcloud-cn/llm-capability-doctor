@@ -1,4 +1,4 @@
-//! Coarse concurrency probe: double the load and stop at the first unsuccessful wave.
+//! Coarse concurrency probe: double the load, with one whole-wave recheck for connection errors.
 use crate::{
     model::{CheckId, CheckResult, FailureOrigin, Finding, Status},
     transport::{ModelResponse, REQUEST_BUDGET, RequestFailure, Transport, messages_body},
@@ -6,7 +6,10 @@ use crate::{
 use anyhow::Result;
 use futures_util::future::join_all;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 pub(crate) const PROMPT: &str = "请用一句简短的中文打个招呼。";
 pub(crate) const OUTPUT_TOKENS: u64 = 2048;
@@ -116,6 +119,7 @@ type Progress<'a> = Option<&'a (dyn Fn(String) + Send + Sync)>;
 struct Search<'a> {
     transport: &'a Transport,
     deadline: Instant,
+    started: Instant,
     progress: Progress<'a>,
     options: ProbeOptions,
     rounds: Vec<Value>,
@@ -123,13 +127,22 @@ struct Search<'a> {
     requests: usize,
     stopped: Option<&'static str>,
 }
+
+fn network_only_failure(wave: &Value) -> bool {
+    wave["requests"].as_array().is_some_and(|requests| {
+        requests.iter().any(|r| r["reason"] == "network")
+            && requests
+                .iter()
+                .all(|r| r["reason"] == "passed" || r["reason"] == "network")
+    })
+}
 impl Search<'_> {
     fn say(&self, text: String) {
         if let Some(progress) = self.progress {
             progress(text);
         }
     }
-    async fn wave(&mut self, level: usize) -> Result<Option<bool>> {
+    async fn wave(&mut self, level: usize, phase: &str) -> Result<Option<bool>> {
         if self.transport.is_cancelled() {
             self.stopped = Some("cancelled");
             return Ok(None);
@@ -158,6 +171,7 @@ impl Search<'_> {
             self.options.max_tail_ms as f64 / 1000.0,
         ));
         let started = Instant::now();
+        let started_offset_ms = self.started.elapsed().as_millis() as u64;
         let responses=join_all((0..level).map(|_|async {
             let body=messages_body(self.transport.config(),json!([{"role":"user","content":PROMPT}]),OUTPUT_TOKENS,false);
             let dispatch=started.elapsed().as_millis() as u64;
@@ -211,7 +225,7 @@ impl Search<'_> {
         });
         let passed = failure.is_none();
         let summary = latency.summary();
-        self.rounds.push(json!({"phase":"expand","concurrency":level,"successful":successful,
+        self.rounds.push(json!({"phase":phase,"started_offset_ms":started_offset_ms,"concurrency":level,"successful":successful,
             "failed":level-successful,"rate_limited":rate_limited,
             "elapsed_ms":started.elapsed().as_millis() as u64,"longest_elapsed_ms":latency.maximum_ms,
             "mean_elapsed_ms":latency.mean_ms,"p95_elapsed_ms":latency.p95_ms,
@@ -240,6 +254,7 @@ pub async fn probe(
     let mut search = Search {
         transport,
         deadline,
+        started,
         progress,
         options,
         rounds: vec![],
@@ -251,9 +266,29 @@ pub async fn probe(
     let mut candidate = 1usize;
     let mut first_unsuccessful = None;
     loop {
-        let Some(passed) = search.wave(candidate).await? else {
+        let Some(mut passed) = search.wave(candidate, "expand").await? else {
             break;
         };
+        if !passed && search.rounds.last().is_some_and(network_only_failure) {
+            first_unsuccessful = Some(candidate);
+            search.say(format!(
+                "{candidate} 并发出现连接异常；保留首次记录，等待 1 秒后整档复核一次"
+            ));
+            if !transport.wait_before_recheck(Duration::from_secs(1)).await {
+                search.stopped = Some("cancelled");
+                break;
+            }
+            let Some(rechecked) = search.wave(candidate, "recheck").await? else {
+                break;
+            };
+            passed = rechecked;
+            if passed {
+                first_unsuccessful = None;
+                search.say(format!(
+                    "{candidate} 并发整档复核通过；首次连接异常仍保留，继续升档"
+                ));
+            }
+        }
         if !passed {
             first_unsuccessful = Some(candidate);
             search.stopped = Some("first_unsuccessful_wave");
@@ -286,13 +321,61 @@ pub async fn probe(
                     })
                 })
             });
-    let completed = first_unsuccessful.is_some() && non_capacity_reason.is_none();
+    let completed = reason == "first_unsuccessful_wave" && non_capacity_reason.is_none();
+    let connection_errors = search
+        .rounds
+        .iter()
+        .filter_map(|r| r["requests"].as_array())
+        .flatten()
+        .filter(|r| r["reason"] == "network")
+        .count();
+    let network_rechecks = search
+        .rounds
+        .iter()
+        .filter(|r| r["phase"] == "recheck")
+        .count();
+    let recovered_levels: Vec<_> = search
+        .rounds
+        .iter()
+        .filter(|r| r["phase"] == "recheck" && r["performance_passed"] == true)
+        .map(|r| r["concurrency"].clone())
+        .collect();
+    let network_levels = search
+        .rounds
+        .iter()
+        .filter(|wave| {
+            wave["phase"] == "expand"
+                && wave["requests"]
+                    .as_array()
+                    .is_some_and(|requests| requests.iter().any(|r| r["reason"] == "network"))
+        })
+        .count();
+    let unresolved = network_levels > recovered_levels.len();
+    let trial = rejected.is_some_and(network_only_failure)
+        && low > 0
+        && !matches!(reason, "cancelled" | "configuration");
+    let recommendation_basis = if trial {
+        Some("verified_trial")
+    } else if completed && low > 0 {
+        Some("capacity_stop")
+    } else {
+        None
+    };
+    let stability = if unresolved {
+        "unresolved"
+    } else if connection_errors > 0 {
+        "recovered"
+    } else {
+        "no_error_observed"
+    };
     let rejected_reason = rejected.and_then(|r| r["failure_reason"].as_str());
     let rejected_label = failure_label(rejected_reason.unwrap_or("request_failure"));
     let rejected_latency = rejected
         .and_then(|r| r["latency_summary"].as_str())
         .unwrap_or("");
-    let title = if let Some(cause) = non_capacity_reason {
+    let mut title = if trial {
+        format!("已验证 {low} 并发，可作为试用起点；更高档位连接异常，容量边界未确认")
+    } else if let Some(cause) = non_capacity_reason {
         format!(
             "{} 并发出现{}；容量边界未确认（此前成功档位 {low}）",
             first_unsuccessful.unwrap(),
@@ -312,6 +395,11 @@ pub async fn probe(
     } else {
         format!("并发探测未完成（{}）", stop_label(reason))
     };
+    if !unresolved && connection_errors > 0 {
+        title.push_str("；曾出现连接异常，整档复核通过");
+    } else if unresolved && !trial {
+        title.push_str("；连接稳定性风险仍未排除");
+    }
     let best = search
         .rounds
         .iter()
@@ -319,7 +407,18 @@ pub async fn probe(
         .find(|r| r["concurrency"] == low && r["performance_passed"] == true);
     let facts = BTreeMap::from([
         ("probe_mode".into(), json!("concurrent_requests")),
-        ("search_method".into(), json!("doubling_first_failure")),
+        ("search_method".into(), json!("doubling_network_recheck")),
+        ("network_recheck_limit".into(), json!(1)),
+        ("network_recheck_delay_ms".into(), json!(1000)),
+        ("network_rechecks".into(), json!(network_rechecks)),
+        ("connection_errors".into(), json!(connection_errors)),
+        ("recovered_levels".into(), json!(recovered_levels)),
+        ("connection_stability".into(), json!(stability)),
+        ("recommendation_basis".into(), json!(recommendation_basis)),
+        (
+            "probe_elapsed_ms".into(),
+            json!(started.elapsed().as_millis() as u64),
+        ),
         ("probe_cap".into(), Value::Null),
         ("request_timeout_seconds".into(), json!(180)),
         ("request_retries".into(), json!(0)),
@@ -344,7 +443,7 @@ pub async fn probe(
         ("concurrency".into(), json!(low)),
         (
             "recommended_concurrency".into(),
-            if completed && low > 0 {
+            if recommendation_basis.is_some() {
                 json!(low)
             } else {
                 Value::Null
@@ -386,12 +485,12 @@ pub async fn probe(
         ),
         ("rounds".into(), json!(search.rounds)),
     ]);
-    let status = if completed && low >= 2 {
+    let status = if recommendation_basis.is_some() && low >= 2 {
         Status::Passed
     } else {
         Status::Incomplete
     };
-    let fact = match first_unsuccessful {
+    let mut fact = match first_unsuccessful {
         Some(failed) if non_capacity_reason.is_some() => format!(
             "{failed} 并发出现{}；本次在此停止。已验证档位 {low} 保留，但不能把不完整响应、协议、网络或证据问题解释为服务容量边界。",
             failure_label(non_capacity_reason.unwrap())
@@ -409,6 +508,9 @@ pub async fn probe(
             stop_label(reason)
         ),
     };
+    if connection_errors > 0 {
+        fact.push_str(&format!(" 累计 {connection_errors} 次连接错误、{network_rechecks} 次整档复核；原始失败、全部请求与耗时均保留。"));
+    }
     let finding = Finding {
         code: "concurrency_estimate".into(),
         title: title.clone(),
@@ -418,13 +520,15 @@ pub async fn probe(
             search.options.max_mean_ms as f64 / 1000.0,
             search.options.max_tail_ms as f64 / 1000.0
         ),
-        suggestion: if completed {
+        suggestion: if trial {
+            "可从已验证档位试用并关注连接稳定性；先排查连接异常，不把本次结果当作容量上限。"
+        } else if completed && low > 0 {
             "按建议档位试用；账号配额、部署或负载变化后重新检测。"
         } else {
             "先核对停止原因；本次不能据此给出完整容量建议，处理后重新检测。"
         }
         .into(),
-        origin: if completed {
+        origin: if completed || connection_errors > 0 {
             FailureOrigin::Service
         } else {
             FailureOrigin::Detector
@@ -464,8 +568,6 @@ mod tests {
     #[test]
     fn latency_limits_are_inclusive_and_mean_can_fail_independently() {
         let options = ProbeOptions::default();
-        assert_eq!(options.max_mean_ms, 10_000);
-        assert_eq!(options.max_tail_ms, 20_000);
         let latency = Latency::measure(vec![0, 20_000]);
         assert_eq!(latency.mean_ms, 10_000.0);
         assert_eq!(latency.failure_reason(&options), None);

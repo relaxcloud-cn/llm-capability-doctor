@@ -54,7 +54,10 @@ struct Cli {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("{error}");
+        eprintln!(
+            "{}",
+            agent_check::terminal::safe_error_text(&error.to_string())
+        );
         std::process::exit(2);
     }
 }
@@ -230,9 +233,8 @@ async fn run() -> Result<()> {
         let receipt = match agent_check::preflight::check(&config, &root, cancel.clone()).await {
             Ok(receipt) => receipt,
             Err(error) => {
-                agent_check::terminal::startup(&error.to_string(), "✗", "red", cli.no_color);
                 agent_check::terminal::startup(
-                    "未开始正式检测，请修正配置后重新运行",
+                    "未开始正式检测，请核对以下原始错误后重试",
                     "✗",
                     "red",
                     cli.no_color,

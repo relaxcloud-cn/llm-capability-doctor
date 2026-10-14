@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-pub const CHECK_VERSION: &str = "agentcheck/10";
+pub const CHECK_VERSION: &str = "agentcheck/12";
 pub const RESULT_SCHEMA_VERSION: u32 = 2;
 pub const MIN_CONTEXT_TOKENS: u64 = 131_072;
 pub const OMP_VERSION: &str = env!("AGENTCHECK_OMP_VERSION");

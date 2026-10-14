@@ -353,7 +353,7 @@ pub async fn run_task(
     let cancel = cancel.child_token();
     let started = Instant::now();
     let deadline = started + TASK_BUDGET;
-    let snapshot = SourceSnapshot::generate(crate::model::CHECK_VERSION);
+    let snapshot = SourceSnapshot::for_omp("agentcheck/11");
     let workdir = folder.join("workspace");
     snapshot.write_inputs(&workdir)?;
     let config_dir = folder.join("config");
@@ -534,8 +534,22 @@ export default function(pi) {
         session.wait_ready(deadline, &cancel).await?;
         session.turn(snapshot.prompt(), deadline, &cancel).await?;
         if kind == CheckId::Multiturn {
-            let output = dataset::read_result(&workdir)?;
-            let events = session.tools.values().cloned().collect::<Vec<_>>();
+            let Ok(output) = dataset::read_result(&workdir) else {
+                first_valid = false;
+                first_content_valid = false;
+                return Ok(());
+            };
+            let events = session
+                .transcript
+                .iter()
+                .filter(|frame| frame["type"] == "tool_execution_end")
+                .filter_map(|frame| {
+                    frame["toolCallId"]
+                        .as_str()
+                        .and_then(|id| session.tools.get(id))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let validation = dataset::validate_task(
                 &snapshot,
                 None,
@@ -592,7 +606,8 @@ export default function(pi) {
         }
     }
     let fault_delivered = *delivered.lock().await;
-    let recovered = continued_after_fault(&ordered, &*continuation_calls.lock().await);
+    let recovered =
+        continued_after_fault(&ordered, &*continuation_calls.lock().await, config.protocol);
     let mut result = TaskResult {
         finished: false,
         id: format!("{:?}-{repetition}", kind).to_lowercase(),
@@ -644,16 +659,12 @@ export default function(pi) {
         }
         Ok(()) => {
             result.finished = true;
-            let changes = snapshot.changes();
+            let changes = (kind == CheckId::Multiturn && first_valid).then(|| snapshot.changes());
             let output = dataset::read_result(&workdir);
             if let Ok(output) = output {
                 let validation = dataset::validate_task(
                     &snapshot,
-                    if kind == CheckId::Multiturn && first_valid {
-                        Some(&changes)
-                    } else {
-                        None
-                    },
+                    changes.as_ref(),
                     &output,
                     kind,
                     &result.tool_events,
@@ -674,7 +685,7 @@ export default function(pi) {
                     match kind {
                         CheckId::Continuous => "连续执行多个工具，任务结果正确",
                         CheckId::Recovery => "工具出错后恢复，任务结果正确",
-                        _ => "新增和修改要求均已落实",
+                        _ => "指定字段修改生效，其余内容保持不变",
                     }
                     .into()
                 } else if !result.normal_end {
@@ -701,11 +712,20 @@ export default function(pi) {
                     } else {
                         "任务结果存在遗漏或字段错误".into()
                     }
+                } else if !validation.content_valid {
+                    "结果文件格式、字段或类型不符合要求".into()
                 } else {
                     "缺少实际读取或写入证据".into()
                 };
                 if result.status != crate::model::Status::Passed {
-                    let fact = serde_json::to_string(&validation)?;
+                    if kind == CheckId::Recovery && recovered {
+                        result.title = format!("工具已恢复；{}", result.title);
+                    }
+                    let fact = serde_json::to_string(&json!({
+                        "validation": validation,
+                        "fault_delivered": fault_delivered,
+                        "recovery_observed": recovered,
+                    }))?;
                     result.findings.push(finding(
                         "task_validation",
                         &result.title,
@@ -730,6 +750,9 @@ export default function(pi) {
                     "任务未正常结束，结果文件尚未确认"
                 }
                 .into();
+                if kind == CheckId::Recovery && recovered {
+                    result.title = format!("工具已恢复；{}", result.title);
+                }
                 result.findings.push(finding(
                     "missing_result",
                     &result.title,
@@ -766,9 +789,22 @@ fn task_status(
         crate::model::Status::Passed
     }
 }
-fn continued_after_fault(events: &[ToolEvent], calls: &std::collections::BTreeSet<String>) -> bool {
+pub(crate) fn wire_call_id(protocol: Protocol, runtime_id: &str) -> &str {
+    if protocol == Protocol::Responses {
+        runtime_id
+            .split_once('|')
+            .map_or(runtime_id, |(call, _)| call)
+    } else {
+        runtime_id
+    }
+}
+fn continued_after_fault(
+    events: &[ToolEvent],
+    calls: &std::collections::BTreeSet<String>,
+    protocol: Protocol,
+) -> bool {
     events.iter().any(|event| {
-        calls.contains(&event.call_id)
+        calls.contains(wire_call_id(protocol, &event.call_id))
             && !event.is_error
             && ["read", "glob", "grep", "write", "edit"].contains(&event.name.as_str())
     })
@@ -857,9 +893,14 @@ mod tests {
         let calls = std::collections::BTreeSet::from(["new".into()]);
         assert!(!continued_after_fault(
             std::slice::from_ref(&earlier),
-            &calls
+            &calls,
+            Protocol::ChatCompletions,
         ));
-        assert!(continued_after_fault(&[earlier, later], &calls));
+        assert!(continued_after_fault(
+            &[earlier, later],
+            &calls,
+            Protocol::ChatCompletions
+        ));
     }
     #[test]
     fn fault_is_proven_by_forwarded_tool_context_not_assistant_claim() {

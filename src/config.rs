@@ -149,9 +149,45 @@ impl ModelConfig {
         }
     }
     pub fn redact(&self, value: &str) -> String {
-        let mut redacted = value.replace(&self.api_key, "[REDACTED]");
+        let mut secrets = vec![self.api_key.clone()];
         if let Some(query) = self.endpoint.query() {
-            redacted = redacted.replace(query, "[REDACTED]");
+            secrets.push(query.to_owned());
+            secrets.extend(
+                self.endpoint
+                    .query_pairs()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.to_ascii_lowercase().as_str(),
+                            "key"
+                                | "api_key"
+                                | "apikey"
+                                | "api-key"
+                                | "token"
+                                | "access_token"
+                                | "auth"
+                                | "authorization"
+                                | "password"
+                                | "secret"
+                                | "signature"
+                                | "sig"
+                        )
+                    })
+                    .map(|(_, value)| value.into_owned()),
+            );
+        }
+        let mut patterns = Vec::new();
+        for secret in secrets.into_iter().filter(|value| !value.is_empty()) {
+            let escaped = serde_json::to_string(&secret).unwrap();
+            patterns.push(escaped[1..escaped.len() - 1].to_owned());
+            patterns
+                .push(url::form_urlencoded::byte_serialize(secret.as_bytes()).collect::<String>());
+            patterns.push(secret);
+        }
+        patterns.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        patterns.dedup();
+        let mut redacted = value.to_owned();
+        for pattern in patterns {
+            redacted = redacted.replace(&pattern, "[REDACTED]");
         }
         redacted
     }

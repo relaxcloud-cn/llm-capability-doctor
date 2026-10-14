@@ -95,6 +95,17 @@ fn recommended(check: &CheckResult) -> Option<u64> {
         .flatten()
         .filter(|n| *n > 0)
 }
+fn connection_warning(check: &CheckResult) -> Option<&'static str> {
+    match check
+        .facts
+        .get("connection_stability")
+        .and_then(Value::as_str)
+    {
+        Some("recovered") => Some("曾出现连接错误，同档整轮复查后恢复；不代表持续无连接错误。"),
+        Some("unresolved") => Some("连接稳定性风险尚未解决，容量边界未知。"),
+        _ => None,
+    }
+}
 fn verified_pass(check: &CheckResult) -> bool {
     check.status == Status::Passed
         && check.assessment.as_ref().is_some_and(|a| {
@@ -114,7 +125,10 @@ fn conditions(check: &CheckResult) -> &[String] {
         .unwrap_or(&[])
 }
 fn has_advice(check: &CheckResult) -> bool {
-    check.status != Status::Passed || !check.findings.is_empty() || !conditions(check).is_empty()
+    check.status != Status::Passed
+        || !check.findings.is_empty()
+        || !conditions(check).is_empty()
+        || connection_warning(check).is_some()
 }
 fn display_name(run: &RunResult, id: CheckId) -> &str {
     let registered = run.check_name(id);
@@ -140,9 +154,9 @@ fn note(run: &RunResult, check: &CheckResult) -> String {
             .map(|n| format!("本次最低要求 {} tokens", tokens(n)))
             .unwrap_or_else(|| "本次记录的请求容量".into()),
         CheckId::Performance => "满足本次时延标准的请求档位".into(),
-        CheckId::Continuous => "连续完成文件读取与汇总".into(),
-        CheckId::Recovery => "遇到可恢复错误后继续任务".into(),
-        CheckId::Multiturn => "按新要求新增、修改并保留内容".into(),
+        CheckId::Continuous => "本次 OMP 原生工具读取与合并".into(),
+        CheckId::Recovery => "本次临时读取错误后的任务执行".into(),
+        CheckId::Multiturn => "同会话按要求更新并保留无关内容".into(),
         CheckId::Custom(_) => run
             .plan
             .iter()
@@ -184,10 +198,10 @@ fn row_copy(check: &CheckResult) -> (String, String, bool) {
         }
         CheckId::Performance => {
             if let Some(level) = recommended(check) {
-                let best = rounds(check)
-                    .iter()
-                    .find(|r| r["concurrency"].as_u64() == Some(level));
-                let detail = best
+                let best = rounds(check).iter().rev().find(|r| {
+                    r["concurrency"].as_u64() == Some(level) && r["performance_passed"] != false
+                });
+                let mut detail = best
                     .and_then(|r| {
                         Some((
                             r["mean_elapsed_ms"].as_f64()?,
@@ -206,6 +220,18 @@ fn row_copy(check: &CheckResult) -> (String, String, bool) {
                         )
                     })
                     .unwrap_or_else(|| "仅为本次负载下的建议档位，不是精确容量极限。".into());
+                if let Some(warning) = connection_warning(check) {
+                    detail.push_str(warning);
+                }
+                if check
+                    .facts
+                    .get("recommendation_basis")
+                    .and_then(Value::as_str)
+                    == Some("verified_trial")
+                {
+                    detail.push_str("仅作已验证的试用起点，容量边界未知，需关注连接稳定性风险。");
+                    return (check.title.clone(), detail, false);
+                }
                 return (format!("建议 {level} 并发"), detail, true);
             }
         }
@@ -235,18 +261,13 @@ fn row_copy(check: &CheckResult) -> (String, String, bool) {
                     "本次返回的格式和记录内容已按要求核对。",
                 )
             }
-            CheckId::Continuous => (
-                "多步操作连续完成，结果正确",
-                "实际读写过程和最终文件均已核对。",
-            ),
-            CheckId::Recovery => (
-                "收到错误后恢复并完成任务",
-                "已核对错误实际送达、后续操作及最终结果。",
-            ),
-            CheckId::Multiturn => (
-                "新要求已落实，原有记录保留正确",
-                "分别核对修改前后的文件，不仅看模型声称已完成。",
-            ),
+            CheckId::Continuous | CheckId::Recovery | CheckId::Multiturn => {
+                return (
+                    check.title.clone(),
+                    "已按保存的任务规则核对执行过程与结果；结论仅限于本次服务、模型与固定 OMP 版本组合。".into(),
+                    false,
+                );
+            }
             _ => return (check.title.clone(), String::new(), false),
         };
         return (title.into(), detail.into(), false);
@@ -358,11 +379,39 @@ fn advice(run: &RunResult) -> Vec<Advice> {
     for check in run.checks.iter().filter(|c| has_advice(c)) {
         if check.id == CheckId::Performance {
             if let Some(level) = recommended(check) {
+                if check.facts.contains_key("recommendation_basis") {
+                    let mut facts: Vec<String> =
+                        check.findings.iter().map(|f| human_fact(&f.fact)).collect();
+                    facts.extend(conditions(check).iter().cloned());
+                    if let Some(warning) = connection_warning(check) {
+                        facts.push(warning.into());
+                    }
+                    let trial = check
+                        .facts
+                        .get("recommendation_basis")
+                        .and_then(Value::as_str)
+                        == Some("verified_trial");
+                    output.push(Advice {
+                        check: check.id,
+                        tone: status_key(check.status),
+                        title: check.title.clone(),
+                        fact: facts.join("；"),
+                        impact: if trial {
+                            format!("{level} 并发仅为已验证的试用起点；连接稳定性存在风险，容量边界未知。")
+                        } else {
+                            format!("{level} 并发是本次负载下的建议档位，不是精确容量极限。")
+                        },
+                        suggestion: "按实际业务负载试用；服务条件改变后重测，并持续关注连接错误。".into(),
+                        origin: None,
+                    });
+                    continue;
+                }
                 let rejected = fact_u64(check, "first_unsuccessful_concurrency");
                 let all_completed = rejected
                     .and_then(|n| {
                         rounds(check)
                             .iter()
+                            .rev()
                             .find(|r| r["concurrency"].as_u64() == Some(n))
                     })
                     .is_some_and(|r| {
@@ -522,6 +571,48 @@ fn evidence_links(run: &RunResult, ids: &[String]) -> String {
         ids.len()
     )
 }
+fn execution_details(output: &mut String, check: CheckId, observed: &Value) {
+    let mut separator = "<p>阶段记录：";
+    for (key, yes, no) in [
+        ("normal_end", "正常结束", "未确认正常结束"),
+        ("fault_delivered", "读取故障已送达", "未确认读取故障送达"),
+        (
+            "recovery_observed",
+            "故障后已继续执行工具",
+            "未确认故障后继续执行工具",
+        ),
+    ] {
+        if check != CheckId::Recovery && key != "normal_end" {
+            continue;
+        }
+        if let Some(value) = observed["execution"][key].as_bool() {
+            output.push_str(separator);
+            output.push_str(if value { yes } else { no });
+            separator = "；";
+        }
+    }
+    let stage = match observed["failure_stage"].as_str() {
+        Some("source_read") => Some("来源文件读取"),
+        Some("result_write") => Some("结果文件写入"),
+        Some("result_content") => Some("结果内容核对"),
+        Some("fault_delivery") => Some("读取故障送达"),
+        Some("recovery") => Some("故障后继续执行"),
+        Some("first_turn") => Some("首轮结果"),
+        Some("continuation") => Some("同会话继续执行"),
+        Some("runtime") => Some("运行环境或任务结束"),
+        Some("evidence") => Some("证据核验"),
+        _ => None,
+    };
+    if let Some(stage) = stage {
+        output.push_str(separator);
+        output.push_str("未满足或未确认的阶段：");
+        output.push_str(stage);
+        separator = "；";
+    }
+    if separator == "；" {
+        output.push_str("。</p>");
+    }
+}
 fn proofs(run: &RunResult) -> String {
     let requirements = run
         .checks
@@ -595,6 +686,9 @@ fn proofs(run: &RunResult) -> String {
                     },
                     html(&requirement.reason)
                 ));
+                if check.id.is_agent() {
+                    execution_details(&mut output, check.id, &requirement.observed);
+                }
                 if let Some(value) = requirement.origin {
                     output.push_str(&format!("<p>记录归属：{}</p>", origin(value)));
                 }
@@ -655,6 +749,38 @@ fn load_details(run: &RunResult) -> String {
             "<p>本次单请求硬超时 {timeout} 秒，不是性能合格线。</p>"
         ));
     }
+    for (key, label) in [
+        ("request_count", "实际请求总数"),
+        ("connection_errors", "连接错误请求总数（含恢复前）"),
+        ("network_rechecks", "同档整轮复查次数"),
+    ] {
+        if let Some(value) = fact_u64(check, key) {
+            output.push_str(&format!("<p data-fact=\"{key}\">{label}：{value}</p>"));
+        }
+    }
+    if check.facts.contains_key("network_rechecks") {
+        output.push_str(&format!(
+            "<p data-fact=\"elapsed_ms\">本次并发检测总耗时（含复查与等待）：{}</p>",
+            seconds(check.elapsed_ms)
+        ));
+    }
+    if let Some(levels) = check
+        .facts
+        .get("recovered_levels")
+        .and_then(Value::as_array)
+    {
+        let levels = levels
+            .iter()
+            .filter_map(Value::as_u64)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>();
+        if !levels.is_empty() {
+            output.push_str(&format!("<p data-fact=\"recovered_levels\">连接错误后整轮复查通过的档位：{}；原始失败请求仍保留在下表与总数中。</p>", levels.join("、")));
+        }
+    }
+    if let Some(warning) = connection_warning(check) {
+        output.push_str(&format!("<p class=\"source-note\">{warning}</p>"));
+    }
     output.push_str("<div class=\"table-scroll\" role=\"region\" aria-label=\"并发明细，可横向滚动\" tabindex=\"0\"><table class=\"load-table\"><thead><tr><th scope=\"col\">并发档位</th><th scope=\"col\">完成 / 总数</th><th scope=\"col\">平均用时</th><th scope=\"col\">尾部用时</th><th scope=\"col\">记录结果</th></tr></thead><tbody>");
     for row in rounds(check) {
         let n = row["concurrency"].as_u64();
@@ -672,14 +798,39 @@ fn load_details(run: &RunResult) -> String {
             .as_str()
             .map(crate::concurrency::failure_label)
             .unwrap_or("未记录");
-        let class = if n.is_some() && n == recommended(check) {
+        let class = if n.is_some() && n == recommended(check) && row["performance_passed"] != false
+        {
             "recommended"
         } else if row["performance_passed"] == false {
             "boundary"
         } else {
             ""
         };
-        output.push_str(&format!("<tr class=\"{class}\"><td>{}</td><td>{} / {}</td><td>{}</td><td>{}</td><td>{}</td></tr>",show(n),show(row["successful"].as_u64()),show(n),measured_ms(&row["mean_elapsed_ms"]),html(&tail),html(label)));
+        let mut level = show(n);
+        let mut result = html(label);
+        let phase = row["phase"].as_str();
+        if let Some(phase) = phase {
+            let phase_label = match phase {
+                "expand" => "扩展检测",
+                "recheck" => "同档整轮复查",
+                _ => phase,
+            };
+            level.push_str(&format!("<br>{}", html(phase_label)));
+            if let Some(offset) = row["started_offset_ms"].as_u64() {
+                result.push_str(&format!("<br>开始于 {}", seconds(offset)));
+            }
+            if let Some(elapsed) = row["elapsed_ms"].as_u64() {
+                result.push_str(&format!("；整轮耗时 {}", seconds(elapsed)));
+            }
+            if let Some(requests) = row["requests"].as_array() {
+                let errors = requests.iter().filter(|r| r["reason"] == "network").count();
+                result.push_str(&format!("<br>连接错误请求：{errors}"));
+            }
+        }
+        let phase_attr = phase
+            .map(|p| format!(" data-phase=\"{}\"", html(p)))
+            .unwrap_or_default();
+        output.push_str(&format!("<tr class=\"{class}\"{phase_attr}><td>{level}</td><td>{} / {}</td><td>{}</td><td>{}</td><td>{result}</td></tr>",show(row["successful"].as_u64()),show(n),measured_ms(&row["mean_elapsed_ms"]),html(&tail)));
     }
     output.push_str("</tbody></table></div><p class=\"text-note\">背景负载、网络和配额影响测量结果；缺少环境记录时，不把差异归因于模型本体。</p></div></details>");
     output

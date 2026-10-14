@@ -33,6 +33,8 @@ struct Case {
     check: CheckId,
     variant: String,
     expected: Status,
+    #[serde(default)]
+    observed: Option<Value>,
 }
 struct Service {
     case: Case,
@@ -402,25 +404,20 @@ async fn execute_http(case: &Case, protocol: Protocol, dir: &Path) -> CheckResul
     }
     result
 }
-fn fixture_snapshot() -> SourceSnapshot {
-    let files: BTreeMap<_, _> = (0..3)
-        .map(|file| {
-            let records = (0..4)
-                .map(|row| {
-                    let i = file * 4 + row + 1;
-                    Record {
-                        id: format!("R-{i:02}"),
-                        owner: format!("owner-{i}"),
-                        version: 1,
-                    }
-                })
-                .collect();
-            (format!("source-{}.json", file + 1), RecordFile { records })
+fn fixture_snapshot(repetition: u8) -> SourceSnapshot {
+    let files: BTreeMap<_, _> = (1..=2)
+        .map(|i| {
+            let records = vec![Record {
+                id: format!("R-{i:02}"),
+                owner: format!("owner-{repetition}-{i}"),
+                version: 1,
+            }];
+            (format!("source-{i}.json"), RecordFile { records })
         })
         .collect();
     let sha256 = format!("{:x}", Sha256::digest(serde_json::to_vec(&files).unwrap()));
     SourceSnapshot {
-        seed: "independent-fixture".into(),
+        seed: format!("independent-fixture-{repetition}"),
         files,
         sha256,
     }
@@ -447,18 +444,18 @@ fn finish_turn(trace: &mut Vec<Value>, normal: bool) {
     trace.push(json!({"type":"agent_end","isTerminal":true}));
 }
 fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
-    let snapshot = fixture_snapshot();
-    let first_records: Vec<_> = snapshot
-        .files
-        .values()
-        .flat_map(|f| f.records.clone())
-        .collect();
-    let first = json!({"records":first_records});
     let mut check = CheckResult::pending(case.check);
     check.status = Status::Passed;
     check.finished = true;
     check.title = "观察层声称通过".into();
     for repetition in 1..=2 {
+        let snapshot = fixture_snapshot(repetition);
+        let first_records: Vec<_> = snapshot
+            .files
+            .values()
+            .flat_map(|f| f.records.clone())
+            .collect();
+        let mut first = json!({"records":first_records});
         let task_id = format!("{}-{repetition}", case.check.key());
         let folder = dir.join("agent").join(&task_id);
         let mut output = first.clone();
@@ -475,8 +472,16 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
             events.push(failed);
             trace.push(json!({"type":"message_end","message":{"role":"assistant","stopReason":"toolUse","content":[{"type":"toolCall","id":if case.variant=="reused_pending_id"{"read-2"}else{"read-1"},"name":"read","arguments":{"path":if case.variant=="reused_pending_id"{"inputs/source-2.json"}else{"inputs/source-1.json"}}}]}}));
         }
-        for i in 1..=3 {
-            if (case.variant == "missing_source" && i == 3)
+        if case.variant == "write_before_reads" {
+            let write = event("write-1", "write", "result.json", false);
+            push_event(&mut trace, &write, false);
+            events.push(write);
+        }
+        for i in 1..=2 {
+            if matches!(
+                case.variant.as_str(),
+                "no_source" | "false_completion" | "first_no_sources"
+            ) || (case.variant == "missing_source" && i == 2)
                 || (case.variant == "reused_pending_id" && i == 2)
             {
                 continue;
@@ -494,31 +499,67 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
             );
             events.push(e);
         }
-        let write = event("write-1", "write", "result.json", false);
-        push_event(&mut trace, &write, false);
-        events.push(write);
-        finish_turn(&mut trace, case.variant != "abnormal_end");
+        if !matches!(
+            case.variant.as_str(),
+            "write_before_reads"
+                | "false_completion"
+                | "missing_result"
+                | "no_new_action_missing_result"
+                | "no_write"
+                | "first_no_write"
+        ) {
+            let write = event("write-1", "write", "result.json", false);
+            push_event(&mut trace, &write, false);
+            events.push(write);
+        }
+        finish_turn(
+            &mut trace,
+            case.variant != "abnormal_first"
+                && (case.variant != "abnormal_end" || case.check == CheckId::Multiturn),
+        );
         if case.check == CheckId::Multiturn {
-            atomic_json(&folder.join("stage1-result.json"), &first).unwrap();
+            if case.variant == "first_wrong" {
+                first["records"].as_array_mut().unwrap().pop();
+            }
+            if case.variant != "missing_first_snapshot" {
+                atomic_json(&folder.join("stage1-result.json"), &first).unwrap();
+            }
             if case.variant != "first_only" {
-                output["records"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(json!({"id":"R-13","owner":"陈晨","version":1}));
                 if case.variant != "missing_update" {
-                    output["records"][6]["version"] = json!(2);
+                    output["records"][0]["version"] = json!(2);
+                }
+                if case.variant == "restarted_session" {
+                    trace.push(json!({"type":"ready"}));
                 }
                 trace.push(json!({"type":"agent_start"}));
+                if case.variant == "first_no_sources" {
+                    for i in 1..=2 {
+                        let read = event(
+                            &format!("second-read-{i}"),
+                            "read",
+                            &format!("inputs/source-{i}.json"),
+                            false,
+                        );
+                        push_event(&mut trace, &read, false);
+                        events.push(read);
+                    }
+                }
                 if case.variant != "no_second_write" {
                     let write = event("write-2", "write", "result.json", false);
                     push_event(&mut trace, &write, false);
                     events.push(write);
                 }
-                finish_turn(&mut trace, true);
+                finish_turn(&mut trace, case.variant != "abnormal_end");
             }
         }
-        if case.variant == "wrong_value" {
+        if matches!(case.variant.as_str(), "wrong_value" | "abnormal_end") {
             output["records"][0]["owner"] = json!("incorrect");
+        }
+        if case.variant == "missing_preserved_record" {
+            output["records"].as_array_mut().unwrap().pop();
+        }
+        if case.variant == "changed_preserved_record" {
+            output["records"][1]["version"] = json!(2);
         }
         if case.variant == "reordered" {
             output["records"].as_array_mut().unwrap().reverse();
@@ -534,19 +575,28 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
         } else {
             "read-1"
         };
-        let returned = if case.check == CheckId::Recovery && case.variant != "no_new_action" {
+        let returned = if case.check == CheckId::Recovery
+            && !matches!(
+                case.variant.as_str(),
+                "no_new_action" | "no_new_action_missing_result"
+            ) {
             vec![
-                json!({"id":tool_id,"type":"function","function":{"name":"read","arguments":json!({"path":if tool_id=="read-2"{"inputs/source-2.json"}else{"inputs/source-1.json"}}).to_string()}}),
+                json!({"id":tool_id,"type":"function","function":{"name":"read","arguments":json!({"path":if case.variant=="wrong_arguments"{"unrelated.json"}else if tool_id=="read-2"{"inputs/source-2.json"}else{"inputs/source-1.json"}}).to_string()}}),
             ]
         } else {
             vec![]
         };
+        let delivered_call_id = if case.variant == "wrong_delivery_id" {
+            "unrelated-call"
+        } else {
+            "failed-read"
+        };
         let request = match protocol {
             Protocol::ChatCompletions => {
-                json!({"model":"fixture","messages":[{"role":"tool","tool_call_id":"failed-read","content":marker}],"stream":false})
+                json!({"model":"fixture","messages":[{"role":"tool","tool_call_id":delivered_call_id,"content":marker}],"stream":false})
             }
             Protocol::Responses => {
-                json!({"model":"fixture","input":[{"type":"function_call_output","call_id":"failed-read","output":marker}],"stream":false})
+                json!({"model":"fixture","input":[{"type":"function_call_output","call_id":delivered_call_id,"output":marker}],"stream":false})
             }
         };
         let evidence = HttpEvidence {
@@ -586,7 +636,17 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
         )
         .unwrap();
         atomic_json(&folder.join("source-snapshot.json"), &snapshot).unwrap();
-        atomic_json(&folder.join("workspace/result.json"), &output).unwrap();
+        if !matches!(
+            case.variant.as_str(),
+            "missing_result" | "false_completion" | "no_new_action_missing_result"
+        ) {
+            if case.variant == "malformed_result" {
+                std::fs::create_dir_all(folder.join("workspace")).unwrap();
+                std::fs::write(folder.join("workspace/result.json"), b"{\"records\":[").unwrap();
+            } else {
+                atomic_json(&folder.join("workspace/result.json"), &output).unwrap();
+            }
+        }
         atomic_json(&folder.join("rpc.json"), &trace).unwrap();
         let failed = case.variant == "false_failure_label";
         check.tasks.push(TaskResult {
@@ -626,6 +686,7 @@ async fn tool_requests_keep_schema_and_budgets_without_strict_enforcement() {
                 check: CheckId::Tools,
                 variant: variant.into(),
                 expected: Status::Passed,
+                observed: None,
             };
             let check = execute_http(&case, protocol, directory.path()).await;
             assert_eq!(check.status, Status::Passed);
@@ -690,6 +751,7 @@ async fn schema_requests_still_require_native_strict_output() {
             check: CheckId::Schema,
             variant: "normal".into(),
             expected: Status::Passed,
+            observed: None,
         };
         let check = execute_http(&case, protocol, directory.path()).await;
         assert_eq!(check.status, Status::Passed);
@@ -711,6 +773,67 @@ async fn schema_requests_still_require_native_strict_output() {
         assert_eq!(format["strict"], true);
         assert!(format["schema"].is_object());
         assert_eq!(row.request_timeout_seconds, Some(180));
+    }
+}
+
+fn assert_observed(expected: &Value, actual: &Value, case: &str) {
+    if let Some(fields) = expected.as_object() {
+        for (key, value) in fields {
+            let actual = actual
+                .get(key)
+                .unwrap_or_else(|| panic!("{case}: missing {key}"));
+            assert_observed(value, actual, &format!("{case}.{key}"));
+        }
+    } else {
+        assert_eq!(actual, expected, "{case}");
+    }
+}
+
+#[test]
+fn changed_result_evidence_is_incomplete_not_a_model_output_failure() {
+    for protocol in [Protocol::ChatCompletions, Protocol::Responses] {
+        let directory = tempfile::tempdir().unwrap();
+        let case = Case {
+            id: "continuous.changed_evidence".into(),
+            check: CheckId::Continuous,
+            variant: "normal".into(),
+            expected: Status::Incomplete,
+            observed: None,
+        };
+        let mut check = execute_agent(&case, protocol, directory.path());
+        atomic_json(
+            &directory.path().join("observations/continuous.json"),
+            &check,
+        )
+        .unwrap();
+        let index = judgment::index_evidence(directory.path()).unwrap();
+        atomic_json(
+            &directory
+                .path()
+                .join("agent/continuous-1/workspace/result.json"),
+            &json!({"records":[]}),
+        )
+        .unwrap();
+        let spec = builtin_specs()
+            .into_iter()
+            .find(|spec| spec.id == case.check)
+            .unwrap();
+        let claims = assessment::builtin_claims(&spec, &check, directory.path(), &index).unwrap();
+        judgment::seal(&spec, &mut check, claims, directory.path(), &index).unwrap();
+        assert_eq!(check.status, Status::Incomplete);
+        let requirements = &check.assessment.as_ref().unwrap().requirements;
+        let changed = requirements.iter().find(|r| r.id == "run_1").unwrap();
+        assert_eq!(changed.outcome, Outcome::Unknown);
+        assert_eq!(changed.origin, Some(FailureOrigin::Detector));
+        assert_eq!(changed.observed["failure_stage"], "evidence");
+        assert_eq!(
+            requirements
+                .iter()
+                .find(|r| r.id == "run_2")
+                .unwrap()
+                .outcome,
+            Outcome::Satisfied
+        );
     }
 }
 
@@ -761,6 +884,13 @@ async fn all_registered_requirements_match_independent_acceptance_labels_on_both
             }
             if let Some(a) = &check.assessment {
                 for r in &a.requirements {
+                    if let Some(expected) = &case.observed {
+                        assert_observed(
+                            expected,
+                            &r.observed,
+                            &format!("{} / {protocol:?} / {}", case.id, r.id),
+                        );
+                    }
                     if r.outcome != Outcome::Unknown {
                         assert!(!r.evidence_ids.is_empty());
                         assert!(r.evidence_ids.iter().all(|id| index.contains_key(id)));

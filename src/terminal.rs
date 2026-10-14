@@ -403,6 +403,22 @@ fn paint(text: &str, tone: &str, color: bool) -> String {
     };
     format!("\x1b[38;2;{};{};{}m{text}\x1b[0m", rgb.0, rgb.1, rgb.2)
 }
+pub fn safe_error_text(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\n'
+            || character == '\t'
+            || (character == '\r' && characters.peek() == Some(&'\n'))
+            || !character.is_control()
+        {
+            output.push(character);
+        } else {
+            output.extend(character.escape_default());
+        }
+    }
+    output
+}
 pub fn safe_text(text: &str) -> String {
     text.chars()
         .map(|c| if c.is_control() { ' ' } else { c })

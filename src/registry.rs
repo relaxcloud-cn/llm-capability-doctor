@@ -139,7 +139,7 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
                 ),
                 CheckId::Performance => (
                     3600,
-                    "当前账号与普通短文本负载的并发表现；不校验正文格式或措辞，不证明通用内容质量或精确容量上限",
+                    "当前账号与普通短文本负载的并发表现；仅连接异常允许整档复核一次，保留首次失败；已验证档位可附稳定性风险作为试用起点，不代表容量极限或长期保证",
                     vec![
                         ("recommendation", "并发建议有正常完成及耗时证据", true),
                         ("batch_completion", "各档请求是否正常结束并返回非空文本", false),
@@ -147,7 +147,12 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
                 ),
                 _ => (
                     240,
-                    "本次指定文件任务的真实执行、来源与结果对应；不代表所有未来任务",
+                    match id {
+                        CheckId::Continuous => "本次服务、模型与固定 OMP 版本组合：使用原生文件工具读取两份各含一条记录的文件并合并结果，独立重复两次；不代表通用任务能力或长期可靠性",
+                        CheckId::Recovery => "本次服务、模型与固定 OMP 版本组合：两记录文件任务中，每次仅注入一次且明确提示重试的临时读取错误，核对随后继续执行与结果，独立重复两次；不代表通用容错能力或长期可靠性",
+                        CheckId::Multiturn => "本次服务、模型与固定 OMP 版本组合：先合并两条记录，再在同一会话中按明确目标仅更新 R-01.version，保留 R-02 及其他字段，独立重复两次；不代表通用记忆能力或长期可靠性",
+                        _ => "本次指定文件任务的真实执行、来源与结果对应；不代表所有未来任务",
+                    },
                     vec![
                         ("run_1", "第一次任务满足规定要求", true),
                         ("run_2", "第二次任务满足规定要求", true),
@@ -157,7 +162,13 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
             CheckSpec {
                 id,
                 name: id.name().into(),
-                version: match id {CheckId::Tools => "4", CheckId::Performance => "2", _ => "1"}.into(),
+                version: match id {
+                    CheckId::Tools => "4",
+                    CheckId::Performance => "3",
+                    CheckId::Continuous | CheckId::Recovery | CheckId::Multiturn => "2",
+                    _ => "1",
+                }
+                .into(),
                 scope: scope.into(),
                 group: if id.is_agent() {
                     CheckGroup::Agent
@@ -179,11 +190,11 @@ pub fn builtin_specs() -> Vec<CheckSpec> {
                     .collect(),
                 pass_summary: match id {
                     CheckId::Response => Some("普通响应、流式响应和消息回传均已核验".into()),
-                    CheckId::Continuous => Some("两次连续工具执行的结果与过程均正确".into()),
+                    CheckId::Continuous => Some("两次两记录任务的原生工具读写与合并结果均正确".into()),
                     CheckId::Recovery => {
-                        Some("两次故障均实际送达，之后继续执行并得到正确结果".into())
+                        Some("两次明确提示的单次临时读取错误均已送达，随后继续执行并得到正确结果".into())
                     }
-                    CheckId::Multiturn => Some("两次多轮任务均完成首轮结果、次轮新增与修改".into()),
+                    CheckId::Multiturn => Some("两次任务均完成首轮合并、同会话单字段更新与无关内容保留".into()),
                     _ => None,
                 },
             }

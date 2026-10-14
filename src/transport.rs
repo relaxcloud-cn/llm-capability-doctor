@@ -143,6 +143,13 @@ impl Transport {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+    pub(crate) async fn wait_before_recheck(&self, delay: Duration) -> bool {
+        tokio::select! {
+            biased;
+            _ = self.cancel.cancelled() => false,
+            _ = tokio::time::sleep(delay) => true,
+        }
+    }
     pub async fn send(
         &self,
         body: Value,
@@ -197,8 +204,16 @@ impl Transport {
                 .post(self.config.endpoint.clone())
                 .bearer_auth(self.config.api_key())
                 .json(&body);
+            let mut network_error = None;
+            let mut preserve_network_error = |error: reqwest::Error| {
+                network_error = Some(
+                    self.config
+                        .redact(&format!("{:#}", anyhow::Error::new(error))),
+                );
+                RequestFailure::Network
+            };
             let operation = async {
-                let http = request.send().await.map_err(|_| RequestFailure::Network)?;
+                let http = request.send().await.map_err(&mut preserve_network_error)?;
                 let status = http.status().as_u16();
                 let mut headers = BTreeMap::new();
                 for name in [
@@ -215,7 +230,7 @@ impl Transport {
                 let mut bytes = Vec::new();
                 let mut chunks = http.bytes_stream();
                 while let Some(chunk) = chunks.next().await {
-                    let chunk = chunk.map_err(|_| RequestFailure::Network)?;
+                    let chunk = chunk.map_err(&mut preserve_network_error)?;
                     if bytes.len() + chunk.len() > MAX_RESPONSE_BYTES {
                         return Err(RequestFailure::InvalidResponse(
                             "响应超过检测器的安全大小限制".into(),
@@ -240,7 +255,7 @@ impl Transport {
             };
             let retry = match outcome {
                 Err(error) => {
-                    attempt.error = Some(error.title());
+                    attempt.error = Some(network_error.unwrap_or_else(|| error.title()));
                     let retry = matches!(error, RequestFailure::Network);
                     failure = Some(error);
                     retry

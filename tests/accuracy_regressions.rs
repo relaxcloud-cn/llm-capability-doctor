@@ -35,7 +35,7 @@ fn conflicting_stream_identifiers_are_not_silently_combined() {
 
 #[test]
 fn unrelated_successful_file_operations_do_not_prove_task_execution() {
-    let snapshot = SourceSnapshot::generate("accuracy-regression");
+    let snapshot = SourceSnapshot::for_omp("accuracy-regression");
     let output = json!(snapshot.expected(None).unwrap());
     let events = [
         ToolEvent {
@@ -86,7 +86,7 @@ fn native_edit_uses_resolved_result_path_without_requiring_write_arguments() {
 
 #[test]
 fn batch_reads_prove_each_source_from_delivered_payload_not_requested_paths() {
-    let snapshot = SourceSnapshot::generate("batch-read-regression");
+    let snapshot = SourceSnapshot::for_omp("batch-read-regression");
     let targets: Vec<_> = snapshot
         .files
         .keys()
@@ -136,16 +136,16 @@ fn batch_reads_prove_each_source_from_delivered_payload_not_requested_paths() {
     assert!(validate(read.clone()).passed);
     read.result["content"][0]["text"] = json!("requested paths only");
     assert!(!validate(read.clone()).passed);
-    read.result["content"][0]["text"] = json!(sections[..2].join("\n\n"));
+    read.result["content"][0]["text"] = json!(sections[0]);
     assert!(!validate(read.clone()).passed);
     read.result["content"][0]["text"] = json!(sections.join("\n\n"));
-    read.result["details"]["displayReadTargets"] = json!([targets[0], targets[1]]);
+    read.result["details"]["displayReadTargets"] = json!([targets[0]]);
     assert!(!validate(read).passed);
 }
 
 #[test]
 fn invalid_record_shape_is_a_content_failure_not_only_missing_process() {
-    let snapshot = SourceSnapshot::generate("accuracy-regression");
+    let snapshot = SourceSnapshot::for_omp("accuracy-regression");
     let validation = validate_task(
         &snapshot,
         None,

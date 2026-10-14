@@ -67,7 +67,7 @@ fn aggregate(kind: CheckId, tasks: Vec<TaskResult>, repetitions: u8) -> CheckRes
         match kind {
             CheckId::Continuous => "连续执行多个工具，任务结果正确",
             CheckId::Recovery => "工具出错后恢复，任务结果正确",
-            _ => "新增和修改要求均已落实",
+            _ => "指定字段修改生效，其余内容保持不变",
         }
         .into()
     } else {

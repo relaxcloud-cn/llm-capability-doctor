@@ -185,6 +185,121 @@ fn missing_old_producer_version_is_not_replaced_with_the_renderer_version() {
 }
 
 #[test]
+fn stored_omp_scopes_and_judgments_are_rendered_without_reassessment() {
+    use agent_check::judgment::{Assessment, Outcome, RequirementResult, Validity};
+
+    for (check_version, rule_version) in [("agentcheck/10", "1"), ("agentcheck/11", "2")] {
+        for id in [CheckId::Continuous, CheckId::Recovery, CheckId::Multiturn] {
+            let mut run = run();
+            run.check_version = check_version.into();
+            run.plan.retain(|spec| spec.id == id);
+            run.plan[0].version = rule_version.into();
+            run.plan[0].scope = "<stored task scope>".into();
+            run.plan[0].pass_summary = Some("not the stored conclusion".into());
+            run.checks.retain(|check| check.id == id);
+            let check = &mut run.checks[0];
+            check.title = "<stored conclusion>".into();
+            check.assessment = Some(Assessment {
+                validity: Validity::Verified,
+                status: Status::Passed,
+                conditions: vec![],
+                requirements: vec![RequirementResult {
+                    id: "run_1".into(),
+                    title: "saved requirement".into(),
+                    required: true,
+                    subject: None,
+                    validity: Validity::Verified,
+                    outcome: Outcome::Satisfied,
+                    reason: "<stored reason>".into(),
+                    expected: json!(true),
+                    observed: json!(true),
+                    evidence_ids: vec![],
+                    origin: None,
+                }],
+            });
+            let before = serde_json::to_value(&run).unwrap();
+            let page = report::render(&run, &[]).unwrap();
+            let row = page
+                .split_once("<tbody id=\"check-rows\">")
+                .unwrap()
+                .1
+                .split_once("</tbody>")
+                .unwrap()
+                .0;
+            assert!(row.contains("&lt;stored conclusion&gt;"));
+            let scope = page
+                .split_once("<p class=\"proof-scope\">")
+                .unwrap()
+                .1
+                .split_once("</p>")
+                .unwrap()
+                .0;
+            assert!(scope.contains(rule_version));
+            assert!(scope.contains("&lt;stored task scope&gt;"));
+            assert!(page.contains("&lt;stored reason&gt;"));
+            assert!(!page.contains("not the stored conclusion"));
+            assert_eq!(before, serde_json::to_value(&run).unwrap());
+        }
+    }
+}
+
+#[test]
+fn omp_stage_evidence_is_optional_prose_and_does_not_change_saved_status() {
+    use agent_check::judgment::{Assessment, Outcome, RequirementResult, Validity};
+
+    let mut run = run();
+    run.verdict = Verdict::Failed;
+    run.checks.retain(|check| check.id == CheckId::Recovery);
+    let check = &mut run.checks[0];
+    check.status = Status::Failed;
+    check.assessment = Some(Assessment {
+        validity: Validity::Verified,
+        status: Status::Failed,
+        conditions: vec![],
+        requirements: vec![RequirementResult {
+            id: "run_1".into(),
+            title: "saved requirement".into(),
+            required: true,
+            subject: None,
+            validity: Validity::Verified,
+            outcome: Outcome::Unsatisfied,
+            reason: "<stored stage reason>".into(),
+            expected: json!(true),
+            observed: json!({
+                "execution": {
+                    "normal_end": true,
+                    "fault_delivered": true,
+                    "recovery_observed": true
+                },
+                "failure_stage": "result_content"
+            }),
+            evidence_ids: vec![],
+            origin: Some(FailureOrigin::ModelOutput),
+        }],
+    });
+    let before = serde_json::to_value(&run).unwrap();
+    let recorded = report::render(&run, &[]).unwrap();
+    assert_eq!(before, serde_json::to_value(&run).unwrap());
+    assert!(recorded.contains("&lt;stored stage reason&gt;"));
+    assert!(recorded.contains("data-status=\"failed\""));
+    for key in [
+        "execution",
+        "normal_end",
+        "fault_delivered",
+        "recovery_observed",
+        "failure_stage",
+        "result_content",
+    ] {
+        assert!(!recorded.contains(key));
+    }
+    run.checks[0].assessment.as_mut().unwrap().requirements[0].observed = json!(null);
+    let unrecorded = report::render(&run, &[]).unwrap();
+    assert_ne!(recorded, unrecorded);
+    assert!(unrecorded.contains("&lt;stored stage reason&gt;"));
+    assert!(unrecorded.contains("data-status=\"failed\""));
+}
+
+#[test]
 fn no_results_or_missing_measurements_do_not_become_successes_or_zeroes() {
     let mut run = run();
     run.checks.clear();
@@ -228,4 +343,150 @@ fn unsafe_evidence_links_are_not_rendered_as_navigable_paths() {
     run.evidence.get_mut("unsafe").unwrap().path = "http/文件 #1?.json".into();
     let page = report::render(&run, &[]).unwrap();
     assert!(page.contains("href=\"./http/%E6%96%87%E4%BB%B6%20%231%3F.json\""));
+}
+
+#[test]
+fn concurrency_recheck_history_preserves_waves_and_saved_conditional_pass() {
+    use agent_check::judgment::{Assessment, Outcome, RequirementResult, Validity};
+
+    for recovered in [true, false] {
+        let mut run = run();
+        let check = run
+            .checks
+            .iter_mut()
+            .find(|c| c.id == CheckId::Performance)
+            .unwrap();
+        check.title = "<saved conditional recommendation>".into();
+        check.elapsed_ms = 19_250;
+        check.assessment = Some(Assessment {
+            validity: Validity::Verified,
+            status: Status::Passed,
+            conditions: vec!["<saved connection risk>".into()],
+            requirements: vec![RequirementResult {
+                id: "recommended_concurrency".into(),
+                title: "saved recommendation".into(),
+                required: true,
+                subject: None,
+                validity: Validity::Verified,
+                outcome: Outcome::Satisfied,
+                reason: "<saved adjudication>".into(),
+                expected: json!(2),
+                observed: json!(2),
+                evidence_ids: vec![],
+                origin: None,
+            }],
+        });
+        for (key, value) in [
+            ("workload_type", json!("short_text")),
+            ("recommended_concurrency", json!(2)),
+            (
+                "recommendation_basis",
+                json!(if recovered {
+                    "capacity_stop"
+                } else {
+                    "verified_trial"
+                }),
+            ),
+            ("estimate_complete", json!(recovered)),
+            (
+                "connection_stability",
+                json!(if recovered { "recovered" } else { "unresolved" }),
+            ),
+            ("connection_errors", json!(if recovered { 1 } else { 2 })),
+            ("network_rechecks", json!(1)),
+            ("request_count", json!(if recovered { 8 } else { 10 })),
+            (
+                "recovered_levels",
+                if recovered { json!([2]) } else { json!([]) },
+            ),
+            ("first_unsuccessful_concurrency", json!(4)),
+        ] {
+            check.facts.insert(key.into(), value);
+        }
+        let success = json!({"concurrency":2,"phase":"expand","successful":2,"mean_elapsed_ms":2300,"longest_elapsed_ms":2400,"tail_metric":"maximum","performance_passed":true,"failure_reason":"passed","elapsed_ms":2400,"started_offset_ms":0,"requests":[{"reason":"passed"},{"reason":"passed"}]});
+        let failed = json!({"concurrency":if recovered {2} else {4},"phase":"expand","successful":if recovered {1} else {3},"mean_elapsed_ms":100,"longest_elapsed_ms":100,"tail_metric":"maximum","performance_passed":false,"failure_reason":"network","elapsed_ms":100,"started_offset_ms":2500,"requests":[{"reason":"network"}]});
+        let mut recheck = if recovered {
+            success.clone()
+        } else {
+            failed.clone()
+        };
+        recheck["phase"] = json!("recheck");
+        recheck["started_offset_ms"] = json!(3600);
+        let stop = json!({"concurrency":4,"phase":"expand","successful":4,"performance_passed":false,"failure_reason":"mean_latency","mean_elapsed_ms":12000,"elapsed_ms":12000,"started_offset_ms":6100});
+        check.facts.insert(
+            "rounds".into(),
+            if recovered {
+                json!([failed, recheck, stop])
+            } else {
+                json!([success, failed, recheck])
+            },
+        );
+        let before = serde_json::to_value(&run).unwrap();
+        let page = report::render(&run, &[]).unwrap();
+        let table = page
+            .split_once("<table class=\"load-table\">")
+            .unwrap()
+            .1
+            .split_once("</table>")
+            .unwrap()
+            .0;
+        assert_eq!(table.matches("data-phase=\"expand\"").count(), 2);
+        assert_eq!(table.matches("data-phase=\"recheck\"").count(), 1);
+        assert_eq!(table.matches("class=\"recommended\"").count(), 1);
+        assert!(table.contains(if recovered {
+            "class=\"recommended\" data-phase=\"recheck\""
+        } else {
+            "class=\"boundary\" data-phase=\"recheck\""
+        }));
+        assert!(page.contains("&lt;saved connection risk&gt;"));
+        assert!(page.contains("&lt;saved adjudication&gt;"));
+        assert!(page.contains("&lt;saved conditional recommendation&gt;"));
+        assert!(page.contains("19.25 秒"));
+        assert!(page.contains("data-fact=\"connection_errors\""));
+        assert!(page.contains("data-fact=\"network_rechecks\""));
+        assert!(page.contains("data-fact=\"request_count\""));
+        assert_eq!(page.matches("data-status=\"passed\"").count(), 8);
+        let rows = page
+            .split_once("<tbody id=\"check-rows\">")
+            .unwrap()
+            .1
+            .split_once("</tbody>")
+            .unwrap()
+            .0;
+        assert!(rows.contains("2.30 秒"));
+        assert!(!rows.contains("0.10 秒"));
+        assert_eq!(before, serde_json::to_value(&run).unwrap());
+    }
+}
+
+#[test]
+fn historical_concurrency_does_not_acquire_recheck_facts_or_new_adjudication() {
+    let mut run = run();
+    run.check_version = "agentcheck/11".into();
+    let check = run
+        .checks
+        .iter_mut()
+        .find(|c| c.id == CheckId::Performance)
+        .unwrap();
+    check.status = Status::Incomplete;
+    check.title = "<saved historical network stop>".into();
+    check
+        .facts
+        .insert("recommended_concurrency".into(), json!(null));
+    check.facts.insert(
+        "rounds".into(),
+        json!([
+            {"concurrency":2,"successful":2,"performance_passed":true,"failure_reason":"passed"},
+            {"concurrency":4,"successful":3,"performance_passed":false,"failure_reason":"network"}
+        ]),
+    );
+    let before = serde_json::to_value(&run).unwrap();
+    let page = report::render(&run, &[]).unwrap();
+    assert!(page.contains("&lt;saved historical network stop&gt;"));
+    assert_eq!(page.matches("data-status=\"incomplete\"").count(), 1);
+    assert!(!page.contains("data-phase="));
+    assert!(!page.contains("data-fact=\"network_rechecks\""));
+    assert!(!page.contains("data-fact=\"connection_errors\""));
+    assert!(!page.contains("data-fact=\"recovered_levels\""));
+    assert_eq!(before, serde_json::to_value(&run).unwrap());
 }
