@@ -603,6 +603,7 @@ fn execute_agent(case: &Case, protocol: Protocol, dir: &Path) -> CheckResult {
             id: http_id.clone(),
             endpoint: format!("http://fixture/v1{}", protocol.suffix()),
             protocol,
+            insecure: false,
             request,
             stream: false,
             elapsed_ms: 1,

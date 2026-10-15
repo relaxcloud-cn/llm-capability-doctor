@@ -57,6 +57,8 @@ pub struct HttpEvidence {
     pub id: String,
     pub endpoint: String,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub insecure: bool,
     pub request: Value,
     pub stream: bool,
     pub elapsed_ms: u64,
@@ -120,6 +122,7 @@ impl Transport {
     ) -> Result<Self> {
         std::fs::create_dir_all(evidence_dir)?;
         let client = reqwest::Client::builder()
+            .tls_danger_accept_invalid_certs(config.insecure)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .build()?;
@@ -179,6 +182,7 @@ impl Transport {
             id,
             endpoint: self.config.public_target().endpoint,
             protocol: self.config.protocol,
+            insecure: self.config.insecure,
             request: safe_body,
             stream,
             elapsed_ms: 0,

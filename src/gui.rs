@@ -216,7 +216,7 @@ pub async fn launch(
             }
         }
         let mut data = serde_json::to_vec(
-            &json!({"type":"prepare","config":{"base_url":config.endpoint.as_str(),"model":config.model,"api_key":config.api_key(),"protocol":config.protocol},"receipt":receipt}),
+            &json!({"type":"prepare","config":{"base_url":config.endpoint.as_str(),"model":config.model,"api_key":config.api_key(),"protocol":config.protocol,"insecure":config.insecure},"receipt":receipt}),
         )?;
         data.push(b'\n');
         input.write_all(&data).await?;

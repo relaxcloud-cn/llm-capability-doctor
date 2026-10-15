@@ -32,6 +32,7 @@ pub struct ModelConfig {
     pub model: String,
     pub endpoint: Url,
     pub protocol: Protocol,
+    pub insecure: bool,
     api_key: String,
 }
 impl fmt::Debug for ModelConfig {
@@ -40,6 +41,7 @@ impl fmt::Debug for ModelConfig {
             .field("model", &self.model)
             .field("endpoint", &self.public_target().endpoint)
             .field("protocol", &self.protocol)
+            .field("insecure", &self.insecure)
             .field("api_key", &"[REDACTED]")
             .finish()
     }
@@ -49,6 +51,8 @@ pub struct Target {
     pub model: String,
     pub endpoint: String,
     pub protocol: Protocol,
+    #[serde(default)]
+    pub insecure: bool,
 }
 #[derive(Deserialize)]
 struct ConfigFile {
@@ -110,6 +114,7 @@ impl ModelConfig {
             model: model.to_owned(),
             endpoint,
             protocol,
+            insecure: false,
             api_key,
         })
     }
@@ -146,6 +151,7 @@ impl ModelConfig {
             model: self.model.clone(),
             endpoint: endpoint.to_string(),
             protocol: self.protocol,
+            insecure: self.insecure,
         }
     }
     pub fn redact(&self, value: &str) -> String {

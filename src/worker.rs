@@ -22,10 +22,15 @@ pub struct InputConfig {
     pub api_key: String,
     #[serde(default)]
     pub protocol: Option<Protocol>,
+    #[serde(default)]
+    pub insecure: bool,
 }
 impl InputConfig {
     fn resolve(self) -> Result<ModelConfig> {
-        ModelConfig::new(&self.base_url, &self.model, self.api_key, self.protocol)
+        let mut config =
+            ModelConfig::new(&self.base_url, &self.model, self.api_key, self.protocol)?;
+        config.insecure = self.insecure;
+        Ok(config)
     }
 }
 #[derive(Deserialize)]

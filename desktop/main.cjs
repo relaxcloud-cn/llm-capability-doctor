@@ -50,7 +50,9 @@ function configFromInput(input){
  if(typeof base_url!=='string'||base_url.length>4096||typeof model!=='string'||model.length>256||typeof api_key!=='string'||api_key.length>8192)throw new Error('连接信息的格式或长度不正确');
  const protocol=input.protocol===null||input.protocol===undefined||input.protocol==='auto'?null:input.protocol;
  if(protocol!==null&&!['chat-completions','responses'].includes(protocol))throw new Error('接口协议不正确');
- return {base_url,model,api_key,protocol};
+ const insecure=input.insecure??false;
+ if(typeof insecure!=='boolean')throw new Error('证书校验设置必须为布尔值');
+ return {base_url,model,api_key,protocol,insecure};
 }
 async function recordFile(id,name){
  if(typeof id!=='string'||!/^AC-[A-Za-z0-9_-]{1,125}$/.test(id))throw new Error('检测编号不正确');

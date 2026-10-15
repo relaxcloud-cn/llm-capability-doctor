@@ -73,8 +73,17 @@ export MODEL_API_KEY
 | --- | --- |
 | `--json` | 使用 CLI，最终 JSON 写 stdout，进度写 stderr |
 | `--no-open-report` | 不自动打开已生成的 HTML 报告 |
+| `--insecure` | 临时跳过 HTTPS 证书校验（不安全，默认关闭） |
 | `--no-color` | 关闭终端颜色 |
 | `--offline-self-test --gui` | 离线打开桌面界面与本机历史，不调用模型 |
+
+内网自签名证书或内部 CA 不受信任时，优先修复证书链或让系统信任内部 CA。仅临时排查可显式运行：
+
+```sh
+./agent-check --config ./model.json --insecure --no-gui --report-dir ./results
+```
+
+`--insecure` 跳过证书链及服务端名称校验，无法确认服务端身份，存在 API Key 被截获的风险。开关只通过 CLI 显式开启，不会因证书错误自动降级；预检、直接接口检测和 OMP 模型请求使用同一设置，交接 GUI 与同配置重测也保留该设置。开启时警告写入 stderr，不污染 JSON stdout；检测目标和 HTTP 证据记录 `insecure`，导出的 curl 复现脚本同步带上 `--insecure`。移除开关即可恢复校验；GUI 新建检测仍默认校验，不提供跳过校验按钮。
 
 ## 检测内容
 

@@ -97,6 +97,7 @@ fn confirmed_failure_survives_other_unknown_requirements_and_cancellation() {
             model: "test".into(),
             endpoint: "http://localhost/v1".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         },
         vec![a, b],
     );
@@ -220,6 +221,7 @@ fn a_failed_first_request_does_not_claim_unexecuted_streaming_also_failed() {
             id: "http-first".into(),
             endpoint: "http://fixture/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
             request: json!({"model":"fixture","stream":false}),
             stream: false,
             elapsed_ms: 1,

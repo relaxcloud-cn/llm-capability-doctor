@@ -87,6 +87,7 @@ mod tests {
             model: "original model".into(),
             endpoint: "https://a.example/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         });
         run.finished_at = Some(chrono::Utc::now());
         atomic_json(&root.path().join(&run.id).join("result.json"), &run).unwrap();

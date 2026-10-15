@@ -11,6 +11,7 @@ pub mod model;
 pub mod omp;
 pub mod preflight;
 pub mod registry;
+#[path = "report.rs"]
 pub mod report;
 pub mod runtime;
 pub mod store;

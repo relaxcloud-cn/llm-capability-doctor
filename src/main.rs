@@ -20,6 +20,8 @@ struct Cli {
     model: Option<String>,
     #[arg(long, value_enum)]
     protocol: Option<Protocol>,
+    #[arg(long, help = "跳过 HTTPS 证书校验（不安全，仅用于临时排查）")]
+    insecure: bool,
     #[arg(long, hide = true)]
     api_key: Option<String>,
     #[arg(long, conflicts_with = "gui")]
@@ -79,7 +81,7 @@ fn cancellation() -> CancellationToken {
     cancel
 }
 fn configuration(cli: &Cli) -> Result<ModelConfig> {
-    if let Some(path) = &cli.config {
+    let mut config = if let Some(path) = &cli.config {
         ModelConfig::load_with_protocol(path, cli.protocol)
     } else {
         ModelConfig::new(
@@ -91,7 +93,9 @@ fn configuration(cli: &Cli) -> Result<ModelConfig> {
                 .context("请设置 MODEL_API_KEY 或通过本机配置提供密钥")?,
             cli.protocol,
         )
-    }
+    }?;
+    config.insecure = cli.insecure;
+    Ok(config)
 }
 async fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -162,6 +166,14 @@ async fn run() -> Result<()> {
             return Err(error);
         }
     };
+    if config.insecure {
+        agent_check::terminal::startup(
+            "警告：已跳过 HTTPS 证书校验，无法确认服务端身份，API Key 可能被截获；仅用于临时排查",
+            "!",
+            "yellow",
+            cli.no_color,
+        );
+    }
     let cancel = cancellation();
     if cli.preflight_only {
         let receipt = agent_check::preflight::check(&config, &root, cancel).await?;

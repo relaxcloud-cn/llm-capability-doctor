@@ -10,6 +10,7 @@ fn run() -> RunResult {
         model: "customer-model".into(),
         endpoint: "https://example.org/v1/chat/completions".into(),
         protocol: Protocol::ChatCompletions,
+        insecure: false,
     });
     run.id = "AC-fixture".into();
     run.elapsed_ms = 275_028;

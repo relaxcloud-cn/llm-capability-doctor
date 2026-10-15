@@ -397,7 +397,7 @@ mod tests {
     };
     #[test]
     fn capacity_errors_require_actual_counting_not_a_hint_or_network_error() {
-        let mut outcome=RequestOutcome{evidence:HttpEvidence{id:"x".into(),endpoint:"x".into(),protocol:Protocol::ChatCompletions,request:json!({}),stream:false,elapsed_ms:1,attempts:vec![HttpAttempt{number:1,elapsed_ms:1,http_status:Some(400),headers:BTreeMap::new(),response_body:json!({"error":{"code":"context_length_exceeded","maximum_context_length":65536}}).to_string(),error:None}],parse_error:None,failure:None,request_timeout_seconds:None},response:None,failure:Some(RequestFailure::Http(400))};
+        let mut outcome=RequestOutcome{evidence:HttpEvidence{id:"x".into(),endpoint:"x".into(),protocol:Protocol::ChatCompletions,insecure:false,request:json!({}),stream:false,elapsed_ms:1,attempts:vec![HttpAttempt{number:1,elapsed_ms:1,http_status:Some(400),headers:BTreeMap::new(),response_body:json!({"error":{"code":"context_length_exceeded","maximum_context_length":65536}}).to_string(),error:None}],parse_error:None,failure:None,request_timeout_seconds:None},response:None,failure:Some(RequestFailure::Http(400))};
         assert_eq!(rejected_total(&outcome), None);
         assert_eq!(declared_context_hint(&outcome), Some(65536));
         outcome.evidence.attempts[0].response_body =

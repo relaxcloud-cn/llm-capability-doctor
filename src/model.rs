@@ -378,6 +378,7 @@ mod tests {
             model: "m".into(),
             endpoint: "http://localhost/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         });
         run.schema_version = 1;
         run.check_version = "agentcheck/5".into();

@@ -122,6 +122,7 @@ impl Experiment {
                 id: id.clone(),
                 endpoint: format!("http://fixture/v1{}", self.protocol.suffix()),
                 protocol: self.protocol,
+                insecure: false,
                 request,
                 stream: false,
                 elapsed_ms: duration,

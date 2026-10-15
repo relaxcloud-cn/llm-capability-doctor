@@ -646,6 +646,7 @@ mod tests {
             model: "m".into(),
             endpoint: "https://example.org/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         });
         state.apply(&envelope(RunEvent::Started { run }, 0));
         state

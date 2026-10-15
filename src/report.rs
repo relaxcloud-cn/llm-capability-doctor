@@ -9,6 +9,7 @@ use std::{
 };
 use zip::{ZipWriter, write::SimpleFileOptions};
 
+#[path = "report/view.rs"]
 mod view;
 
 fn shell_quote(value: &str) -> String {
@@ -63,7 +64,8 @@ fn build_archive(directory: &Path, run: &mut RunResult, finalize: bool) -> Resul
         if let Ok(evidence) = serde_json::from_slice::<HttpEvidence>(&bytes) {
             let parent = format!("requests/{}", evidence.id);
             let curl = format!(
-                "curl --request POST {} \\\n  --header 'Content-Type: application/json' \\\n  --header \"Authorization: Bearer ${{MODEL_API_KEY}}\" \\\n  --data-raw {}\n",
+                "curl {}--request POST {} \\\n  --header 'Content-Type: application/json' \\\n  --header \"Authorization: Bearer ${{MODEL_API_KEY}}\" \\\n  --data-raw {}\n",
+                if evidence.insecure { "--insecure " } else { "" },
                 shell_quote(&evidence.endpoint),
                 shell_quote(&evidence.request.to_string())
             );
@@ -139,6 +141,7 @@ mod tests {
             model: "<script>alert(1)</script>".into(),
             endpoint: "https://example.org/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         });
         run.checks[0].status = Status::Passed;
         run.checks[0].title = "普通响应、流式响应均正常".into();
@@ -159,6 +162,7 @@ mod tests {
             model: "test".into(),
             endpoint: "https://example.org/v1/chat/completions".into(),
             protocol: Protocol::ChatCompletions,
+            insecure: false,
         });
         let expected = crate::dataset::SourceSnapshot::generate(crate::model::CHECK_VERSION)
             .expected(None)
